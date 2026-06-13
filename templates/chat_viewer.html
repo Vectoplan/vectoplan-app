@@ -1,0 +1,250 @@
+<!-- services/app/templates/chat_viewer.html -->
+<!doctype html>
+<html lang="de" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <title>VectoAI - Alpha</title>
+
+  <!-- DEV/robust: Browser-Caches für dieses Dokument best-effort reduzieren -->
+  <meta http-equiv="Cache-Control" content="no-store, max-age=0, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+
+  <!-- Theme vorab aus localStorage setzen, um FOUC zu vermeiden -->
+  <script>
+    (function () {
+      try {
+        const saved = localStorage.getItem("theme");
+        if (saved === "dark" || saved === "light") {
+          document.documentElement.setAttribute("data-theme", saved);
+        }
+      } catch (e) {}
+    })();
+  </script>
+
+  <!-- Stabilere vh auf Mobile (für CSS: calc(var(--vh, 1vh) * 100)) -->
+  <script>
+    (function () {
+      try {
+        const setVh = () => {
+          const vh = (window.innerHeight || 0) * 0.01;
+          document.documentElement.style.setProperty("--vh", vh + "px");
+        };
+        setVh();
+        window.addEventListener("resize", setVh, { passive: true });
+        window.addEventListener("orientationchange", setVh, { passive: true });
+      } catch (e) {}
+    })();
+  </script>
+
+  <!-- Styles (per-chat cache-bust, best-effort) -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}?v={{ chat_id }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/cards.css') }}?v={{ chat_id }}">
+
+  <script>
+    (function () {
+      try {
+        window.APP_CONFIG = {
+          baseUrl: "{{ request.host_url.rstrip('/') }}",
+          chatPath: "/v1/chat",
+          streamPath: "/v1/chat/stream",
+          chatId: "{{ chat_id }}",
+
+          // 3D + Versionen
+          viewerJsonPath: "/ui/chat/{{ chat_id }}/viewer.json",
+          versionsPath: "/ui/chat/{{ chat_id }}/versions.json",
+
+          // Templates + Messages
+          templatesPath: "/v1/templates",
+          postMessagePath: "/v1/chats/{{ chat_id }}/messages",
+
+          // State
+          stateGetPath: "/v1/chats/{{ chat_id }}/viewer/selection",
+          statePutPath: "/v1/chats/{{ chat_id }}/viewer/selection",
+
+          // 2D (CAD)
+          plan2dJsonPath: "/ui/chat/{{ chat_id }}/plan2d.json",
+          cad2dPagePath: "/ui/chat/{{ chat_id }}/cad2d",
+          cadEmbedJsonPath: "/ui/chat/{{ chat_id }}/cad-embed.json",
+          cadEmbedBase: "http://localhost:8050",
+
+          // Map (OpenLayers)
+          mapPagePath: "/ui/chat/{{ chat_id }}/map",
+          mapJsonPath: "/ui/chat/{{ chat_id }}/map.json",
+
+          // Admin + Leistungsverzeichnis (Viewer-Placeholders)
+          adminPagePath: "/ui/chat/{{ chat_id }}/admin",
+          lvPagePath: "/ui/chat/{{ chat_id }}/lv",
+
+          // Debug
+          debug2dFile: "{{ request.args.get('debug2d','') }}"
+        };
+      } catch (e) {}
+
+      // Optional: externer Initial-Viewer, falls vorhanden
+      try { window.INIT_VIEWER_URL = ""; } catch (e) {}
+    })();
+  </script>
+</head>
+
+<body>
+  <noscript>JavaScript ist erforderlich.</noscript>
+
+  <main class="app-wrap"
+        role="main"
+        data-chat-id="{{ chat_id }}"
+        data-chat-collapsed="false"
+        data-chat-drawer="closed">
+
+    <!-- Pre-Init: Chat-Zustand möglichst früh setzen (robust via try/catch) -->
+    <script>
+      (function () {
+        try {
+          const wrap = document.currentScript && document.currentScript.parentElement;
+          if (!wrap) return;
+
+          // Collapsed State (Desktop/Tablet): localStorage "chat_collapsed" = "1"/"true"
+          const raw = (function(){ try { return localStorage.getItem("chat_collapsed"); } catch { return null; } })();
+          const isCollapsed = (raw === "1" || raw === "true");
+          wrap.dataset.chatCollapsed = isCollapsed ? "true" : "false";
+
+          // Drawer Default: explizit geschlossen (öffnet layout.js später bei Bedarf)
+          if (!wrap.dataset.chatDrawer) wrap.dataset.chatDrawer = "closed";
+        } catch (e) {}
+      })();
+    </script>
+
+    <!-- Mobile Drawer Backdrop (per CSS/JS bei geöffnetem Drawer sichtbar) -->
+    <div id="chatBackdrop" class="chat-backdrop" aria-hidden="true"></div>
+
+    <!-- Chat links / als Drawer auf Mobile -->
+    <section class="chat-wrap" id="chat-panel" aria-label="Chat">
+      <div class="chat-top">
+        <!-- Header: Close-Button v. a. für Mobile Drawer -->
+        <header class="chat-header" aria-label="Chat Steuerung">
+          <div class="chat-title" aria-label="Chat Titel">
+            <strong>VectoAI - Gebäudegenerierung & Datenanalyse</strong>
+          </div>
+          <div class="chat-header-actions" aria-label="Chat Aktionen">
+            <button type="button"
+                    id="chatCloseBtn"
+                    class="btn chat-close"
+                    title="Chat schließen"
+                    aria-label="Chat schließen">
+              ✕
+            </button>
+          </div>
+        </header>
+
+        <div id="systemAlert" class="alert hidden" role="status" aria-live="polite"></div>
+      </div>
+
+      <div id="msgs" class="msgs" aria-live="polite" aria-label="Nachrichtenliste"></div>
+
+      <div id="preview" class="preview" aria-label="Upload Vorschau">
+        <div id="uploadProgress" class="progress hidden" aria-hidden="true"><div></div></div>
+      </div>
+
+      <!-- Composer -->
+      <form id="composer" class="composer" autocomplete="off" aria-label="Nachricht verfassen">
+        <div class="bar">
+          <button type="button"
+                  id="attachBtn"
+                  class="icon"
+                  title="Datei anhängen"
+                  aria-label="Datei anhängen">📎</button>
+
+          <textarea id="message"
+                    placeholder="Nachricht eingeben…"
+                    aria-label="Nachricht"
+                    autocomplete="off"
+                    autocapitalize="sentences"
+                    spellcheck="true"></textarea>
+
+          <button id="sendBtn"
+                  type="submit"
+                  class="send"
+                  title="Senden"
+                  aria-label="Senden">➤</button>
+        </div>
+
+        <div class="hint">Vectoplan kann Fehler machen. Überprüfe wichtige Informationen.</div>
+
+        <input id="fileInput" type="file" multiple class="hidden"
+               accept="image/*,video/*,.pdf,.csv,.txt,.ifc,.stl,.obj,.gltf,.glb,.dxf">
+      </form>
+    </section>
+
+    <!-- Viewer rechts -->
+    <aside class="viewer-panel" id="viewer-panel" aria-label="Viewer">
+      <div class="viewer-toolbar">
+        <div class="toolbar-left">
+          <!-- Globaler Chat Toggle (Desktop: einklappen/ausklappen, Mobile: Drawer öffnen/schließen) -->
+          <button id="chatToggleBtn"
+                  class="btn"
+                  type="button"
+                  title="Chat ein-/ausklappen"
+                  aria-controls="chat-panel"
+                  aria-expanded="true">
+            💬 Chat
+          </button>
+
+          <div role="group" aria-label="Ansicht" class="mode-group">
+            <button id="modeMapBtn" class="btn" aria-pressed="false" title="Karte">🗺️ Map</button>
+            <button id="mode3dBtn" class="btn" aria-pressed="false" title="3D-Ansicht">🧊 3D</button>
+            <button id="mode2dBtn" class="btn" aria-pressed="true" title="2D-Ansicht">📐 2D</button>
+
+            <button id="modeLvBtn" class="btn" aria-pressed="false" title="Leistungsverzeichnis">📄 LV</button>
+            <button id="modeAdminBtn" class="btn" aria-pressed="false" title="Admin">🔧 Admin</button>
+          </div>
+
+          <!-- Versionen Toggle (Dropdown) -->
+          <button id="versionsToggleBtn"
+                  class="btn"
+                  type="button"
+                  title="Versionen anzeigen"
+                  aria-controls="versionsDropdown"
+                  aria-expanded="false">
+            📚 Versionen
+          </button>
+        </div>
+
+        <div class="toolbar-right">
+          <button id="themeToggleBtn" class="btn" type="button" aria-pressed="false" title="Theme umschalten">🌗 Theme</button>
+          <a id="viewerOpenRawBtn" class="btn btn-link" href="#" target="_blank" rel="noopener"
+             title="Original im neuen Tab öffnen" aria-label="Original öffnen">🔗 Öffnen</a>
+        </div>
+      </div>
+
+      <!-- Dropdown-Container für Versionen -->
+      <section id="versionsDropdown"
+               class="versions-dropdown hidden"
+               aria-label="Versionen"
+               aria-hidden="true">
+        <header class="versions-dd-head">
+          <div class="vers-meta">
+            <strong>Versionen</strong> · <span id="versCount">0</span>
+          </div>
+          <div class="versions-dd-actions">
+            <button id="versRefreshBtn" class="btn" title="Liste aktualisieren" aria-label="Versionen aktualisieren">⟳</button>
+          </div>
+        </header>
+        <ul id="versionsList" class="versions-list"></ul>
+      </section>
+
+      <iframe id="viewer-frame" class="viewer-iframe"
+              title="Viewer"
+              referrerpolicy="no-referrer"
+              allow="fullscreen"
+              loading="lazy"></iframe>
+
+      <div class="overlay" aria-hidden="true"></div>
+    </aside>
+  </main>
+
+  <script type="module" src="{{ url_for('static', filename='js/chat/main.js') }}?v=15"></script>
+</body>
+</html>

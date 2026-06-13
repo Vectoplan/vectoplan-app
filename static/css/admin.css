@@ -1,0 +1,293 @@
+/* /services/app/static/css/admin.css */
+
+/* ───────────────────────── Theme Variables ─────────────────────────
+   Default = LIGHT. Umschalten via <html data-theme="dark|light">.
+   Admin folgt dem gleichen Pattern wie chat.css (theme aus localStorage).
+------------------------------------------------------------------- */
+
+/* Default (light) */
+:root{
+  /* Viewport height fallback (JS setzt --vh; CSS nutzt svh/dvh wenn verfügbar) */
+  --vh: 1vh;
+  --app-h: calc(var(--vh, 1vh) * 100);
+
+  /* Colors */
+  --bg:#f6f7fb;
+  --panel:#ffffff;
+  --text:#0b0f1e;
+  --muted:#5b647a;
+  --border:#e1e6ef;
+  --accent:#2b59ff;
+
+  /* Buttons */
+  --btn-bg:#ffffff;
+  --btn-border:#d0d7e2;
+  --btn-hover:#f3f6fd;
+  --btn-active:#eef3ff;
+
+  /* Layout */
+  --radius:12px;
+  --pad:12px;
+
+  /* Tabbar */
+  --tabs-h:44px;
+  --tab-minw:124px; /* für Mobile Scroll */
+  --tab-font:13px/1 system-ui, Segoe UI, Roboto, Arial;
+}
+
+/* Prefer modern viewport units if available (robuster als 100vh) */
+@supports (height: 100svh){
+  :root{ --app-h:100svh; }
+}
+@supports (height: 100dvh){
+  :root{ --app-h:100dvh; }
+}
+
+/* Dark Theme */
+:root[data-theme="dark"]{
+  --bg:#0b0f1e;
+  --panel:#0f1530;
+  --text:#e8ecff;
+  --muted:#9aa3c7;
+  --border:#1f2748;
+  --accent:#4a7aff;
+
+  --btn-bg:#121a36;
+  --btn-border:#1f2748;
+  --btn-hover:#1a2346;
+  --btn-active:#162146;
+}
+
+/* ───────────────────────── Base / Resets ───────────────────────── */
+*{ box-sizing:border-box; }
+
+html,body{
+  height:100%;
+  margin:0;
+  background:var(--bg);
+  color:var(--text);
+  font-family:system-ui, Segoe UI, Roboto, Arial;
+}
+
+/* Admin läuft oft als iframe: overflow auf body aus, Panels scrollen */
+body{ overflow:hidden; }
+
+/* Media defaults */
+img,video{ max-width:100%; height:auto; }
+button, input, textarea{ font:inherit; color:inherit; }
+
+.hidden{ display:none !important; }
+
+/* Prefer consistent focus outlines */
+:focus{ outline:none; }
+:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+}
+
+/* Reduce motion */
+@media (prefers-reduced-motion: reduce){
+  *, *::before, *::after{
+    animation:none !important;
+    transition:none !important;
+    scroll-behavior:auto !important;
+  }
+}
+
+/* ───────────────────────── App Layout ─────────────────────────
+   2 Zeilen:
+   - Tabbar (fixe Höhe)
+   - Panels (Restfläche, scrollt je Panel)
+------------------------------------------------------------------- */
+.admin-root{
+  height:var(--app-h);
+  width:100%;
+  display:grid;
+  grid-template-rows:auto 1fr;
+  min-height:0;
+}
+
+/* ───────────────────────── Tabbar (8 Buttons, keine Abstände) ─────────────────────────
+   Anforderungen:
+   - exakt 8 Tabs von links nach rechts in einer Zeile
+   - keine gaps/margins
+   - mobil: eine Zeile, horizontal scroll (Touch)
+------------------------------------------------------------------- */
+.admin-tabs{
+  height:var(--tabs-h);
+  min-height:var(--tabs-h);
+  background:var(--panel);
+  border-bottom:1px solid var(--border);
+
+  /* Desktop: 8 gleich breite Spalten */
+  display:grid;
+  grid-template-columns:repeat(8, minmax(0, 1fr));
+  gap:0;
+  overflow:hidden; /* verhindert “Grid-Pixel”/Überläufe */
+}
+
+/* Tab Button: keine Abstände, Trennlinien ohne Doppelborder */
+.admin-tab{
+  appearance:none;
+  border:0;
+  margin:0;
+  padding:0 10px;
+  background:var(--btn-bg);
+  color:var(--text);
+  font:var(--tab-font);
+  cursor:pointer;
+  user-select:none;
+  touch-action:manipulation;
+
+  /* Text robustness */
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  min-width:0;
+
+  /* Separator ohne Doppelborder: via pseudo element */
+  position:relative;
+}
+
+/* Separator line (rechts), außer beim letzten Tab */
+.admin-tab::after{
+  content:"";
+  position:absolute;
+  top:0;
+  right:0;
+  width:1px;
+  height:100%;
+  background:var(--btn-border);
+  pointer-events:none;
+}
+.admin-tab:last-child::after{ display:none; }
+
+.admin-tab:hover{ background:var(--btn-hover); }
+
+/* Active/selected tab */
+.admin-tab[aria-selected="true"]{
+  background:var(--btn-active);
+  /* Accent underline */
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* “Pressed” state on keyboard/mouse */
+.admin-tab:active{
+  background:var(--btn-hover);
+}
+
+/* Optional: upgrade selected style with color-mix if available */
+@supports (background: color-mix(in srgb, #000 10%, #fff)){
+  .admin-tab[aria-selected="true"]{
+    background:color-mix(in srgb, var(--accent) 10%, var(--btn-bg));
+    box-shadow:
+      inset 0 -2px 0 var(--accent),
+      inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+}
+
+/* Mobile: bleibt 1 Zeile, wird horizontal scrollbar */
+@media (max-width: 760px){
+  .admin-tabs{
+    display:flex;
+    align-items:stretch;
+    overflow-x:auto;
+    overflow-y:hidden;
+    -webkit-overflow-scrolling:touch;
+
+    /* optional: scroll snap */
+    scroll-snap-type:x proximity;
+
+    /* scrollbar */
+    scrollbar-width:thin;
+    scrollbar-color:var(--border) transparent;
+  }
+
+  .admin-tabs::-webkit-scrollbar{ height:8px; }
+  .admin-tabs::-webkit-scrollbar-thumb{ background:var(--border); border-radius:999px; }
+  .admin-tabs::-webkit-scrollbar-track{ background:transparent; }
+
+  .admin-tab{
+    flex:0 0 auto;
+    min-width:var(--tab-minw);
+    padding:0 12px;
+    scroll-snap-align:start;
+  }
+
+  /* Separator bleibt gleich */
+}
+
+/* Very small devices: etwas kompakter */
+@media (max-width: 420px){
+  :root{ --pad:10px; }
+  .admin-tab{ min-width:112px; }
+}
+
+/* ───────────────────────── Panels ─────────────────────────
+   Restfläche: 100% des verbleibenden Platzes.
+   Panels scrollen intern, nicht body.
+------------------------------------------------------------------- */
+.admin-panels{
+  min-height:0; /* wichtig für Grid + overflow */
+  position:relative;
+  background:var(--bg);
+}
+
+/* Ein Panel füllt den Bereich und scrollt intern */
+.admin-panel{
+  height:100%;
+  width:100%;
+  overflow:auto;
+  -webkit-overflow-scrolling:touch;
+  padding:var(--pad);
+  display:block;
+
+  /* nicer scrollbars */
+  scrollbar-width:thin;
+  scrollbar-color:var(--border) transparent;
+}
+.admin-panel::-webkit-scrollbar{ width:10px; height:10px; }
+.admin-panel::-webkit-scrollbar-thumb{ background:var(--border); border-radius:10px; }
+.admin-panel::-webkit-scrollbar-track{ background:transparent; }
+
+.admin-panel[hidden]{ display:none !important; }
+
+/* Typo defaults inside panel (falls noch kein Content-CSS existiert) */
+.admin-panel h1,
+.admin-panel h2,
+.admin-panel h3{
+  margin:0 0 10px 0;
+  font-weight:700;
+  letter-spacing:.2px;
+}
+.admin-panel p{
+  margin:0 0 10px 0;
+  color:var(--muted);
+  line-height:1.45;
+}
+.admin-panel code{
+  font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size:.95em;
+}
+
+/* Optional: “Card”-Container, falls du später in den Sections UI-Karten nutzen willst */
+.admin-card{
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:12px;
+}
+
+/* Optional: Subtle divider */
+.admin-divider{
+  height:1px;
+  background:var(--border);
+  margin:12px 0;
+}
+
+/* Safe-area (falls Admin fullscreen auf iOS gerendert wird) */
+@supports (padding: env(safe-area-inset-top)){
+  .admin-panel{
+    padding-bottom:calc(var(--pad) + env(safe-area-inset-bottom, 0px));
+  }
+}

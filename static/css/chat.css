@@ -1,0 +1,508 @@
+/* /services/app/static/css/chat.css */
+
+/* ───────────────────────── Theme Variables ─────────────────────────
+   Default = LIGHT. Umschalten nur via <html data-theme="dark"> bzw. "light".
+------------------------------------------------------------------- */
+
+/* Default (light) */
+:root{
+  --bg:#f6f7fb; --panel:#ffffff; --text:#0b0f1e; --muted:#5b647a; --border:#e1e6ef; --accent:#2b59ff;
+
+  --btn-bg:#ffffff; --btn-border:#d0d7e2; --btn-hover:#f3f6fd;
+
+  --link:#2b59ff;
+
+  --chip-bg:#f8faff; --chip-border:#d0d7e2;
+
+  --msg-user-bg:#eaf0ff; --msg-user-border:#d9e4ff;
+  --msg-assistant-bg:#f7f9fc; --msg-assistant-border:#e6ebf5;
+
+  --alert-bg:#fff2f2; --alert-border:#ffd9d9; --alert-text:#7a1f1f;
+
+  --pill-bg:#f1f4fb; --pill-border:#d9e0ef; --pill-text:#5b647a;
+
+  --prog-track:#e6ebf5; --prog-bar:#2b59ff;
+
+  /* Layout */
+  --app-pad:16px;
+  --app-gap:16px;
+  --radius:12px;
+  --radius-sm:10px;
+
+  /* Desktop/Tablet Split */
+  --chat-w:clamp(320px, 35vw, 520px);
+  --panel-min-h:520px;
+
+  /* Mobile Drawer */
+  --drawer-w:min(92vw, 420px);
+  --drawer-z:1000;
+  --backdrop-z:900;
+
+  /* Viewport height fallback (JS setzt --vh; CSS nutzt svh/dvh wenn verfügbar) */
+  --app-h:calc(var(--vh, 1vh) * 100);
+}
+
+/* Prefer modern viewport units if available (robuster als 100vh) */
+@supports (height: 100svh){
+  :root{ --app-h:100svh; }
+}
+@supports (height: 100dvh){
+  :root{ --app-h:100dvh; }
+}
+
+/* Dark Theme */
+:root[data-theme="dark"]{
+  --bg:#0b0f1e; --panel:#0f1530; --text:#e8ecff; --muted:#9aa3c7; --border:#1f2748; --accent:#4a7aff;
+
+  --btn-bg:#121a36; --btn-border:#1f2748; --btn-hover:#1a2346;
+
+  --link:#7aa2ff;
+
+  --chip-bg:#0e1530; --chip-border:#1f2748;
+
+  --msg-user-bg:#162a55; --msg-user-border:#1d3166;
+  --msg-assistant-bg:#111a35; --msg-assistant-border:#1b2855;
+
+  --alert-bg:#111b3f; --alert-border:#2a3561; --alert-text:#cfe0ff;
+
+  --pill-bg:#172147; --pill-border:#2a3561; --pill-text:#a5b1d8;
+
+  --prog-track:#1a2244; --prog-bar:#4a7aff;
+}
+
+/* ───────────────────────── Base / Resets ───────────────────────── */
+*{ box-sizing:border-box; }
+html,body{ height:100%; margin:0; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,Arial; }
+body{ overflow:hidden; }
+html, body, .center, .chat-wrap{ overflow-x:hidden; }
+img,video{ max-width:100%; height:auto; }
+button, input, textarea{ font:inherit; color:inherit; }
+textarea{ -webkit-text-size-adjust:100%; }
+.hidden{ display:none !important; }
+
+/* Prefer consistent focus outlines */
+:focus{ outline:none; }
+:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+}
+
+/* Reduce motion for accessibility */
+@media (prefers-reduced-motion: reduce){
+  *, *::before, *::after{
+    animation:none !important;
+    transition:none !important;
+    scroll-behavior:auto !important;
+  }
+}
+
+/* ───────────────────────── IMPORTANT: Backdrop global out-of-flow ─────────────────────────
+   Der Backdrop ist ein direktes Kind von .app-wrap.
+   Ohne globale Styles wird er am Desktop als Grid-Item platziert und verschiebt Layout.
+   Daher: immer fixed/out-of-flow + default hidden.
+------------------------------------------------------------------- */
+.chat-backdrop{
+  position:fixed;
+  inset:0;
+  background:rgba(0,0,0,.35);
+  z-index:var(--backdrop-z);
+  display:none;
+  pointer-events:none;
+}
+@supports (backdrop-filter: blur(8px)){
+  .chat-backdrop{ backdrop-filter:blur(6px); }
+}
+.app-wrap[data-chat-drawer="open"] .chat-backdrop{
+  display:block;
+  pointer-events:auto;
+}
+
+/* ───────────────────────── App Layout ─────────────────────────
+   Desktop/Tablet: Split (Chat links, Viewer rechts)
+   Mobile: Viewer full + Chat als Drawer (off-canvas)
+------------------------------------------------------------------- */
+
+/* Desktop/Tablet default split */
+.app-wrap{
+  display:grid;
+  grid-template-columns:var(--chat-w) minmax(0, 1fr);
+  gap:var(--app-gap);
+  height:var(--app-h);
+  padding:var(--app-pad);
+  align-items:stretch;
+  min-height:0;
+  position:relative;
+}
+
+/* Robust collapse state (Desktop/Tablet):
+   JS setzt: .app-wrap[data-chat-collapsed="true"] */
+.app-wrap[data-chat-collapsed="true"]{
+  grid-template-columns:1fr;
+  gap:0;
+}
+.app-wrap[data-chat-collapsed="true"] .chat-wrap{
+  display:none;
+}
+
+/* Grid overflow robustness */
+.chat-wrap, .viewer-panel{ min-width:0; }
+
+/* Linke Spalte (Chat) als Grid */
+.chat-wrap{
+  width:auto;
+  max-width:none;
+  height:100%;
+  min-height:0;
+  display:grid;
+  grid-template-rows:auto 1fr auto auto;
+  gap:10px;
+}
+
+/* Container für Chat Header + Alert */
+.chat-top{
+  display:grid;
+  gap:10px;
+}
+
+/* Optionaler Chat-Header (im HTML ergänzt) */
+.chat-header{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  padding:8px 10px;
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+}
+
+/* System Alert */
+.alert, #systemAlert{
+  margin:0;
+  padding:8px 10px;
+  border:1px solid var(--alert-border);
+  border-radius:10px;
+  background:var(--alert-bg);
+  color:var(--alert-text);
+  font:13px/1.3 system-ui,Segoe UI,Roboto,Arial;
+}
+
+/* ───────────────────────── Buttons / Links ───────────────────────── */
+.btn{
+  appearance:none;
+  border:1px solid var(--btn-border);
+  background:var(--btn-bg);
+  color:var(--text);
+  padding:6px 10px;
+  border-radius:10px;
+  font:13px/1 system-ui,Segoe UI,Roboto,Arial;
+  cursor:pointer;
+  touch-action:manipulation;
+}
+.btn:hover{ background:var(--btn-hover); }
+.btn:disabled{ opacity:.6; cursor:not-allowed; }
+
+/* Fallback pressed style */
+.btn[aria-pressed="true"]{
+  background:var(--btn-hover);
+  border-color:var(--accent);
+}
+/* Upgrade pressed style if color-mix exists (try/fallback) */
+@supports (background: color-mix(in srgb, #000 10%, #fff)){
+  .btn[aria-pressed="true"]{
+    background:color-mix(in srgb, var(--accent) 10%, var(--btn-bg));
+    border-color:color-mix(in srgb, var(--accent) 35%, var(--btn-border));
+  }
+}
+
+.btn.btn-link{
+  color:var(--accent);
+  text-decoration:none;
+  border:1px solid var(--btn-border);
+  background:var(--btn-bg);
+}
+.btn.btn-link:hover{ text-decoration:underline; }
+
+a{ color:var(--link); }
+a:hover{ opacity:.9; }
+
+/* ───────────────────────── Messages ───────────────────────── */
+.msgs{
+  height:100%;
+  min-height:0;
+  overflow-y:auto;
+  overflow-x:hidden;
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:12px;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  scrollbar-width:thin;
+  scrollbar-color:var(--border) transparent;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-gutter:stable;
+}
+.msgs::-webkit-scrollbar{ width:8px; }
+.msgs::-webkit-scrollbar-thumb{ background:var(--border); border-radius:8px; }
+.msgs::-webkit-scrollbar-track{ background:transparent; }
+
+.msg{
+  max-width:80%;
+  padding:.6rem .8rem;
+  border-radius:12px;
+  line-height:1.35;
+  word-break:break-word;
+  overflow-wrap:anywhere;
+  position:relative;
+  border:1px solid transparent;
+}
+.msg .meta{ font-size:.75rem; color:var(--muted); margin-bottom:.25rem; }
+.msg .body{ white-space:pre-wrap; }
+
+.msg.user{ align-self:flex-end; background:var(--msg-user-bg); border-color:var(--msg-user-border); }
+.msg.assistant{ align-self:flex-start; background:var(--msg-assistant-bg); border-color:var(--msg-assistant-border); }
+
+/* Thinking (Spinner im Text, animierte Punkte) */
+.msg.assistant.thinking{ opacity:.95; }
+.msg.assistant.thinking .thinking-wrap{ display:inline-flex; align-items:center; gap:6px; }
+.msg.assistant.thinking .dots{ display:inline-block; min-width:1.2em; opacity:.8; }
+
+/* Attachment Chips (in Nachrichten) */
+.msgs .msg .chip{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  background:transparent;
+  border:none;
+  padding:0;
+  border-radius:8px;
+}
+.msgs .msg .chip img,
+.msgs .msg .chip video{
+  display:block;
+  max-width:min(250px, 100%);
+  max-height:250px;
+  width:auto;
+  height:auto;
+  object-fit:contain;
+  border-radius:8px;
+}
+
+/* ───────────────────────── Preview-Zeile (vor Composer) ───────────────────────── */
+.preview{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  max-height:120px;
+  overflow:auto;
+  -webkit-overflow-scrolling:touch;
+}
+.preview.drag{ outline:2px dashed var(--accent); outline-offset:4px; }
+.preview .chip{
+  display:flex; align-items:center; gap:8px;
+  background:var(--chip-bg);
+  border:1px solid var(--chip-border);
+  border-radius:10px;
+  padding:6px 8px;
+}
+.preview .chip img{ width:48px; height:48px; object-fit:cover; border-radius:6px; }
+.preview .chip video{ width:72px; height:48px; object-fit:cover; border-radius:6px; }
+.preview .meta{ display:flex; flex-direction:column; font-size:.8rem; color:var(--muted); }
+.preview .remove{ border:none; background:transparent; color:#c55; font-size:1rem; cursor:pointer; padding:0 4px; }
+
+/* ───────────────────────── Composer ───────────────────────── */
+.composer{
+  display:grid;
+  grid-template-rows:auto auto;
+  gap:6px;
+  padding-bottom:env(safe-area-inset-bottom, 0px);
+}
+.composer .bar{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:8px 10px;
+  background:var(--panel);
+  border:1px solid var(--btn-border);
+  border-radius:14px;
+}
+.composer .icon, .composer .send{
+  width:40px;
+  height:40px;
+  border-radius:10px;
+  border:1px solid var(--btn-border);
+  background:var(--btn-bg);
+  color:var(--text);
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  touch-action:manipulation;
+}
+.composer .icon:hover, .composer .send:hover{ background:var(--btn-hover); }
+.composer textarea{
+  flex:1;
+  border:none;
+  outline:none;
+  background:transparent;
+  color:var(--text);
+  max-height:160px;
+  min-height:28px;
+  resize:none;
+  line-height:1.35;
+}
+.composer.busy{ opacity:.6; pointer-events:none; }
+.composer.busy textarea{ cursor:progress; }
+.hint{ color:var(--muted); font-size:.78rem; text-align:center; }
+
+/* ───────────────────────── Viewer-Panel + Toolbar + Versions Dropdown ───────────────────────── */
+.viewer-panel{
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  overflow:hidden;
+  min-height:0;
+  position:relative;
+  display:grid;
+  grid-template-rows:auto 1fr;
+}
+@media (min-width: 901px){
+  .viewer-panel{ min-height:var(--panel-min-h); }
+}
+
+.viewer-toolbar{
+  display:flex;
+  gap:8px;
+  align-items:center;
+  justify-content:space-between;
+  padding:8px 10px;
+  background:var(--panel);
+  border-bottom:1px solid var(--border);
+  min-height:48px;
+}
+.toolbar-left,.toolbar-right{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.mode-group{ display:flex; gap:6px; margin-right:6px; flex-wrap:wrap; }
+
+.viewer-iframe{
+  width:100%;
+  height:100%;
+  border:0;
+  background:#ffffff;
+}
+
+/* Optional overlay (falls genutzt) */
+.overlay{
+  position:absolute;
+  inset:48px 8px 8px 8px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  pointer-events:none;
+}
+
+/* Versions Dropdown */
+.versions-dropdown{
+  position:absolute;
+  left:10px;
+  top:52px;
+  width:min(520px, calc(100% - 20px));
+  max-height:min(60vh, 420px);
+  overflow:auto;
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  z-index:200;
+  -webkit-overflow-scrolling:touch;
+}
+@supports (backdrop-filter: blur(8px)){
+  .versions-dropdown{ backdrop-filter:blur(10px); }
+}
+.versions-dd-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  padding:10px;
+  border-bottom:1px solid var(--border);
+}
+.versions-dd-actions{ display:flex; gap:8px; align-items:center; }
+.versions-list{ list-style:none; margin:0; padding:0; }
+.versions-list li{
+  display:grid;
+  grid-template-columns:1fr auto;
+  gap:8px;
+  align-items:center;
+  padding:10px;
+  border-top:1px solid var(--border);
+}
+.vers-meta{ font:12px/1.2 system-ui,Segoe UI,Roboto,Arial; color:var(--muted); }
+.pill{
+  font-size:11px;
+  padding:2px 6px;
+  border-radius:999px;
+  border:1px solid var(--pill-border);
+  background:var(--pill-bg);
+  color:var(--pill-text);
+}
+
+/* Upload progress bar */
+.progress{ height:6px; background:var(--prog-track); border-radius:999px; overflow:hidden; }
+.progress>div{ height:100%; width:0%; background:var(--prog-bar); transition:width .2s ease; }
+
+/* ───────────────────────── Mobile / Small devices: Chat Drawer ─────────────────────────
+   Breakpoint: <= 900px
+   - Viewer bleibt im Flow (voll)
+   - Chat wird fixed off-canvas links
+   - JS setzt: .app-wrap[data-chat-drawer="open"]
+------------------------------------------------------------------- */
+@media (max-width: 900px){
+  /* Prevent iOS input zoom */
+  .composer textarea{ font-size:16px; }
+
+  /* App becomes single view container */
+  .app-wrap{
+    display:block;
+    height:var(--app-h);
+    padding:12px;
+  }
+
+  /* Viewer takes full space */
+  .viewer-panel{
+    height:calc(var(--app-h) - 24px);
+    min-height:0;
+  }
+
+  /* Chat as off-canvas drawer */
+  .chat-wrap{
+    position:fixed;
+    top:0;
+    left:0;
+    height:var(--app-h);
+    width:var(--drawer-w);
+    max-width:var(--drawer-w);
+    padding:12px;
+    padding-top:calc(12px + env(safe-area-inset-top, 0px));
+    padding-bottom:calc(12px + env(safe-area-inset-bottom, 0px));
+    background:var(--bg);
+    transform:translateX(-110%);
+    transition:transform .22s ease;
+    z-index:var(--drawer-z);
+    box-shadow:0 12px 30px rgba(0,0,0,.18);
+  }
+
+  /* Drawer open */
+  .app-wrap[data-chat-drawer="open"] .chat-wrap{
+    transform:translateX(0%);
+  }
+}
+
+/* ───────────────────────── Narrow tablet tweaks ───────────────────────── */
+@media (max-width: 1100px) and (min-width: 901px){
+  :root{
+    --app-pad:12px;
+    --app-gap:12px;
+    --chat-w:clamp(300px, 40vw, 460px);
+  }
+}

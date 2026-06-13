@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>2D-Plan</title>
+  <meta name="referrer" content="no-referrer">
+  <style>
+    :root{--bg:#0b0f1e;--panel:#0e1530;--line:#1f2748;--text:#c9d2f0;--muted:#9aa3c7;--acc:#4a7aff}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:13px/1.4 system-ui,Segoe UI,Roboto,Arial}
+    #root{position:relative;height:100%;width:100%;overflow:hidden;background:var(--bg)}
+    #stage{position:absolute;inset:0}
+    .overlay{position:absolute;inset:8px;display:flex;align-items:center;justify-content:center;pointer-events:none}
+    .chip{pointer-events:auto;display:flex;gap:10px;align-items:center;padding:10px 14px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--muted)}
+    .chip b{color:var(--text)}
+    .hidden{display:none}
+  </style>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "@mlightcad/cad-simple-viewer": "/static/local/cad-simple-viewer.js",
+
+      "@mlightcad/common/":            "/static/npm/@mlightcad/common/",
+      "@mlightcad/common":             "/static/npm/@mlightcad/common/index.js",
+      "@mlightcad/geometry-engine/":   "/static/npm/@mlightcad/geometry-engine/",
+      "@mlightcad/geometry-engine":    "/static/npm/@mlightcad/geometry-engine/index.js",
+
+      "@mlightcad/data-model/":        "/static/npm/@mlightcad/data-model/dist/",
+      "@mlightcad/data-model":         "/static/npm/@mlightcad/data-model/dist/index.js",
+
+      "@mlightcad/graphic-interface/": "/static/npm/@mlightcad/graphic-interface/dist/",
+      "@mlightcad/graphic-interface":  "/static/npm/@mlightcad/graphic-interface/dist/index.js",
+
+      "@mlightcad/three-renderer/":    "/static/npm/@mlightcad/three-renderer/dist/",
+      "@mlightcad/three-renderer":     "/static/npm/@mlightcad/three-renderer/dist/index.js",
+
+      "@mlightcad/svg-renderer/":      "/static/npm/@mlightcad/svg-renderer/dist/",
+      "@mlightcad/svg-renderer":       "/static/npm/@mlightcad/svg-renderer/dist/index.js",
+
+      "@mlightcad/mtext-renderer/":    "/static/npm/@mlightcad/mtext-renderer/dist/",
+      "@mlightcad/mtext-renderer":     "/static/npm/@mlightcad/mtext-renderer/dist/index.js",
+
+      "@mlightcad/dxf-json/":          "/static/npm/@mlightcad/dxf-json/dist/",
+      "@mlightcad/dxf-json":           "/static/npm/@mlightcad/dxf-json/dist/index.js",
+
+      "@velipso/polybool":             "/static/npm/@velipso/polybool/dist/index.js",
+
+      "lodash-es/":                    "/static/npm/lodash-es/",
+      "lodash-es":                     "/static/npm/lodash-es/lodash.js",
+
+      "three":                         "/static/npm/three/build/three.module.js",
+      "three/examples/jsm/":           "/static/npm/three/examples/jsm/",
+      "three/build/three.core.js":     "/static/npm/three/build/three.module.js",
+
+      "uid":                           "/static/npm/uid/dist/index.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="root" role="application" aria-label="2D-Plan">
+    <div id="stage" aria-hidden="true"></div>
+    <div id="overlay" class="overlay" aria-live="polite">
+      <div class="chip" id="statusChip"><span>⏳ <b>Lade 2D-Viewer…</b></span></div>
+    </div>
+  </div>
+
+  <script type="module">
+    const qs = (id)=>document.getElementById(id);
+    const stage = qs('stage'), overlay = qs('overlay');
+    const CHAT_ID = "{{ chat_id }}";
+    const PLAN_JSON = "{{ plan2d_url|default(url_for('ui_2dviewer.plan2d_json', chat_id=chat_id), true) }}";
+    const p = new URLSearchParams(location.search);
+
+    function post(m){ try{ window.parent?.postMessage(m,'*'); }catch{} }
+    function setOverlay(html){ const el=document.getElementById('statusChip'); if(el) el.innerHTML=html; }
+    function hideOverlay(){ overlay.classList.add('hidden'); }
+    async function j(u){
+      const r=await fetch(u,{credentials:'same-origin',headers:{'Accept':'application/json'}});
+      if(!r.ok) throw new Error(String(r.status));
+      return r.json();
+    }
+    function toLocalDxfOrNull(u){
+      try{
+        if(!u) return null;
+        const s=String(u).trim();
+        if(!s.startsWith("/") || s.startsWith("//") || /^https?:\/\//i.test(s)) return null;
+        return s.toLowerCase().endsWith(".dxf") ? s : null;
+      }catch{ return null; }
+    }
+
+    async function resolveDxfUrl(){
+      const override = toLocalDxfOrNull(p.get('file'));
+      if (override) return override;
+      try{
+        const meta = await j(PLAN_JSON).catch(()=>null);
+        const u = meta?.dxf_url || meta?.url || "";
+        return toLocalDxfOrNull(u) || "";
+      }catch{ return ""; }
+    }
+
+    function sanitizeItem(x){
+      try{
+        if (!x || typeof x!=='object') return x;
+        const out = {};
+        ['id','uuid','handle','name','layer','type','kind','block','color','linetype','thickness','lineweight'].forEach(k=>{
+          if (k in x) out[k] = x[k];
+        });
+        if ('bbox' in x) out.bbox = x.bbox;
+        if ('center' in x) out.center = x.center;
+        return Object.keys(out).length ? out : x;
+      }catch{ return x; }
+    }
+
+    function wireViewerEvents(viewer){
+      // Selektion
+      try{
+        const emitSelect = (items)=>{
+          const arr = Array.isArray(items) ? items : (items ? [items] : []);
+          post({ t:'cad2d.select', chatId: CHAT_ID, items: arr.map(sanitizeItem) });
+        };
+
+        if (typeof viewer?.on === 'function'){
+          ['select','selection','entitySelected','itemSelected','clickSelect'].forEach(ev=>{
+            try{ viewer.on(ev, emitSelect); }catch{}
+          });
+        } else if (typeof viewer?.addEventListener === 'function'){
+          ['select','selection','entitySelected'].forEach(ev=>{
+            try{ viewer.addEventListener(ev, e=>emitSelect(e?.detail?.items ?? e?.detail ?? e)); }catch{}
+          });
+        }
+        // Fallback: Klick-Koordinaten
+        stage.addEventListener('click', (e)=>{
+          try{
+            const rect = stage.getBoundingClientRect();
+            const pt = { x: e.clientX-rect.left, y: e.clientY-rect.top };
+            post({ t:'cad2d.select', chatId: CHAT_ID, items: [ { type:'point', pt } ] });
+          }catch{}
+        });
+      }catch{}
+
+      // Hover
+      try{
+        const emitHover = (item)=>{
+          post({ t:'cad2d.hover', chatId: CHAT_ID, item: sanitizeItem(item) });
+        };
+        if (typeof viewer?.on === 'function'){
+          ['hover','entityHovered','itemHovered'].forEach(ev=>{
+            try{ viewer.on(ev, emitHover); }catch{}
+          });
+        } else if (typeof viewer?.addEventListener === 'function'){
+          ['hover','entityHovered','itemHovered'].forEach(ev=>{
+            try{ viewer.addEventListener(ev, e=>emitHover(e?.detail?.item ?? e?.detail ?? e)); }catch{}
+          });
+        }
+        // Fallback: Mausposition throttlen
+        let lastTs = 0;
+        stage.addEventListener('mousemove', (e)=>{
+          const now = performance.now();
+          if (now - lastTs < 120) return;
+          lastTs = now;
+          try{
+            const rect = stage.getBoundingClientRect();
+            const pt = { x: e.clientX-rect.left, y: e.clientY-rect.top };
+            post({ t:'cad2d.hover', chatId: CHAT_ID, item: { type:'point', pt } });
+          }catch{}
+        });
+      }catch{}
+    }
+
+    async function main(){
+      post({ t:'cad2d.status', chatId: CHAT_ID, status:'loading' });
+
+      const dxfUrl = await resolveDxfUrl();
+      if (!dxfUrl) {
+        const hadOverride = !!p.get('file');
+        setOverlay(hadOverride
+          ? '⛔ <b>Debug-URL blockiert.</b> Nur lokale .dxf Pfade erlaubt.'
+          : '⚠️ <b>Kein 2D-Plan verfügbar.</b> DXF konfigurieren.');
+        post({ t:'cad2d.status', chatId: CHAT_ID, status: hadOverride ? 'blocked_debug_url' : 'no_plan' });
+        return;
+      }
+
+      const mod = await import("@mlightcad/cad-simple-viewer");
+      const factory = mod.createViewer || mod.default?.createViewer || mod.default || mod.SimpleViewer || mod.CadViewer;
+      if (!factory) throw new Error("createViewer API nicht gefunden");
+
+      const viewer = await (typeof factory === "function"
+        ? factory({ container: stage, theme: "dark" })
+        : factory.createViewer({ container: stage, theme: "dark" }));
+
+      if (viewer.loadDXF) await viewer.loadDXF(dxfUrl);
+      else if (viewer.open) await viewer.open(dxfUrl,{type:"dxf"});
+      else if (viewer.load) await viewer.load(dxfUrl,{type:"dxf"});
+      else throw new Error("Keine Ladefunktion gefunden");
+
+      try { viewer.fitAll && await viewer.fitAll(); } catch {}
+
+      wireViewerEvents(viewer);
+      hideOverlay();
+      post({ t:'cad2d.status', chatId: CHAT_ID, status:'ready', url:dxfUrl });
+    }
+
+    main().catch(err=>{
+      console.error(err);
+      setOverlay('⚠️ <b>2D-Viewer konnte nicht geladen werden.</b> Details in Konsole.');
+      post({ t:'cad2d.status', chatId: CHAT_ID, status: 'error', error: String(err?.message||err) });
+    });
+  </script>
+</body>
+</html>

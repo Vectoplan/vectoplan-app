@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Chat Test</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}">
+  <script>
+  window.APP_CONFIG = {
+    baseUrl: "{{ request.host_url.rstrip('/') }}",
+    chatPath: "/v1/chat",
+    chatId: "{{ chat_id }}"
+  };
+  window.STATIC = { spinner: "{{ url_for('static', filename='img/spinner.svg') }}" };
+</script>
+
+</head>
+<body>
+  <main class="center">
+    <section class="chat-wrap">
+      <div id="msgs" class="msgs"></div>
+
+      <div id="preview" class="preview"></div>
+
+      <form id="composer" class="composer" autocomplete="off">
+        <div class="bar">
+          <button type="button" id="attachBtn" class="icon" title="Datei anhängen">📎</button>
+          <textarea id="message" placeholder="Nachricht eingeben…"></textarea>
+          <button id="sendBtn" type="submit" class="send" title="Senden">➤</button>
+        </div>
+        <div class="hint">Vectoplan kann Fehler machen. Überprüfe wichtige Informationen.</div>
+        <input id="fileInput" type="file" multiple class="hidden"
+               accept="image/*,video/*,.pdf,.csv,.txt,.ifc,.stl,.obj,.gltf,.glb">
+      </form>
+
+
+
+    </section>
+  </main>
+
+  <script type="module" src="{{ url_for('static', filename='js/chat/main.js') }}?v=2"></script>
+
+
+</body>
+</html>

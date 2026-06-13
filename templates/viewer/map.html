@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Karte</title>
+
+  <!-- OL v10 CSS vom CDN -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@v10.6.0/ol.css">
+
+  <style>
+    :root{ --bg:#0b0f1e; --panel:#0e1530; --line:#1f2748; --text:#c9d2f0; --muted:#9aa3c7 }
+    html,body{ height:100%; margin:0; background:var(--bg); color:var(--text); font:13px/1.4 system-ui,Segoe UI,Roboto,Arial }
+    #root{ position:relative; inset:0; height:100vh; width:100%; overflow:hidden; background:var(--bg) }
+    #map-root{ position:absolute; inset:0 }
+    .overlay{ position:absolute; inset:8px; display:flex; align-items:center; justify-content:center; pointer-events:none }
+    .chip{ pointer-events:auto; display:flex; gap:10px; align-items:center; padding:10px 14px; border:1px solid var(--line); border-radius:10px; background:var(--panel); color:var(--muted) }
+    .chip b{ color:var(--text) }
+    .hidden{ display:none }
+  </style>
+</head>
+<body>
+  <div id="root" role="application" aria-label="Karte">
+    <div id="map-root" aria-hidden="true"></div>
+    <div id="overlay" class="overlay" aria-live="polite">
+      <div class="chip" id="statusChip"><span>⏳ <b>Lade Karte…</b></span></div>
+    </div>
+  </div>
+
+  <!-- ESM: OL v10 Module direkt vom CDN -->
+  <script type="module">
+    import Map              from "https://cdn.jsdelivr.net/npm/ol@v10.6.0/Map.js";
+    import View             from "https://cdn.jsdelivr.net/npm/ol@v10.6.0/View.js";
+    import TileLayer        from "https://cdn.jsdelivr.net/npm/ol@v10.6.0/layer/Tile.js";
+    import VectorLayer      from "https://cdn.jsdelivr.net/npm/ol@v10.6.0/layer/Vector.js";
+    import OSM              from "https://cdn.jsdelivr.net/npm/ol@v10.6.0/source/OSM.js";
+    import VectorSource     from "https://cdn.jsdelivr.net/npm/ol@v10.6.0/source/Vector.js";
+    import GeoJSON          from "https://cdn.jsdelivr.net/npm/ol@v10.6.0/format/GeoJSON.js";
+    import {bbox as bboxStrategy} from "https://cdn.jsdelivr.net/npm/ol@v10.6.0/loadingstrategy.js";
+    import {fromLonLat, transformExtent} from "https://cdn.jsdelivr.net/npm/ol@v10.6.0/proj.js";
+    import Style            from "https://cdn.jsdelivr.net/npm/ol@v10.6.0/style/Style.js";
+    import Stroke           from "https://cdn.jsdelivr.net/npm/ol@v10.6.0/style/Stroke.js";
+    import Fill             from "https://cdn.jsdelivr.net/npm/ol@v10.6.0/style/Fill.js";
+
+    const CHAT_ID = "{{ chat_id }}";
+    const MAP_JSON = "/ui/chat/{{ chat_id }}/map.json";
+
+    const log = (...a)=>{ try{ console.info("[map]", ...a); }catch{} };
+    const warn = (...a)=>{ try{ console.warn("[map]", ...a); }catch{} };
+    const err  = (...a)=>{ try{ console.error("[map]", ...a); }catch{} };
+    const post = (m)=>{ try{ window.parent?.postMessage(m, "*"); }catch{} };
+
+    const qs  = (id)=>document.getElementById(id);
+    const chip= qs("statusChip");
+    const showChip = (html)=>{ try{ chip.innerHTML = html; qs("overlay").classList.remove("hidden"); }catch{} };
+    const hideChip = ()=>{ try{ qs("overlay").classList.add("hidden"); }catch{} };
+
+    async function j(u){
+      const r = await fetch(u, { credentials:"same-origin", headers:{ "Accept":"application/json" }});
+      if (!r.ok) throw new Error("HTTP "+r.status);
+      return await r.json();
+    }
+
+    function to3857([lon,lat]){ try{ return fromLonLat([Number(lon), Number(lat)]); }catch{ return [0,0]; } }
+
+    function wfsStyle(){
+      return new Style({
+        stroke: new Stroke({ color: "#2b59ff", width: 1.5 }),
+        fill:  new Fill({ color: "rgba(43,89,255,0.08)" })
+      });
+    }
+    function selectedStyle(){
+      return new Style({
+        stroke: new Stroke({ color: "#ff8c2b", width: 2 }),
+        fill:  new Fill({ color: "rgba(255,140,43,0.12)" })
+      });
+    }
+
+    const FALLBACK_TYPENAMES = [
+      "de_flurstueck:fluerstuck_hessen",
+      "de_flurstueck:fluerstuck_mv",
+      "de_flurstueck:fluerstuck_thueringen",
+      "de_flurstueck:flurstck_sachsen",
+      "de_flurstueck:flurstueck_berlin",
+      "de_flurstueck:flurstueck_brandenburg",
+      "de_flurstueck:flurstueck_bremen",
+      "de_flurstueck:flurstueck_bw",
+      "de_flurstueck:flurstueck_hamburg",
+      "de_flurstueck:flurstueck_niedersachsen",
+      "de_flurstueck:flurstueck_nrw",
+      "de_flurstueck:flurstueck_sachsenanhalt",
+      "de_flurstueck:flurstueck_bayern",
+      "de_flurstueck:flurstueck_schleswigholstein"
+    ];
+
+    function sanitizeTypeNames(allowedRaw){
+      try{
+        const arr = Array.isArray(allowedRaw) ? allowedRaw : [];
+        const full = arr.filter(s => typeof s === "string" && s.includes(":"));
+        return full.length ? full : FALLBACK_TYPENAMES;
+      }catch{ return FALLBACK_TYPENAMES; }
+    }
+
+    function featureToLite(f){
+      try{
+        const id = f.getId() ?? null;
+        const props = {...f.getProperties()};
+        delete props.geometry;
+        return { id, props };
+      }catch{ return { id:null, props:{} }; }
+    }
+
+    function main(cfg){
+      const minZoom = Number(cfg?.min_zoom ?? 14);
+      const startZoom = Number(cfg?.view?.zoom ?? 6);
+      const startCenter3857 = to3857(cfg?.view?.center ?? [10.4515,51.1657]);
+      const srsData = String(cfg?.wfs?.srsName || "EPSG:25833");
+      const featureProjection = String(cfg?.wfs?.featureProjection || "EPSG:3857");
+      const proxyUrl = String(cfg?.wfs?.proxy_url || "");
+      const typeNames = sanitizeTypeNames(cfg?.wfs?.allowed_typeNames);
+
+      const map = new Map({
+        target: "map-root",
+        layers: [
+          new TileLayer({ source: new OSM() })
+        ],
+        view: new View({ center: startCenter3857, zoom: startZoom, projection: "EPSG:3857" })
+      });
+
+      post({ t:"map.status", status:"loading", chatId: CHAT_ID });
+
+      const vectorSource = new VectorSource({
+        format: new GeoJSON(),
+        strategy: bboxStrategy,
+        loader: async (extent, resolution, projection) => {
+          try{
+            const zoom = map.getView().getZoom();
+            if (zoom < minZoom) return;
+
+            const ex = transformExtent(extent, projection, srsData);
+            const bbox = ex.join(",") + "," + srsData;
+            const tns  = encodeURIComponent(typeNames.join(","));
+            const url  = `${proxyUrl}?service=WFS&version=1.0.0&request=GetFeature&typeNames=${tns}&outputFormat=application/json&srsName=${encodeURIComponent(srsData)}&bbox=${bbox}`;
+
+            const r = await fetch(url, { credentials:"same-origin", headers:{ "Accept":"application/json" }});
+            if (!r.ok){ warn("WFS http", r.status); return; }
+            const data = await r.json();
+            if (!data?.features?.length) return;
+
+            const feats = vectorSource.getFormat().readFeatures(data, {
+              dataProjection: srsData,
+              featureProjection
+            });
+            vectorSource.addFeatures(feats);
+          }catch(e){ err("loader", e); }
+        }
+      });
+
+      const vectorLayer = new VectorLayer({ source: vectorSource, style: wfsStyle });
+      map.addLayer(vectorLayer);
+
+      // Zoom-Hinweis
+      function updateOverlay(){
+        try{
+          const zoom = map.getView().getZoom();
+          if (zoom < minZoom) showChip(`🔎 <b>Bitte näher heranzoomen</b> · ab Zoom&nbsp;${minZoom}`);
+          else hideChip();
+        }catch{}
+      }
+      map.on("moveend", () => { updateOverlay(); try{ vectorSource.refresh(); }catch{} });
+      updateOverlay();
+
+      // Auswahl / Hover
+      let lastSelected = null;
+
+      map.on("singleclick", (evt)=>{
+        let picked = null;
+        map.forEachFeatureAtPixel(evt.pixel, (f)=>{ picked = f; return true; });
+        if (picked){
+          try{
+            if (lastSelected && lastSelected !== picked) lastSelected.setStyle(wfsStyle());
+            picked.setStyle(selectedStyle()); lastSelected = picked;
+          }catch{}
+          post({ t:"map.select", chatId: CHAT_ID, feature: featureToLite(picked) });
+        } else if (lastSelected){
+          try{ lastSelected.setStyle(wfsStyle()); }catch{} lastSelected = null;
+        }
+      });
+
+      let lastHoverTs = 0;
+      map.on("pointermove", (evt)=>{
+        const now = performance.now();
+        if (now - lastHoverTs < 120) return; lastHoverTs = now;
+        let hit = null;
+        map.forEachFeatureAtPixel(evt.pixel, (f)=>{ hit = f; return true; });
+        if (hit){
+          post({ t:"map.hover", chatId: CHAT_ID, feature: featureToLite(hit) });
+          map.getTargetElement().style.cursor = "pointer";
+        } else {
+          map.getTargetElement().style.cursor = "default";
+        }
+      });
+
+      hideChip();
+      post({ t:"map.status", status:"ready", chatId: CHAT_ID });
+    }
+
+    async function boot(){
+      try{
+        const cfg = await j(MAP_JSON);
+        log("cfg", cfg);
+        main(cfg);
+      }catch(e){
+        err(e);
+        showChip('⚠️ <b>Karte konnte nicht initialisiert werden.</b> Details in Konsole.');
+        post({ t:"map.status", status:"error", chatId: CHAT_ID, error:String(e&&e.message||e) });
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>

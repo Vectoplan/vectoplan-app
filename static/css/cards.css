@@ -1,0 +1,161 @@
+/* /services/app/static/css/cards.css */
+/* Dark UI cards for structured messages */
+
+:root{
+  --vp-bg:#0e1530;
+  --vp-bg2:#10183a;
+  --vp-border:#1f2748;
+  --vp-text:#c9d2f0;
+  --vp-muted:#9aa3c7;
+  --vp-accent:#4a7aff;
+  --vp-badge:#2a3561;
+  --vp-danger:#ff5c5c;
+  --radius:12px;
+}
+
+.card{
+  background:var(--vp-bg);
+  border:1px solid var(--vp-border);
+  border-radius:var(--radius);
+  padding:12px 12px 10px 12px;
+  color:var(--vp-text);
+  font:14px/1.45 system-ui,Segoe UI,Roboto,Arial;
+  margin:10px 0;
+  box-shadow:0 1px 0 rgba(0,0,0,.15), inset 0 0 0 9999px rgba(255,255,255,0.01);
+}
+
+.card-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  margin-bottom:8px;
+}
+.card-head strong{
+  font-weight:600;
+  letter-spacing:.2px;
+}
+.card-body{
+  display:block;
+  margin-bottom:10px;
+}
+.card-actions{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+}
+
+/* Generic rows */
+.card .row{
+  display:grid;
+  grid-template-columns:140px 1fr;
+  gap:8px;
+  padding:4px 0;
+  border-top:1px solid rgba(31,39,72,.35);
+}
+.card .row:first-child{ border-top:0; }
+.card .lbl{
+  color:var(--vp-muted);
+  font-size:12px;
+}
+.card .val{
+  word-break:break-word;
+}
+
+/* Buttons inside cards inherit global .btn */
+.card .btn{
+  appearance:none;
+  border:1px solid var(--vp-border);
+  background:var(--vp-bg2);
+  color:var(--vp-text);
+  padding:6px 10px;
+  border-radius:10px;
+  font:13px/1 system-ui,Segoe UI,Roboto,Arial;
+  cursor:pointer;
+}
+.card .btn:hover{ background:#13204a; }
+.card .btn:disabled{ opacity:.6; cursor:not-allowed; }
+.card .btn-link{
+  color:var(--vp-accent);
+  text-decoration:none;
+  border:1px solid var(--vp-border);
+  background:transparent;
+}
+.card .btn-link:hover{ text-decoration:underline; }
+
+/* Forms inside cards */
+.card .form{
+  display:grid;
+  gap:8px;
+  margin:8px 0 6px 0;
+}
+.card .form input,
+.card .form textarea,
+.card .form select{
+  background:var(--vp-bg2);
+  border:1px solid var(--vp-border);
+  border-radius:10px;
+  color:var(--vp-text);
+  padding:8px 10px;
+  font:13px/1.2 system-ui,Segoe UI,Roboto,Arial;
+  outline:none;
+}
+.card .form input:focus,
+.card .form textarea:focus,
+.card .form select:focus{
+  border-color:#2f56ff77;
+  box-shadow:0 0 0 2px #2f56ff22;
+}
+
+/* Lists */
+.card ul{
+  margin:6px 0 6px 18px;
+  padding:0;
+}
+.card li{ padding:2px 0; }
+
+/* Pills and badges */
+.pill{
+  font-size:11px;
+  padding:2px 6px;
+  border-radius:999px;
+  border:1px solid var(--vp-badge);
+  background:#111b3f;
+  color:var(--vp-muted);
+}
+
+/* Specific variants */
+.card-project_welcome .card-head strong::before{ content:"🏁 "; }
+.card-missing_slots .card-head strong::before{ content:"❓ "; }
+.card-speckle_viewer .card-head strong::before{ content:"🧭 "; }
+.card-download_card .card-head strong::before{ content:"⬇️ "; }
+.card-error_card{
+  border-color:#4b1d29;
+  background:#180b12;
+}
+.card-error_card .card-head strong::before{ content:"⚠️ "; }
+.card-error_card .card-body{ color:#ffb3b3; }
+
+/* Media in cards */
+.card img{
+  max-width:100%;
+  height:auto;
+  border-radius:8px;
+  border:1px solid var(--vp-border);
+}
+
+/* Accessibility */
+.card .btn:focus-visible,
+.card a:focus-visible,
+.card input:focus-visible,
+.card textarea:focus-visible,
+.card select:focus-visible{
+  outline:2px solid #2f56ff77;
+  outline-offset:2px;
+  border-color:#2f56ff77;
+}
+
+/* Compact tweaks on narrow screens */
+@media (max-width: 800px){
+  .card .row{ grid-template-columns:1fr; }
+}

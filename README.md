@@ -1,1 +1,0 @@
-# vectoplan-app

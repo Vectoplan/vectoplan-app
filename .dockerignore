@@ -1,0 +1,4 @@
+node_modules/
+**/node_modules/
+services/app/packages/cad-viewer/**/dist/*
+!services/app/packages/cad-viewer/

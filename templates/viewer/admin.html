@@ -1,0 +1,524 @@
+<!-- templates/viewer/admin.html -->
+<!doctype html>
+<html lang="de" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <title>Admin</title>
+
+  <!-- DEV/robust: Browser-Caches für dieses Dokument best-effort reduzieren -->
+  <meta http-equiv="Cache-Control" content="no-store, max-age=0, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+
+  <!-- Theme vorab aus localStorage setzen, um FOUC zu vermeiden -->
+  <script>
+    (function () {
+      try {
+        const saved = localStorage.getItem("theme");
+        if (saved === "dark" || saved === "light") {
+          document.documentElement.setAttribute("data-theme", saved);
+        }
+      } catch (e) {}
+    })();
+  </script>
+
+  <!-- Stabilere vh auf Mobile (für CSS: calc(var(--vh, 1vh) * 100)) -->
+  <script>
+    (function () {
+      try {
+        const setVh = () => {
+          const vh = (window.innerHeight || 0) * 0.01;
+          document.documentElement.style.setProperty("--vh", vh + "px");
+        };
+        setVh();
+        window.addEventListener("resize", setVh, { passive: true });
+        window.addEventListener("orientationchange", setVh, { passive: true });
+      } catch (e) {}
+    })();
+  </script>
+
+  <!-- Styles (cache-bust pro Chat) -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/admin.css') }}?v={{ chat_id }}">
+
+  <!-- Minimaler Fallback (falls CSS nicht lädt): Layout + Tabs funktionieren zumindest) -->
+  <style>
+    :root{
+      --vh: 1vh;
+      --app-h: calc(var(--vh, 1vh) * 100);
+
+      /* Fallback Theme Vars (admin.css definiert final) */
+      --bg:#f6f7fb;
+      --panel:#ffffff;
+      --text:#0b0f1e;
+      --muted:#5b647a;
+      --border:#e1e6ef;
+      --accent:#2b59ff;
+      --btn-bg:#ffffff;
+      --btn-border:#d0d7e2;
+      --btn-hover:#f3f6fd;
+      --radius:12px;
+    }
+    :root[data-theme="dark"]{
+      --bg:#0b0f1e;
+      --panel:#0f1530;
+      --text:#e8ecff;
+      --muted:#9aa3c7;
+      --border:#1f2748;
+      --accent:#4a7aff;
+      --btn-bg:#121a36;
+      --btn-border:#1f2748;
+      --btn-hover:#1a2346;
+    }
+    @supports (height: 100svh){ :root{ --app-h:100svh; } }
+    @supports (height: 100dvh){ :root{ --app-h:100dvh; } }
+
+    *{ box-sizing:border-box; }
+    html,body{ height:100%; margin:0; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,Arial; }
+    body{ overflow:hidden; }
+
+    .admin-root{
+      height:var(--app-h);
+      width:100%;
+      display:grid;
+      grid-template-rows:auto 1fr;
+      min-height:0;
+    }
+
+    /* Tabbar: 8 Buttons, keine Abstände */
+    .admin-tabs{
+      display:grid;
+      grid-template-columns:repeat(8, minmax(0, 1fr));
+      gap:0;
+      border-bottom:1px solid var(--border);
+      background:var(--panel);
+      min-height:44px;
+      overflow:hidden;
+    }
+    .admin-tab{
+      appearance:none;
+      border:0;
+      border-right:1px solid var(--border);
+      background:var(--btn-bg);
+      color:var(--text);
+      font:13px/1 system-ui,Segoe UI,Roboto,Arial;
+      padding:10px 8px;
+      cursor:pointer;
+      user-select:none;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      min-width:0;
+    }
+    .admin-tab:last-child{ border-right:0; }
+    .admin-tab[aria-selected="true"]{
+      background:var(--btn-hover);
+      box-shadow: inset 0 -2px 0 var(--accent);
+    }
+
+    .admin-panels{
+      min-height:0;
+      position:relative;
+      background:var(--bg);
+    }
+    .admin-panel{
+      height:100%;
+      width:100%;
+      overflow:auto;
+      -webkit-overflow-scrolling:touch;
+      padding:12px;
+      display:block;
+    }
+    .admin-panel[hidden]{ display:none !important; }
+
+    /* Embed Panels (Crawlab/Superset): keine Doppel-Scrollbars */
+    .admin-panel--embed{
+      padding:0;
+      overflow:hidden;
+    }
+    .embed-shell{
+      height:100%;
+      width:100%;
+      display:flex;
+      flex-direction:column;
+      min-height:0;
+    }
+    .embed-head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding:10px 12px;
+      border-bottom:1px solid var(--border);
+      background:var(--panel);
+      min-height:44px;
+    }
+    .embed-title{
+      display:flex;
+      align-items:baseline;
+      gap:10px;
+      min-width:0;
+    }
+    .embed-title h1{
+      margin:0;
+      font-size:14px;
+      line-height:1.2;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .embed-meta{
+      font-size:12px;
+      color:var(--muted);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      max-width:40vw;
+    }
+    .embed-actions{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex:0 0 auto;
+    }
+    .embed-actions a,
+    .embed-actions button{
+      appearance:none;
+      border:1px solid var(--btn-border);
+      background:var(--btn-bg);
+      color:var(--text);
+      font:12px/1 system-ui,Segoe UI,Roboto,Arial;
+      padding:8px 10px;
+      border-radius:10px;
+      cursor:pointer;
+      text-decoration:none;
+      user-select:none;
+      white-space:nowrap;
+    }
+    .embed-actions a:hover,
+    .embed-actions button:hover{
+      background:var(--btn-hover);
+    }
+    .embed-body{
+      position:relative;
+      flex:1;
+      min-height:0;
+      background:var(--bg);
+    }
+    .embed-iframe{
+      width:100%;
+      height:100%;
+      border:0;
+      display:block;
+      background:var(--panel);
+    }
+    .embed-fallback{
+      position:absolute;
+      inset:0;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:18px;
+      text-align:center;
+      color:var(--muted);
+      pointer-events:none; /* UI-Buttons bleiben im Header */
+    }
+    .embed-fallback .box{
+      max-width:720px;
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:14px 16px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.06);
+    }
+    .embed-fallback .box strong{
+      display:block;
+      color:var(--text);
+      margin-bottom:6px;
+      font-size:13px;
+    }
+    .embed-fallback .box p{
+      margin:0;
+      font-size:12px;
+      line-height:1.4;
+    }
+
+    /* Mobile: Tabbar bleibt 1 Zeile, wird horizontal scrollbar */
+    @media (max-width: 760px){
+      .admin-tabs{
+        display:flex;
+        overflow-x:auto;
+        border-bottom:1px solid var(--border);
+        scrollbar-width:thin;
+      }
+      .admin-tab{
+        flex:0 0 auto;
+        min-width:124px;
+        border-right:1px solid var(--border);
+      }
+      .embed-meta{ max-width:52vw; }
+    }
+
+    /* Reduce motion */
+    @media (prefers-reduced-motion: reduce){
+      *, *::before, *::after{
+        animation:none !important;
+        transition:none !important;
+        scroll-behavior:auto !important;
+      }
+    }
+
+    /* Focus */
+    :focus{ outline:none; }
+    :focus-visible{
+      outline:2px solid var(--accent);
+      outline-offset:2px;
+    }
+  </style>
+
+  <script>
+    (function(){
+      try{
+        window.ADMIN_CONFIG = {
+          chatId: "{{ chat_id }}",
+          version: "{{ chat_id }}",
+
+          // interne Gateway-Targets (werden in admin.js lazy in die iframes gesetzt)
+          crawlabUrl: "{{ url_for('ui_crawlab.crawlab_page', chat_id=chat_id) }}",
+          supersetUrl: "{{ url_for('ui_superset.superset_page', chat_id=chat_id) }}"
+        };
+      } catch(e) {}
+    })();
+  </script>
+</head>
+
+<body>
+  <noscript>JavaScript ist erforderlich.</noscript>
+
+  <div id="root"
+       class="admin-root"
+       role="application"
+       aria-label="Admin"
+       data-chat-id="{{ chat_id }}">
+
+    <!-- Zeile 1: exakt 8 Buttons (Tabs), keine Abstände -->
+    <nav class="admin-tabs" role="tablist" aria-label="Admin Navigation">
+      <button class="admin-tab" type="button"
+              id="tab-dashboard"
+              role="tab"
+              aria-selected="true"
+              aria-controls="panel-dashboard"
+              tabindex="0"
+              data-tab="dashboard">Dashboard</button>
+
+      <button class="admin-tab" type="button"
+              id="tab-webscraping"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-webscraping"
+              tabindex="-1"
+              data-tab="webscraping">Webscraping</button>
+
+      <button class="admin-tab" type="button"
+              id="tab-datamining"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-datamining"
+              tabindex="-1"
+              data-tab="datamining">DataMining</button>
+
+      <button class="admin-tab" type="button"
+              id="tab-data-analyse"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-data-analyse"
+              tabindex="-1"
+              data-tab="data-analyse">Data-Analyse</button>
+
+      <button class="admin-tab" type="button"
+              id="tab-database"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-database"
+              tabindex="-1"
+              data-tab="database">Database</button>
+
+      <button class="admin-tab" type="button"
+              id="tab-sales"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-sales"
+              tabindex="-1"
+              data-tab="sales">Sales</button>
+
+      <button class="admin-tab" type="button"
+              id="tab-wiki"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-wiki"
+              tabindex="-1"
+              data-tab="wiki">Wiki</button>
+
+      <button class="admin-tab" type="button"
+              id="tab-user"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-user"
+              tabindex="-1"
+              data-tab="user">User</button>
+    </nav>
+
+    <!-- Zeile 2: Restfläche 100% (Panels) -->
+    <main class="admin-panels" id="panels" aria-label="Admin Inhalt">
+      <section class="admin-panel"
+               id="panel-dashboard"
+               role="tabpanel"
+               aria-labelledby="tab-dashboard"
+               data-panel="dashboard">
+        <h1 style="margin:0 0 8px 0; font-size:16px;">Dashboard</h1>
+        <p style="margin:0; color:var(--muted);">
+          Platzhalter. Hier kommt später der Dashboard-Inhalt rein.
+        </p>
+      </section>
+
+      <section class="admin-panel"
+               id="panel-webscraping"
+               role="tabpanel"
+               aria-labelledby="tab-webscraping"
+               data-panel="webscraping"
+               hidden>
+        <h1 style="margin:0 0 8px 0; font-size:16px;">AI-Training</h1>
+        <p style="margin:0; color:var(--muted);">
+          Platzhalter. Hier kommt später der Webscraping-Inhalt rein.
+        </p>
+      </section>
+
+      <!-- ───────── DataMining (Crawlab) ───────── -->
+      <section class="admin-panel admin-panel--embed"
+               id="panel-datamining"
+               role="tabpanel"
+               aria-labelledby="tab-datamining"
+               data-panel="datamining"
+               hidden>
+        <div class="embed-shell" data-embed="crawlab">
+
+
+          <div class="embed-body">
+            <iframe class="embed-iframe"
+                    id="embed-crawlab"
+                    title="Crawlab"
+                    referrerpolicy="no-referrer"
+                    loading="lazy"
+                    src="about:blank"
+                    data-src="{{ url_for('ui_crawlab.crawlab_page', chat_id=chat_id) }}"
+                    data-loaded="0"></iframe>
+
+
+          </div>
+        </div>
+      </section>
+
+      <!-- ───────── Data-Analyse (Superset) ───────── -->
+      <section class="admin-panel admin-panel--embed"
+               id="panel-data-analyse"
+               role="tabpanel"
+               aria-labelledby="tab-data-analyse"
+               data-panel="data-analyse"
+               hidden>
+        <div class="embed-shell" data-embed="superset">
+
+
+          <div class="embed-body">
+            <iframe class="embed-iframe"
+                    id="embed-superset"
+                    title="Superset"
+                    referrerpolicy="no-referrer"
+                    loading="lazy"
+                    src="about:blank"
+                    data-src="{{ url_for('ui_superset.superset_page', chat_id=chat_id) }}"
+                    data-loaded="0"></iframe>
+
+
+          </div>
+        </div>
+      </section>
+
+      <section class="admin-panel"
+               id="panel-database"
+               role="tabpanel"
+               aria-labelledby="tab-database"
+               data-panel="database"
+               hidden>
+        <h1 style="margin:0 0 8px 0; font-size:16px;">Database</h1>
+        <p style="margin:0; color:var(--muted);">
+          Platzhalter. Hier kommt später der Database-Inhalt rein.
+        </p>
+      </section>
+
+      <section class="admin-panel"
+               id="panel-sales"
+               role="tabpanel"
+               aria-labelledby="tab-sales"
+               data-panel="sales"
+               hidden>
+        <h1 style="margin:0 0 8px 0; font-size:16px;">Sales</h1>
+        <p style="margin:0; color:var(--muted);">
+          Platzhalter. Hier kommt später der Sales-Inhalt rein.
+        </p>
+      </section>
+
+      <section class="admin-panel"
+               id="panel-wiki"
+               role="tabpanel"
+               aria-labelledby="tab-wiki"
+               data-panel="wiki"
+               hidden>
+        <h1 style="margin:0 0 8px 0; font-size:16px;">Wiki</h1>
+        <p style="margin:0; color:var(--muted);">
+          Platzhalter. Hier kommt später der Wiki-Inhalt rein.
+        </p>
+      </section>
+
+      <section class="admin-panel"
+               id="panel-user"
+               role="tabpanel"
+               aria-labelledby="tab-user"
+               data-panel="user"
+               hidden>
+        <h1 style="margin:0 0 8px 0; font-size:16px;">User</h1>
+        <p style="margin:0; color:var(--muted);">
+          Platzhalter. Hier kommt später der User-Inhalt rein.
+        </p>
+      </section>
+    </main>
+  </div>
+
+  <!-- JS (cache-bust pro Chat) -->
+  <script type="module" src="{{ url_for('static', filename='js/admin.js') }}?v={{ chat_id }}"></script>
+
+  <!-- Robust: globale Fehlerwächter (sichtbar via Konsole, optional später UI-Chip in admin.js) -->
+  <script>
+    (function(){
+      "use strict";
+      function safe(fn){ try { return fn(); } catch(e){ return undefined; } }
+      function post(msg){ safe(() => window.parent && window.parent.postMessage(msg, "*")); }
+      function chatId(){ return (window.ADMIN_CONFIG && window.ADMIN_CONFIG.chatId) ? String(window.ADMIN_CONFIG.chatId) : ""; }
+
+      safe(() => post({ t: "admin.status", chatId: chatId(), status: "boot" }));
+
+      safe(() => window.addEventListener("error", (e) => {
+        const m = (e && e.message) ? String(e.message).slice(0, 240) : "Unbekannter Fehler";
+        post({ t:"admin.status", chatId: chatId(), status:"error", error:m });
+      }));
+
+      safe(() => window.addEventListener("unhandledrejection", (e) => {
+        const r = (e && e.reason) ? (e.reason.message || String(e.reason)) : "Unhandled Promise Rejection";
+        const m = String(r).slice(0, 240);
+        post({ t:"admin.status", chatId: chatId(), status:"error", error:m });
+      }));
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,517 @@
+<!-- templates/viewer/lv.html -->
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Leistungsverzeichnis</title>
+
+  <style>
+    :root{
+      --bg:#0b0f1e;
+      --panel:#0e1530;
+      --panel2:#10183a;
+      --line:#1f2748;
+      --text:#c9d2f0;
+      --muted:#9aa3c7;
+      --acc:#4a7aff;
+      --danger:#ff5c5c;
+      --ok:#34d399;
+      --radius:12px;
+    }
+    html,body{
+      height:100%;
+      margin:0;
+      background:var(--bg);
+      color:var(--text);
+      font:13px/1.45 system-ui,Segoe UI,Roboto,Arial;
+      overflow:hidden;
+    }
+    *{ box-sizing:border-box; }
+
+    #root{
+      position:relative;
+      height:100%;
+      width:100%;
+      display:grid;
+      grid-template-rows:auto 1fr;
+      gap:10px;
+      padding:10px;
+    }
+
+    /* Topbar */
+    .bar{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding:10px 12px;
+      border:1px solid var(--line);
+      border-radius:var(--radius);
+      background:var(--panel);
+      min-height:52px;
+    }
+    .bar-left{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      min-width:0;
+    }
+    .title{
+      display:flex;
+      flex-direction:column;
+      min-width:0;
+    }
+    .title strong{
+      font-size:14px;
+      font-weight:700;
+      letter-spacing:.2px;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .title span{
+      color:var(--muted);
+      font-size:12px;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .bar-right{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+    }
+
+    .btn{
+      appearance:none;
+      border:1px solid var(--line);
+      background:var(--panel2);
+      color:var(--text);
+      padding:8px 10px;
+      border-radius:10px;
+      font:13px/1 system-ui,Segoe UI,Roboto,Arial;
+      cursor:pointer;
+      display:inline-flex;
+      gap:8px;
+      align-items:center;
+      user-select:none;
+    }
+    .btn:hover{ background:#13204a; }
+    .btn:disabled{ opacity:.6; cursor:not-allowed; }
+    .btn-link{
+      text-decoration:none;
+      color:var(--acc);
+      background:transparent;
+    }
+    .btn-link:hover{ text-decoration:underline; }
+
+    /* Content */
+    .content{
+      min-height:0;
+      border:1px solid var(--line);
+      border-radius:var(--radius);
+      background:var(--panel);
+      overflow:hidden;
+      position:relative;
+      display:grid;
+      grid-template-rows:auto 1fr;
+    }
+
+    .card{
+      padding:12px 12px 10px 12px;
+      border-bottom:1px solid color-mix(in srgb, var(--line) 75%, transparent);
+      background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));
+    }
+    .card p{ margin:0 0 8px 0; color:var(--muted); }
+    .meta{
+      display:flex;
+      flex-wrap:wrap;
+      gap:10px;
+      align-items:center;
+      color:var(--muted);
+      font-size:12px;
+    }
+    .pill{
+      display:inline-flex;
+      gap:6px;
+      align-items:center;
+      padding:2px 8px;
+      border-radius:999px;
+      border:1px solid var(--line);
+      background:#111b3f;
+      color:var(--muted);
+      font-size:11px;
+      white-space:nowrap;
+    }
+    .dot{ width:8px; height:8px; border-radius:99px; background:var(--muted); display:inline-block; }
+    .dot.ok{ background:var(--ok); }
+    .dot.err{ background:var(--danger); }
+
+    .slot{
+      position:relative;
+      min-height:0;
+      background:var(--bg);
+    }
+    .placeholder{
+      position:absolute;
+      inset:0;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:14px;
+    }
+    .placeholder .box{
+      width:min(820px, 100%);
+      border:1px dashed color-mix(in srgb, var(--acc) 55%, var(--line));
+      border-radius:var(--radius);
+      background:color-mix(in srgb, var(--panel) 92%, #000);
+      padding:14px;
+      color:var(--muted);
+    }
+    .placeholder .box b{ color:var(--text); }
+
+    /* Embedded iframe (optional) */
+    #lvFrame{
+      position:absolute;
+      inset:0;
+      width:100%;
+      height:100%;
+      border:0;
+      background:#fff;
+      display:none; /* becomes block when src is set */
+    }
+
+    /* Status overlay */
+    .overlay{
+      position:absolute;
+      inset:8px;
+      display:flex;
+      align-items:flex-start;
+      justify-content:flex-end;
+      pointer-events:none;
+      z-index:5;
+    }
+    .chip{
+      pointer-events:auto;
+      display:flex;
+      gap:10px;
+      align-items:center;
+      padding:10px 12px;
+      border:1px solid var(--line);
+      border-radius:10px;
+      background:var(--panel);
+      color:var(--muted);
+      max-width:min(560px, 100%);
+      box-shadow:0 6px 18px rgba(0,0,0,.25);
+    }
+    .chip b{ color:var(--text); }
+    .hidden{ display:none !important; }
+
+    /* Mobile */
+    @media (max-width: 520px){
+      #root{ padding:8px; gap:8px; }
+      .bar{ padding:8px 10px; }
+      .btn{ padding:8px 9px; }
+      .title span{ display:none; }
+    }
+  </style>
+</head>
+
+<body>
+  <div id="root" role="application" aria-label="Leistungsverzeichnis">
+    <header class="bar">
+      <div class="bar-left">
+        <div class="title">
+          <strong>Leistungsverzeichnis</strong>
+          <span id="subline">Platzhalter-Seite (später: LV-iframe oder LV-UI)</span>
+        </div>
+      </div>
+
+      <div class="bar-right" role="group" aria-label="Aktionen">
+        <a id="openSrcBtn" class="btn btn-link" href="#" target="_blank" rel="noopener" aria-disabled="true" title="Eingebettete Seite im neuen Tab öffnen">🔗 Öffnen</a>
+        <button id="reloadBtn" class="btn" type="button" title="Seite neu laden">🔄 Reload</button>
+        <button id="resetBtn" class="btn" type="button" title="Einstellungen zurücksetzen">🧹 Reset</button>
+      </div>
+    </header>
+
+    <section class="content" aria-label="Inhalt">
+      <div class="card">
+        <p>
+          Diese Seite ist ein robustes Placeholder-Container-Dokument für das <b>Leistungsverzeichnis</b>.
+          Optional kann ein lokaler/relativer Embed per Query gesetzt werden:
+          <code style="color:var(--text)">?src=/pfad/zu/deinem/lv.html</code>
+        </p>
+        <div class="meta">
+          <span class="pill"><span class="dot" id="statusDot"></span> <span id="statusText">initialisiere…</span></span>
+          <span class="pill">Chat-ID: <span id="chatIdOut">—</span></span>
+          <span class="pill">Embed: <span id="embedOut">—</span></span>
+        </div>
+      </div>
+
+      <div class="slot" id="slot">
+        <iframe id="lvFrame"
+                title="Leistungsverzeichnis Embedded"
+                referrerpolicy="no-referrer"
+                loading="lazy"
+                allow="fullscreen">
+        </iframe>
+
+        <div class="placeholder" id="placeholder">
+          <div class="box">
+            <b>LV Platzhalter</b><br>
+            Kein Embed geladen. Du kannst später hier ein iframe oder eine LV-Anwendung integrieren.<br><br>
+            <span style="color:var(--muted)">
+              Tipp: Für erste Tests kann ein lokaler Pfad über <code style="color:var(--text)">?src=/…</code> gesetzt werden.
+              Externe URLs werden absichtlich blockiert.
+            </span>
+          </div>
+        </div>
+
+        <div class="overlay" id="overlay" aria-live="polite">
+          <div class="chip" id="statusChip"><span>⏳ <b>Lade Leistungsverzeichnis…</b></span></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    (function(){
+      "use strict";
+
+      const CHAT_ID = "{{ chat_id }}";
+
+      const qs = (id) => document.getElementById(id);
+
+      const statusChip = qs("statusChip");
+      const overlay = qs("overlay");
+      const statusDot = qs("statusDot");
+      const statusText = qs("statusText");
+      const chatIdOut = qs("chatIdOut");
+      const embedOut = qs("embedOut");
+
+      const openSrcBtn = qs("openSrcBtn");
+      const reloadBtn  = qs("reloadBtn");
+      const resetBtn   = qs("resetBtn");
+
+      const frame = qs("lvFrame");
+      const placeholder = qs("placeholder");
+
+      const STORAGE_KEY = "vectoai.lv.embedSrc";
+
+      function safe(fn){
+        try { return fn(); } catch(e){ return undefined; }
+      }
+
+      function post(message){
+        safe(() => window.parent && window.parent.postMessage(message, "*"));
+      }
+
+      function setChip(html){
+        safe(() => {
+          statusChip.innerHTML = html;
+          overlay.classList.remove("hidden");
+        });
+      }
+
+      function hideChip(){
+        safe(() => overlay.classList.add("hidden"));
+      }
+
+      function setStatus(kind, text){
+        safe(() => {
+          statusText.textContent = text || "";
+          statusDot.classList.remove("ok","err");
+          if (kind === "ok") statusDot.classList.add("ok");
+          else if (kind === "err") statusDot.classList.add("err");
+        });
+      }
+
+      function storageGet(k){
+        return safe(() => localStorage.getItem(k)) || "";
+      }
+      function storageSet(k, v){
+        safe(() => localStorage.setItem(k, String(v || "")));
+      }
+      function storageDel(k){
+        safe(() => localStorage.removeItem(k));
+      }
+
+      function isLocalPath(u){
+        try{
+          if (!u) return false;
+          const s = String(u).trim();
+          if (!s) return false;
+          if (!s.startsWith("/")) return false;
+          if (s.startsWith("//")) return false;
+          if (/^https?:\/\//i.test(s)) return false;
+          if (/[\r\n]/.test(s)) return false;
+          return true;
+        }catch{ return false; }
+      }
+
+      function sanitizeSrc(raw){
+        try{
+          const s = String(raw || "").trim();
+          return isLocalPath(s) ? s : "";
+        }catch{ return ""; }
+      }
+
+      function setOpenLink(src){
+        safe(() => {
+          if (src){
+            openSrcBtn.href = src;
+            openSrcBtn.setAttribute("aria-disabled","false");
+            openSrcBtn.style.pointerEvents = "auto";
+            openSrcBtn.style.opacity = "1";
+          }else{
+            openSrcBtn.href = "#";
+            openSrcBtn.setAttribute("aria-disabled","true");
+            openSrcBtn.style.pointerEvents = "none";
+            openSrcBtn.style.opacity = "0.6";
+          }
+        });
+      }
+
+      function showFrame(src){
+        safe(() => {
+          frame.src = src;
+          frame.style.display = "block";
+          placeholder.style.display = "none";
+          embedOut.textContent = src;
+          setOpenLink(src);
+        });
+      }
+
+      function clearFrame(){
+        safe(() => {
+          frame.removeAttribute("src");
+          frame.style.display = "none";
+          placeholder.style.display = "flex";
+          embedOut.textContent = "—";
+          setOpenLink("");
+        });
+      }
+
+      function loadFromQueryOrStorage(){
+        const p = new URLSearchParams(location.search);
+        const fromQuery = sanitizeSrc(p.get("src"));
+        if (fromQuery) return fromQuery;
+
+        const fromStorage = sanitizeSrc(storageGet(STORAGE_KEY));
+        if (fromStorage) return fromStorage;
+
+        return "";
+      }
+
+      function boot(){
+        chatIdOut.textContent = CHAT_ID || "—";
+
+        setChip('⏳ <b>Lade Leistungsverzeichnis…</b>');
+        setStatus("", "loading");
+
+        post({ t: "lv.status", chatId: CHAT_ID, status: "loading" });
+
+        const src = loadFromQueryOrStorage();
+
+        if (src){
+          storageSet(STORAGE_KEY, src);
+          showFrame(src);
+
+          safe(() => {
+            frame.addEventListener("load", () => {
+              hideChip();
+              setStatus("ok", "bereit (embed geladen)");
+              post({ t: "lv.status", chatId: CHAT_ID, status: "ready", embedded: true, src });
+            }, { once: true });
+
+            frame.addEventListener("error", () => {
+              setChip('⚠️ <b>Embed konnte nicht geladen werden.</b> Details in Konsole.');
+              setStatus("err", "embed error");
+              post({ t: "lv.status", chatId: CHAT_ID, status: "error", error: "embed_error", src });
+            }, { once: true });
+          });
+
+          safe(() => setTimeout(() => {
+            if (!overlay.classList.contains("hidden")){
+              hideChip();
+              setStatus("ok", "bereit (embed ggf. geladen)");
+              post({ t: "lv.status", chatId: CHAT_ID, status: "ready", embedded: true, src });
+            }
+          }, 800));
+
+        } else {
+          hideChip();
+          clearFrame();
+          setStatus("ok", "bereit (placeholder)");
+          post({ t: "lv.status", chatId: CHAT_ID, status: "ready", embedded: false });
+        }
+      }
+
+      // Controls
+      safe(() => reloadBtn.addEventListener("click", () => location.reload()));
+      safe(() => resetBtn.addEventListener("click", () => {
+        storageDel(STORAGE_KEY);
+        clearFrame();
+        setChip('🧹 <b>Zurückgesetzt.</b> Placeholder aktiv.');
+        setTimeout(hideChip, 900);
+        setStatus("ok", "bereit (placeholder)");
+        post({ t: "lv.reset", chatId: CHAT_ID });
+      }));
+
+      // Parent -> iframe command channel (optional for later)
+      safe(() => window.addEventListener("message", (ev) => {
+        if (ev && ev.origin && ev.origin !== location.origin) return;
+
+        const msg = ev && ev.data;
+        if (!msg || typeof msg !== "object") return;
+
+        if (msg.t === "lv.setSrc"){
+          const src = sanitizeSrc(msg.src);
+          if (!src){
+            setChip('⛔ <b>Blockiert.</b> Nur lokale Pfade (beginnend mit "/") erlaubt.');
+            setStatus("err", "blocked src");
+            setTimeout(hideChip, 1200);
+            return;
+          }
+          storageSet(STORAGE_KEY, src);
+          setChip('⏳ <b>Lade Embed…</b>');
+          setStatus("", "loading embed");
+          showFrame(src);
+          post({ t:"lv.status", chatId: CHAT_ID, status:"loading", embedded:true, src });
+
+          safe(() => {
+            const onLoad = () => {
+              hideChip();
+              setStatus("ok", "bereit (embed geladen)");
+              post({ t:"lv.status", chatId: CHAT_ID, status:"ready", embedded:true, src });
+              frame.removeEventListener("load", onLoad);
+            };
+            frame.addEventListener("load", onLoad);
+          });
+        }
+      }));
+
+      // Global error guards
+      safe(() => window.addEventListener("error", (e) => {
+        const msg = (e && e.message) ? e.message : "Unbekannter Fehler";
+        setChip(`⚠️ <b>Fehler:</b> ${String(msg).slice(0,200)}`);
+        setStatus("err", "error");
+        post({ t:"lv.status", chatId: CHAT_ID, status:"error", error: String(msg) });
+      }));
+
+      safe(() => window.addEventListener("unhandledrejection", (e) => {
+        const msg = (e && e.reason) ? (e.reason.message || String(e.reason)) : "Unhandled Promise Rejection";
+        setChip(`⚠️ <b>Fehler:</b> ${String(msg).slice(0,200)}`);
+        setStatus("err", "error");
+        post({ t:"lv.status", chatId: CHAT_ID, status:"error", error: String(msg) });
+      }));
+
+      boot();
+    })();
+  </script>
+</body>
+</html>
