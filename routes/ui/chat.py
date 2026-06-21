@@ -1,44 +1,275 @@
-# /services/app/routes/ui/chat.py
+# services/vectoplan-app/routes/ui/chat.py
 from __future__ import annotations
 
+import hashlib
+import json
 import os
-from urllib.parse import quote
-from typing import Dict, Any, List, Tuple, Optional
+import re
+from functools import lru_cache
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from urllib.parse import quote, urlsplit
 
 from flask import (
     Blueprint,
-    render_template,
-    request,
     current_app,
+    jsonify,
     make_response,
     redirect,
+    render_template,
+    request,
     url_for,
-    jsonify,
 )
+from werkzeug.utils import secure_filename
+from werkzeug.wrappers import Response
 
 from extensions import db
-from models import Conversation, ConversationState, Blob  # ⬅️ ConversationState ergänzt
-from vectoplan import ensure_and_refresh, viewer_url, ensure_placeholder_if_empty
-import messages as msg  # Templates & Cards
+from models import Blob, Conversation
+import messages as msg
 
 
 bp = Blueprint("ui_chat", __name__)
 
-# ───────────────────────── helpers ─────────────────────────
 
-# 3D-Uploads (Speckle) + 2D-Plan (DXF)
-ALLOWED_EXTS = {".ifc", ".obj", ".stl", ".dxf"}
-ALLOWED_MIMES = {
-    # IFC
-    "model/ifc", "application/ifc", "application/x-ifc", "application/octet-stream",
-    # OBJ
-    "model/obj", "text/plain",
-    # STL
-    "model/stl", "application/sla", "model/x.stl-binary",
-    # DXF
-    "application/dxf", "application/x-dxf", "image/vnd.dxf", "image/x-dxf",
+# ─────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────
+
+# Speckle-free upload policy:
+# - DXF remains available for the 2D/CAD flow.
+# - 3D files are only stored as Blob + neutral local version.
+# - No automatic publish/import into any legacy backend.
+ALLOWED_EXTS = {
+    ".dxf",
+    ".ifc",
+    ".obj",
+    ".stl",
+    ".gltf",
+    ".glb",
 }
 
+ALLOWED_MIMES = {
+    # Generic / fallback
+    "application/octet-stream",
+    "text/plain",
+    # IFC
+    "model/ifc",
+    "application/ifc",
+    "application/x-ifc",
+    # OBJ
+    "model/obj",
+    "application/x-tgif",
+    # STL
+    "model/stl",
+    "application/sla",
+    "model/x.stl-binary",
+    "model/x.stl-ascii",
+    "application/vnd.ms-pki.stl",
+    # GLTF / GLB
+    "model/gltf+json",
+    "model/gltf-binary",
+    "application/gltf+json",
+    "application/gltf-buffer",
+    "application/octet-stream",
+    # DXF
+    "application/dxf",
+    "application/x-dxf",
+    "image/vnd.dxf",
+    "image/x-dxf",
+}
+
+DEFAULT_APP_PUBLIC_URL = "http://localhost:5103"
+DEFAULT_EDITOR_PUBLIC_URL = "http://localhost:5100"
+DEFAULT_OPENLAYER_PUBLIC_URL = "http://localhost:5190"
+
+DEFAULT_ALLOWED_FRAME_SRC = (
+    "self",
+    "http://localhost:5100",
+    "http://127.0.0.1:5100",
+    "http://localhost:5190",
+    "http://127.0.0.1:5190",
+)
+
+DEFAULT_ALLOWED_FRAME_PARENTS = (
+    "http://localhost:5103",
+    "http://127.0.0.1:5103",
+)
+
+_SPLIT_RE = re.compile(r"[\s,;]+")
+
+
+# ─────────────────────────────────────────────────────────────
+# Cached parsing helpers
+# ─────────────────────────────────────────────────────────────
+
+@lru_cache(maxsize=256)
+def _cached_split_text_list(raw: str, fallback: str = "") -> Tuple[str, ...]:
+    try:
+        text = str(raw or "").strip()
+
+        if not text:
+            text = str(fallback or "").strip()
+
+        if not text:
+            return tuple()
+
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                result: List[str] = []
+                for item in parsed:
+                    item_text = str(item or "").strip()
+                    if item_text and item_text not in result:
+                        result.append(item_text)
+                return tuple(result)
+        except Exception:
+            pass
+
+        result = []
+        for part in _SPLIT_RE.split(text):
+            item_text = str(part or "").strip()
+            if item_text and item_text not in result:
+                result.append(item_text)
+
+        return tuple(result)
+
+    except Exception:
+        try:
+            return tuple(str(fallback or "").split())
+        except Exception:
+            return tuple()
+
+
+@lru_cache(maxsize=128)
+def _cached_origin_from_url(value: str) -> str:
+    try:
+        parsed = urlsplit(str(value or "").strip())
+
+        if parsed.scheme not in {"http", "https"}:
+            return ""
+
+        if not parsed.netloc:
+            return ""
+
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    except Exception:
+        return ""
+
+
+# ─────────────────────────────────────────────────────────────
+# Config helpers
+# ─────────────────────────────────────────────────────────────
+
+def _cfg_raw(key: str, default: Any = None) -> Any:
+    try:
+        value = current_app.config.get(key)
+
+        if value is not None and value != "":
+            return value
+
+        env_value = os.environ.get(key)
+        if env_value is not None and str(env_value).strip() != "":
+            return env_value
+
+        return default
+
+    except Exception:
+        return default
+
+
+def _cfg_str(key: str, default: str = "") -> str:
+    try:
+        value = _cfg_raw(key, default)
+        return str(value if value is not None else default).strip()
+    except Exception:
+        return default
+
+
+def _cfg_first(keys: Sequence[str], default: str = "") -> str:
+    try:
+        for key in keys:
+            value = _cfg_str(str(key), "")
+            if value:
+                return value
+        return default
+    except Exception:
+        return default
+
+
+def _cfg_bool(key: str, default: bool = False) -> bool:
+    try:
+        value = _cfg_raw(key, default)
+
+        if isinstance(value, bool):
+            return bool(value)
+
+        text = str(value).strip().lower()
+
+        if text in {"1", "true", "t", "yes", "y", "on", "ja"}:
+            return True
+
+        if text in {"0", "false", "f", "no", "n", "off", "nein"}:
+            return False
+
+        return default
+
+    except Exception:
+        return default
+
+
+def _cfg_int(key: str, default: int) -> int:
+    try:
+        value = _cfg_raw(key, default)
+        if isinstance(value, bool):
+            return default
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
+def _cfg_text_list(keys: Sequence[str], default: Iterable[str]) -> List[str]:
+    try:
+        fallback = " ".join(str(item) for item in default)
+        raw = _cfg_first(keys, fallback)
+
+        parsed = list(_cached_split_text_list(raw, fallback))
+
+        result: List[str] = []
+        for item in parsed:
+            text = str(item or "").strip()
+            if text and text not in result:
+                result.append(text)
+
+        return result or list(default)
+
+    except Exception:
+        return list(default)
+
+
+# ─────────────────────────────────────────────────────────────
+# Logging helpers
+# ─────────────────────────────────────────────────────────────
+
+def _log_warning(message: str, *args: Any) -> None:
+    try:
+        current_app.logger.warning(message, *args)
+    except Exception:
+        pass
+
+
+def _log_exception(message: str, exc: Exception | None = None) -> None:
+    try:
+        if exc is None:
+            current_app.logger.exception(message)
+        else:
+            current_app.logger.exception("%s: %s", message, exc.__class__.__name__)
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────
+# Response / security helpers
+# ─────────────────────────────────────────────────────────────
 
 def _is_dev() -> bool:
     try:
@@ -48,104 +279,253 @@ def _is_dev() -> bool:
         return False
 
 
-def _apply_security_headers(resp) -> None:
+def _csp_token(value: str) -> str:
+    try:
+        text = str(value or "").strip()
+
+        if text in {"self", "'self'"}:
+            return "'self'"
+
+        return text
+
+    except Exception:
+        return ""
+
+
+def _csp_join(values: Sequence[str]) -> str:
+    try:
+        result: List[str] = []
+
+        for item in values:
+            token = _csp_token(item)
+            if token and token not in result:
+                result.append(token)
+
+        return " ".join(result)
+
+    except Exception:
+        return ""
+
+
+def _app_frame_src_values() -> List[str]:
     """
-    Minimal, robust. Keine harten CSPs, da Viewer/iframes dynamisch sind.
+    Browser destinations allowed inside the app workspace iframe.
+
+    This is the parent-side CSP frame-src/child-src contract.
+    It must include:
+    - self for LV/Admin/2D/local routes
+    - Editor public origin
+    - OpenLayer public origin
     """
+    try:
+        configured = _cfg_text_list(
+            (
+                "VECTOPLAN_APP_ALLOWED_FRAME_SRC",
+                "APP_ALLOWED_FRAME_SRC",
+                "CSP_FRAME_SRC",
+                "SECURITY_CSP_FRAME_SRC",
+            ),
+            DEFAULT_ALLOWED_FRAME_SRC,
+        )
+
+        result: List[str] = []
+
+        for item in configured:
+            token = str(item or "").strip()
+            if not token:
+                continue
+            if token not in result:
+                result.append(token)
+
+        editor_origin = _cached_origin_from_url(
+            _cfg_first(
+                (
+                    "VECTOPLAN_EDITOR_PUBLIC_URL",
+                    "VECTOPLAN_EDITOR_PUBLIC_BASE_URL",
+                    "EDITOR_PUBLIC_URL",
+                ),
+                DEFAULT_EDITOR_PUBLIC_URL,
+            )
+        )
+
+        openlayer_origin = _cached_origin_from_url(
+            _cfg_first(
+                (
+                    "OPENLAYER_PUBLIC_URL",
+                    "OPENLAYER_PUBLIC_BASE_URL",
+                    "VECTOPLAN_OPENLAYER_PUBLIC_URL",
+                ),
+                DEFAULT_OPENLAYER_PUBLIC_URL,
+            )
+        )
+
+        for origin in (editor_origin, openlayer_origin):
+            if origin and origin not in result:
+                result.append(origin)
+
+        if "self" not in result and "'self'" not in result:
+            result.insert(0, "self")
+
+        return result
+
+    except Exception:
+        return list(DEFAULT_ALLOWED_FRAME_SRC)
+
+
+def _frame_ancestors_values() -> List[str]:
+    """
+    Origins allowed to frame this app.
+
+    Normal use is top-level, but keeping this explicit avoids wildcard framing
+    and prepares controlled embedding during local diagnostics.
+    """
+    try:
+        return _cfg_text_list(
+            (
+                "VECTOPLAN_ALLOWED_FRAME_PARENTS",
+                "VECTOPLAN_FRAME_ANCESTORS",
+                "FRAME_ANCESTORS",
+            ),
+            DEFAULT_ALLOWED_FRAME_PARENTS,
+        )
+    except Exception:
+        return list(DEFAULT_ALLOWED_FRAME_PARENTS)
+
+
+def _workspace_csp_header_value() -> str:
+    try:
+        frame_src = _csp_join(_app_frame_src_values())
+        frame_ancestors = _csp_join(["self", *_frame_ancestors_values()])
+
+        directives = [
+            f"frame-src {frame_src}",
+            f"child-src {frame_src}",
+            f"frame-ancestors {frame_ancestors}",
+        ]
+
+        return "; ".join(directive for directive in directives if directive.strip())
+
+    except Exception:
+        return (
+            "frame-src 'self' http://localhost:5100 http://127.0.0.1:5100 "
+            "http://localhost:5190 http://127.0.0.1:5190; "
+            "child-src 'self' http://localhost:5100 http://127.0.0.1:5100 "
+            "http://localhost:5190 http://127.0.0.1:5190; "
+            "frame-ancestors 'self' http://localhost:5103 http://127.0.0.1:5103"
+        )
+
+
+def _apply_security_headers(resp: Response) -> None:
     try:
         resp.headers.setdefault("Referrer-Policy", "no-referrer")
     except Exception:
         pass
+
     try:
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     except Exception:
         pass
 
 
-def _apply_cache_headers(resp, *, no_store: bool = False) -> None:
-    """
-    no_store=True erzwingt no-store.
-    In DEV wird standardmäßig no-store gesetzt.
-    """
+def _apply_cache_headers(resp: Response, *, no_store: bool = False) -> None:
     try:
         if no_store or _is_dev():
-            resp.headers["Cache-Control"] = "no-store"
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
             resp.headers.setdefault("Pragma", "no-cache")
             resp.headers.setdefault("Expires", "0")
     except Exception:
         pass
 
 
-def _apply_frame_headers(resp) -> None:
+def _apply_frame_headers(resp: Response, *, allow_embed: Optional[bool] = None, workspace_shell: bool = False) -> None:
     """
-    Standard: SAMEORIGIN.
-    Optional per ?allow_embed=1: frame-ancestors * und XFO entfernen.
+    Route-level frame policy.
+
+    Important:
+    - Never emits frame-ancestors *.
+    - The app shell receives frame-src/child-src for Editor/OpenLayer.
+    - Same-origin local pages keep X-Frame-Options:SAMEORIGIN unless embed is explicit.
     """
     try:
-        if request.args.get("allow_embed") == "1":
-            resp.headers["Content-Security-Policy"] = "frame-ancestors *"
+        if allow_embed is None:
+            allow_embed = request.args.get("allow_embed") == "1" or request.args.get("embed") == "1"
+
+        if workspace_shell:
+            resp.headers["Content-Security-Policy"] = _workspace_csp_header_value()
+            resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+            return
+
+        if allow_embed:
+            frame_ancestors = _csp_join(["self", *_frame_ancestors_values()])
+            resp.headers["Content-Security-Policy"] = f"frame-ancestors {frame_ancestors}"
             try:
                 resp.headers.pop("X-Frame-Options", None)
             except Exception:
                 pass
         else:
             resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+
     except Exception:
         pass
 
 
-def _finalize_html_response(resp, *, no_store: bool = False) -> None:
+def _finalize_html_response(
+    resp: Response,
+    *,
+    no_store: bool = False,
+    allow_embed: Optional[bool] = None,
+    workspace_shell: bool = False,
+) -> Response:
     try:
         _apply_security_headers(resp)
     except Exception:
         pass
-    try:
-        _apply_cache_headers(resp, no_store=no_store)
-    except Exception:
-        pass
-    try:
-        _apply_frame_headers(resp)
-    except Exception:
-        pass
 
-
-def _finalize_json_response(resp, *, no_store: bool = True) -> None:
-    # JSON sollte im UI-Kontext i. d. R. nicht aggressiv gecacht werden
-    try:
-        _apply_security_headers(resp)
-    except Exception:
-        pass
     try:
         _apply_cache_headers(resp, no_store=no_store)
     except Exception:
         pass
 
-
-def _simple_html_error(message: str, code: int = 500):
-    """
-    Robuster HTML-Fallback für Iframe-Targets (besser als JSON im Viewer-Frame).
-    """
     try:
-        safe = (message or "error")[:1000]
-    except Exception:
-        safe = "error"
-    html = (
-        "<!doctype html><html lang='de'><head>"
-        "<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-        f"<title>{code}</title></head>"
-        "<body style='font:14px/1.4 system-ui,Segoe UI,Roboto,Arial;margin:24px;'>"
-        f"<h1 style='margin:0 0 10px 0;'>{code}</h1>"
-        f"<p style='margin:0;color:#444;'>{safe}</p>"
-        "</body></html>"
-    )
-    resp = make_response(html, code)
-    try:
-        resp.headers["Content-Type"] = "text/html; charset=utf-8"
+        _apply_frame_headers(resp, allow_embed=allow_embed, workspace_shell=workspace_shell)
     except Exception:
         pass
-    _finalize_html_response(resp, no_store=True)
+
     return resp
 
+
+def _finalize_json_response(resp: Response, *, no_store: bool = True) -> Response:
+    try:
+        _apply_security_headers(resp)
+    except Exception:
+        pass
+
+    try:
+        _apply_cache_headers(resp, no_store=no_store)
+    except Exception:
+        pass
+
+    return resp
+
+
+def _json_error(message: str, status: int = 500, *, code: Optional[str] = None) -> Response:
+    payload: Dict[str, Any] = {
+        "ok": False,
+        "error": message,
+    }
+
+    if code:
+        payload["code"] = code
+
+    resp = jsonify(payload)
+    resp.status_code = status
+    _finalize_json_response(resp, no_store=True)
+    return resp
+
+
+# ─────────────────────────────────────────────────────────────
+# Generic helpers
+# ─────────────────────────────────────────────────────────────
 
 def _ext_of(filename: str) -> str:
     try:
@@ -154,105 +534,321 @@ def _ext_of(filename: str) -> str:
         return ""
 
 
+def _safe_filename(filename: Optional[str], fallback: str = "upload") -> str:
+    try:
+        cleaned = secure_filename(filename or "")
+        return cleaned or fallback
+    except Exception:
+        return fallback
+
+
+def _safe_quote(value: Any) -> str:
+    try:
+        return quote(str(value), safe="")
+    except Exception:
+        return ""
+
+
 def _validate_filetype(filename: str, mimetype: Optional[str]) -> Tuple[bool, str]:
     """
-    Ermittelt erlaubte Endung.
-    Priorität: Dateiendung > MIME-Heuristik.
+    Validate file type by extension first, then MIME fallback.
     """
     try:
         ext = _ext_of(filename)
+
         if ext in ALLOWED_EXTS:
             return True, ext
-        mime = (mimetype or "").lower()
+
+        mime = (mimetype or "").lower().strip()
+
         if mime in ALLOWED_MIMES:
             if "ifc" in mime:
                 return True, ".ifc"
             if "stl" in mime or "sla" in mime:
                 return True, ".stl"
-            if "obj" in mime:
+            if "obj" in mime or mime == "text/plain":
                 return True, ".obj"
+            if "gltf+json" in mime:
+                return True, ".gltf"
+            if "gltf-binary" in mime or "gltf-buffer" in mime:
+                return True, ".glb"
             if "dxf" in mime or "vnd.dxf" in mime or "x-dxf" in mime:
                 return True, ".dxf"
+
         return False, ext
+
     except Exception:
         return False, ""
 
 
-def _proxied_viewer_url(vurl: str) -> str:
-    try:
-        return url_for("embed.proxy_frame", url=quote(vurl, safe="")) if vurl else ""
-    except Exception:
-        return ""
-
-
 def _file_urls(file_id: str) -> Dict[str, str]:
-    """Relative URLs wie /v1/files/<id>/... für Frontend-Kompatibilität."""
+    """
+    Relative URLs for frontend compatibility.
+    """
     try:
-        base = ""
-        fid = quote(str(file_id), safe="")
+        file_id_safe = quote(str(file_id), safe="")
         return {
-            "content_url": f"{base}/v1/files/{fid}/content",
-            "download_url": f"{base}/v1/files/{fid}/download",
-            "meta_url": f"{base}/v1/files/{fid}",
+            "content_url": f"/v1/files/{file_id_safe}/content",
+            "download_url": f"/v1/files/{file_id_safe}/download",
+            "meta_url": f"/v1/files/{file_id_safe}",
         }
     except Exception:
         return {}
 
 
-def _record_version_safe(
+def _url_for_safe(endpoint: str, fallback: str, **values: Any) -> str:
+    try:
+        return str(url_for(endpoint, **values))
+    except Exception:
+        return fallback
+
+
+def _editor_url_for_chat(chat_id: str) -> str:
+    """
+    Local app route used as iframe target for the 3D workspace.
+
+    This does not build project/world structures. It only points the iframe to
+    the editor integration route created in routes/ui/editor.py.
+    """
+    chat_id_safe = _safe_quote(chat_id)
+    fallback = f"/ui/chat/{chat_id_safe}/editor"
+    return _url_for_safe("ui_editor.editor_iframe", fallback, chat_id=chat_id)
+
+
+def _map_url_for_chat(chat_id: str) -> str:
+    """
+    Local app route used as iframe target for the Map workspace.
+
+    The route itself redirects to the browser-facing OpenLayer public URL.
+    """
+    chat_id_safe = _safe_quote(chat_id)
+    fallback = f"/ui/chat/{chat_id_safe}/map"
+    return _url_for_safe("ui_map.map_page", fallback, chat_id=chat_id)
+
+
+def _viewer_json_url_for_chat(chat_id: str) -> str:
+    chat_id_safe = _safe_quote(chat_id)
+    fallback = f"/ui/chat/{chat_id_safe}/viewer.json"
+    return _url_for_safe("ui_chat.viewer_json", fallback, chat_id=chat_id)
+
+
+def _versions_json_url_for_chat(chat_id: str) -> str:
+    chat_id_safe = _safe_quote(chat_id)
+    fallback = f"/ui/chat/{chat_id_safe}/versions.json"
+    return _url_for_safe("ui_chat.versions_json", fallback, chat_id=chat_id)
+
+
+def _upload_url_for_chat(chat_id: str) -> str:
+    chat_id_safe = _safe_quote(chat_id)
+    fallback = f"/ui/chat/{chat_id_safe}/upload"
+    return _url_for_safe("ui_chat.ui_upload", fallback, chat_id=chat_id)
+
+
+def _cad2d_url_for_chat(chat_id: str) -> str:
+    chat_id_safe = _safe_quote(chat_id)
+    fallback = f"/ui/chat/{chat_id_safe}/cad2d"
+    return _url_for_safe("ui_2dviewer.cad2d_page", fallback, chat_id=chat_id)
+
+
+def _plan2d_json_url_for_chat(chat_id: str) -> str:
+    chat_id_safe = _safe_quote(chat_id)
+    fallback = f"/ui/chat/{chat_id_safe}/plan2d.json"
+    return _url_for_safe("ui_2dviewer.plan2d_json", fallback, chat_id=chat_id)
+
+
+def _cad_embed_json_url_for_chat(chat_id: str) -> str:
+    chat_id_safe = _safe_quote(chat_id)
+    fallback = f"/ui/chat/{chat_id_safe}/cad-embed.json"
+    return _url_for_safe("ui_2dviewer.cad_embed_json", fallback, chat_id=chat_id)
+
+
+def _state_selection_url_for_chat(chat_id: str) -> str:
+    chat_id_safe = _safe_quote(chat_id)
+    fallback = f"/v1/chats/{chat_id_safe}/viewer/selection"
+    return _url_for_safe("viewer_selection.viewer_selection", fallback, chat_id=chat_id)
+
+
+def _workspace_context_for_chat(chat_id: str) -> Dict[str, Any]:
+    """
+    Single source of truth for app-shell workspace URLs.
+
+    The template may use only some of these values now, but providing the full
+    shape makes the next chat_viewer.html/main.js step safer.
+    """
+    try:
+        editor_url = _editor_url_for_chat(chat_id)
+        map_url = _map_url_for_chat(chat_id)
+
+        return {
+            "chat_id": str(chat_id),
+            "default_mode": "3d",
+            "workspace_mode": "editor",
+            "editor_url": editor_url,
+            "viewer_url": editor_url,
+            "map_url": map_url,
+            "paths": {
+                "editorPagePath": editor_url,
+                "initialEditorUrl": editor_url,
+                "viewerJsonPath": _viewer_json_url_for_chat(chat_id),
+                "versionsPath": _versions_json_url_for_chat(chat_id),
+                "mapPagePath": map_url,
+                "plan2dJsonPath": _plan2d_json_url_for_chat(chat_id),
+                "cad2dPagePath": _cad2d_url_for_chat(chat_id),
+                "cadEmbedJsonPath": _cad_embed_json_url_for_chat(chat_id),
+                "adminPagePath": _url_for_safe(
+                    "ui_chat.admin_page",
+                    f"/ui/chat/{_safe_quote(chat_id)}/admin",
+                    chat_id=chat_id,
+                ),
+                "lvPagePath": _url_for_safe(
+                    "ui_chat.lv_page",
+                    f"/ui/chat/{_safe_quote(chat_id)}/lv",
+                    chat_id=chat_id,
+                ),
+                "uploadPath": _upload_url_for_chat(chat_id),
+                "stateGetPath": _state_selection_url_for_chat(chat_id),
+                "statePutPath": _state_selection_url_for_chat(chat_id),
+            },
+        }
+
+    except Exception:
+        chat_id_safe = _safe_quote(chat_id)
+        editor_url = f"/ui/chat/{chat_id_safe}/editor"
+        map_url = f"/ui/chat/{chat_id_safe}/map"
+        return {
+            "chat_id": str(chat_id),
+            "default_mode": "3d",
+            "workspace_mode": "editor",
+            "editor_url": editor_url,
+            "viewer_url": editor_url,
+            "map_url": map_url,
+            "paths": {
+                "editorPagePath": editor_url,
+                "initialEditorUrl": editor_url,
+                "viewerJsonPath": f"/ui/chat/{chat_id_safe}/viewer.json",
+                "versionsPath": f"/ui/chat/{chat_id_safe}/versions.json",
+                "mapPagePath": map_url,
+                "plan2dJsonPath": f"/ui/chat/{chat_id_safe}/plan2d.json",
+                "cad2dPagePath": f"/ui/chat/{chat_id_safe}/cad2d",
+                "cadEmbedJsonPath": f"/ui/chat/{chat_id_safe}/cad-embed.json",
+                "adminPagePath": f"/ui/chat/{chat_id_safe}/admin",
+                "lvPagePath": f"/ui/chat/{chat_id_safe}/lv",
+                "uploadPath": f"/ui/chat/{chat_id_safe}/upload",
+                "stateGetPath": f"/v1/chats/{chat_id_safe}/viewer/selection",
+                "statePutPath": f"/v1/chats/{chat_id_safe}/viewer/selection",
+            },
+        }
+
+
+def _record_file_version_safe(
+    *,
     conv: Conversation,
     kind: str,
     label: str,
-    speckle_info: dict,
     blob: Optional[Blob],
+    meta: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
-    Legt eine Version an. Für DXF genügt blob + kind="BPA_DXF".
+    Store a local version entry without Speckle metadata.
+
+    This is deliberately defensive because versioning.py is transitional.
+    If an older signature is still present, compatibility kwargs are passed as
+    None only, never as real Speckle data.
     """
     try:
-        from versioning import record_version, prune
+        from versioning import prune, record_version
 
-        meta = {"speckle": speckle_info}
+        clean_meta: Dict[str, Any] = {
+            "source": "vectoplan-app",
+            "source_service": "vectoplan-app",
+            "source_kind": "ui_upload",
+            "storage": "blob",
+            "stored_only": True,
+            "legacy_speckle": False,
+            "legacy_3d_backend": False,
+        }
+
+        if meta:
+            clean_meta.update(meta)
+
         if blob:
-            meta.update(
+            clean_meta.update(
                 {
                     "filename": blob.filename,
                     "mime": blob.mime,
                     "size": blob.size,
                     "sha256": blob.sha256,
+                    "blob_id": blob.id,
                 }
             )
 
-        record_version(
-            conversation_id=conv.id,
-            kind=kind,
-            label=label,
-            source_message_id=None,
-            input_blob_id=blob.id if blob else None,
-            speckle_project_id=speckle_info.get("project_id"),
-            speckle_model_id=speckle_info.get("model_id"),
-            speckle_version_id=speckle_info.get("version_id"),
-            status="ok",
-            meta=meta,
-        )
+        try:
+            record_version(
+                conversation_id=conv.id,
+                kind=kind,
+                label=label,
+                source_message_id=None,
+                input_blob_id=blob.id if blob else None,
+                blob_id=blob.id if blob else None,
+                artifact_ref={
+                    "type": "blob",
+                    "blob_id": blob.id if blob else None,
+                }
+                if blob
+                else None,
+                status="stored",
+                meta=clean_meta,
+            )
+
+        except TypeError:
+            try:
+                record_version(
+                    conversation_id=conv.id,
+                    kind=kind,
+                    label=label,
+                    source_message_id=None,
+                    input_blob_id=blob.id if blob else None,
+                    status="stored",
+                    meta=clean_meta,
+                )
+            except TypeError:
+                record_version(
+                    conversation_id=conv.id,
+                    kind=kind,
+                    label=label,
+                    source_message_id=None,
+                    input_blob_id=blob.id if blob else None,
+                    speckle_project_id=None,
+                    speckle_model_id=None,
+                    speckle_version_id=None,
+                    status="stored",
+                    meta=clean_meta,
+                )
+
         keep = int(current_app.config.get("KEEP_VERSIONS_PER_PROJECT", 10)) or 10
+
         try:
             prune(conversation_id=conv.id, kind=kind, keep=keep)
         except Exception:
-            current_app.logger.warning("version prune failed", exc_info=True)
+            _log_warning("version prune failed", exc_info=True)
+
     except Exception:
-        current_app.logger.warning("versioning not available or failed", exc_info=True)
+        _log_warning("versioning not available or failed", exc_info=True)
 
 
 def _has_start_card(conv: Conversation) -> bool:
     try:
-        for m in list(conv.transcript or []):
-            if not isinstance(m, dict):
+        for item in list(conv.transcript or []):
+            if not isinstance(item, dict):
                 continue
-            meta = m.get("meta") or {}
+
+            meta = item.get("meta") or {}
+
             if meta.get("type") == "card" and str(meta.get("template") or "") == "project_welcome":
                 return True
+
         return False
+
     except Exception:
         return False
 
@@ -261,11 +857,20 @@ def _post_start_card_if_missing(conv: Conversation) -> None:
     try:
         if _has_start_card(conv):
             return
+
         payload = {
             "wfs_url": current_app.config.get("PROJECT_WELCOME_WFS_URL", ""),
             "layer": current_app.config.get("PROJECT_WELCOME_LAYER", ""),
-            "hint": current_app.config.get("PROJECT_WELCOME_HINT", "Der AI-Chat dient zur Vereinfachung der Bedienung unserer tausenden Möglichkeiten, Daten auszuwerten oder Dinge zu erzeugen. Dieser ist noch sehr fehleranfällig, wir arbeiten stetig daran, diesen besser zu machen, denke daran und sei nicht zu hart zu uns ;)"),
+            "hint": current_app.config.get(
+                "PROJECT_WELCOME_HINT",
+                (
+                    "Der AI-Chat dient zur Vereinfachung der Bedienung unserer "
+                    "tausenden Möglichkeiten, Daten auszuwerten oder Dinge zu "
+                    "erzeugen."
+                ),
+            ),
         }
+
         msg.post_card_message(
             conversation=conv,
             template_key="project_welcome",
@@ -274,20 +879,22 @@ def _post_start_card_if_missing(conv: Conversation) -> None:
             trace=["system"],
             validate=False,
         )
+
         try:
             db.session.add(conv)
             db.session.commit()
         except Exception:
             db.session.rollback()
+
     except Exception:
-        current_app.logger.warning("post_start_card failed", exc_info=True)
+        _log_warning("post_start_card failed", exc_info=True)
 
 
 def _uploads_disabled() -> bool:
     """
-    Globale Schalter aus config.py:
-      - VIEW_ONLY_MODE     → kompletter Readonly-Betrieb
-      - DISABLE_UI_UPLOADS → UI-Uploads gesperrt
+    UI upload switch.
+
+    VIEW_ONLY_MODE or DISABLE_UI_UPLOADS disables UI uploads completely.
     """
     try:
         return bool(current_app.config.get("VIEW_ONLY_MODE")) or bool(
@@ -297,7 +904,83 @@ def _uploads_disabled() -> bool:
         return True
 
 
-# ───────────────────────── pages ─────────────────────────
+def _kind_for_ext(ext: str) -> str:
+    if ext == ".dxf":
+        return "BPA_DXF"
+    if ext == ".ifc":
+        return "BGA_IFC"
+    if ext in {".obj", ".stl", ".gltf", ".glb"}:
+        return "BGA_MESH"
+    return "FILE"
+
+
+def _collect_uploaded_files():
+    try:
+        if "files" in request.files:
+            return request.files.getlist("files")
+        if "file" in request.files:
+            return [request.files["file"]]
+        return []
+    except Exception:
+        return []
+
+
+def _create_blob_from_upload(file_storage) -> Blob:
+    filename = _safe_filename(getattr(file_storage, "filename", None), "upload")
+    mimetype = getattr(file_storage, "mimetype", None) or "application/octet-stream"
+
+    data = file_storage.read()
+
+    if not data:
+        raise ValueError("empty file")
+
+    sha256 = ""
+
+    try:
+        sha256 = hashlib.sha256(data).hexdigest()
+    except Exception:
+        sha256 = ""
+
+    blob = Blob(
+        filename=filename,
+        mime=mimetype,
+        size=len(data),
+        sha256=sha256,
+        data=data,
+    )
+
+    db.session.add(blob)
+    db.session.flush()
+
+    return blob
+
+
+def _get_or_create_conversation(chat_id: Optional[str]) -> Optional[Conversation]:
+    try:
+        conv = Conversation.query.get(chat_id) if chat_id else None
+
+        if conv is not None:
+            return conv
+
+        conv = Conversation()
+        db.session.add(conv)
+        db.session.commit()
+
+        return conv
+
+    except Exception:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
+        _log_exception("create conversation failed")
+        return None
+
+
+# ─────────────────────────────────────────────────────────────
+# Pages
+# ─────────────────────────────────────────────────────────────
 
 @bp.get("/ui")
 def ui_root():
@@ -308,414 +991,412 @@ def ui_root():
 def chat_page():
     chat_id = request.args.get("chat_id")
     conv = Conversation.query.get(chat_id) if chat_id else None
+
     if conv is None:
-        try:
-            conv = Conversation()
-            db.session.add(conv)
-            db.session.commit()
-        except Exception:
-            current_app.logger.exception("create conversation failed")
+        conv = _get_or_create_conversation(chat_id)
+
+        if conv is None:
             return redirect(url_for("ui_chat.chat_page"), code=302)
+
         _post_start_card_if_missing(conv)
         return redirect(url_for("ui_chat.chat_page", chat_id=conv.id), code=302)
 
     try:
         resp = make_response(render_template("chat.html", chat_id=conv.id))
-        _finalize_html_response(resp, no_store=False)
-        return resp
+        return _finalize_html_response(resp, no_store=False)
     except Exception as ex:
-        current_app.logger.exception("render chat.html failed")
-        return _simple_html_error(f"chat page render failed: {ex}", 500)
+        _log_exception("render chat.html failed", ex)
+        return _json_error(f"chat page render failed: {ex}", 500, code="render_failed")
 
 
 @bp.get("/ui/chat-3d")
 def chat_viewer_page():
+    """
+    Central chat + workspace shell.
+
+    Speckle-free behavior:
+    - create/load Conversation
+    - post start card if missing
+    - render chat_viewer.html
+    - provide the local editor iframe route as viewer_url compatibility value
+    - provide the local map iframe route as map_url
+
+    No ensure_and_refresh.
+    No old viewer_url.
+    No old external viewer.
+    No placeholder model.
+    """
     chat_id = request.args.get("chat_id")
     conv = Conversation.query.get(chat_id) if chat_id else None
+
     if conv is None:
-        try:
-            conv = Conversation()
-            db.session.add(conv)
-            db.session.commit()
-        except Exception:
-            current_app.logger.exception("create conversation failed")
+        conv = _get_or_create_conversation(chat_id)
+
+        if conv is None:
             return redirect(url_for("ui_chat.chat_viewer_page"), code=302)
+
         _post_start_card_if_missing(conv)
         return redirect(url_for("ui_chat.chat_viewer_page", chat_id=conv.id), code=302)
 
-    # Projekt/Modell sicherstellen
     try:
-        ensure_and_refresh(conv)
-    except Exception:
-        current_app.logger.warning("vectoplan ensure/refresh failed", exc_info=True)
+        workspace = _workspace_context_for_chat(conv.id)
+        editor_url = workspace["editor_url"]
+        map_url = workspace["map_url"]
 
-    # EMBED-Viewer ermitteln; ggf. Platzhalter erzeugen
-    vurl = ""
-    try:
-        vurl = viewer_url(conv) or ""
-        if not vurl and getattr(conv, "vectoplan_project_id", None):
-            try:
-                ensure_placeholder_if_empty(conv)
-                vurl = viewer_url(conv) or ""
-            except Exception:
-                current_app.logger.warning("ensure_placeholder_if_empty failed", exc_info=True)
-    except Exception:
-        vurl = ""
+        resp = make_response(
+            render_template(
+                "chat_viewer.html",
+                chat_id=conv.id,
+                viewer_url=editor_url,
+                editor_url=editor_url,
+                initial_editor_url=editor_url,
+                map_url=map_url,
+                initial_map_url=map_url,
+                default_mode=workspace.get("default_mode", "3d"),
+                workspace_mode=workspace.get("workspace_mode", "editor"),
+                workspace=workspace,
+                workspace_paths=workspace.get("paths", {}),
+            )
+        )
 
-    try:
-        resp = make_response(render_template("chat_viewer.html", chat_id=conv.id, viewer_url=vurl or ""))
-        # Viewer-Seite ist dynamisch (UI/JS) → in DEV no-store, sonst ok
-        _finalize_html_response(resp, no_store=False)
-        return resp
+        return _finalize_html_response(resp, no_store=False, workspace_shell=True)
+
     except Exception as ex:
-        current_app.logger.exception("render chat_viewer.html failed")
-        return _simple_html_error(f"viewer page render failed: {ex}", 500)
+        _log_exception("render chat_viewer.html failed", ex)
+        return _json_error(f"chat viewer render failed: {ex}", 500, code="render_failed")
 
 
 @bp.get("/ui/chat/<chat_id>/lv")
 def lv_page(chat_id: str):
     """
-    LV-Tab: rendert templates/viewer/lv.html (als iframe target).
+    LV iframe target.
     """
     try:
         conv = Conversation.query.get(chat_id)
+
         if not conv:
-            return _simple_html_error("chat not found", 404)
+            return _json_error("chat not found", 404, code="not_found")
 
         resp = make_response(render_template("viewer/lv.html", chat_id=conv.id))
-        # Als iframe-content: eher no-store in DEV; prod kann cachen, aber sicher ist: no-store = True
-        # Hier bewusst no_store=False, weil Inhalt statisch ist; DEV übernimmt ohnehin no-store.
-        _finalize_html_response(resp, no_store=False)
-        return resp
+        return _finalize_html_response(resp, no_store=False)
+
     except Exception as ex:
-        current_app.logger.exception("render lv.html failed")
-        return _simple_html_error(f"lv render failed: {ex}", 500)
+        _log_exception("render lv.html failed", ex)
+        return _json_error(f"lv render failed: {ex}", 500, code="render_failed")
 
 
 @bp.get("/ui/chat/<chat_id>/admin")
 def admin_page(chat_id: str):
     """
-    Admin-Tab: rendert templates/viewer/admin.html (als iframe target).
+    Admin iframe target.
     """
     try:
         conv = Conversation.query.get(chat_id)
+
         if not conv:
-            return _simple_html_error("chat not found", 404)
+            return _json_error("chat not found", 404, code="not_found")
 
         resp = make_response(render_template("viewer/admin.html", chat_id=conv.id))
-        _finalize_html_response(resp, no_store=False)
-        return resp
+        return _finalize_html_response(resp, no_store=False)
+
     except Exception as ex:
-        current_app.logger.exception("render admin.html failed")
-        return _simple_html_error(f"admin render failed: {ex}", 500)
+        _log_exception("render admin.html failed", ex)
+        return _json_error(f"admin render failed: {ex}", 500, code="render_failed")
 
 
-# ───────────────────────── UI helpers (JSON) ─────────────────────────
+# ─────────────────────────────────────────────────────────────
+# UI JSON helpers
+# ─────────────────────────────────────────────────────────────
 
 @bp.get("/ui/chat/<chat_id>/viewer.json")
 def viewer_json(chat_id: str):
     """
-    Liefert Viewer-URLs *und* die aktuell bekannten IDs (project_id, model_id).
-    Das hilft dem Frontend, Query-URLs korrekt aufzubauen.
+    Backwards-compatible JSON endpoint for the existing frontend.
+
+    It no longer returns Speckle or old viewer information.
+    The 3D target is the local editor iframe route.
     """
     conv = Conversation.query.get(chat_id)
+
     if not conv:
-        return jsonify({"error": "not found"}), 404
+        return _json_error("not found", 404, code="not_found")
 
     try:
-        ensure_and_refresh(conv)
-    except Exception:
-        pass
+        workspace = _workspace_context_for_chat(conv.id)
+        editor_url = workspace["editor_url"]
+        map_url = workspace["map_url"]
 
-    vurl = ""
-    try:
-        vurl = viewer_url(conv) or ""
-        if not vurl and getattr(conv, "vectoplan_project_id", None):
-            try:
-                ensure_placeholder_if_empty(conv)
-                vurl = viewer_url(conv) or ""
-            except Exception:
-                current_app.logger.warning("ensure_placeholder_if_empty failed", exc_info=True)
-                vurl = ""
-    except Exception:
-        vurl = ""
+        payload = {
+            "ok": True,
+            "chat_id": conv.id,
+            "mode": "editor",
+            "workspace_mode": "editor",
+            "default_mode": "3d",
+            "viewer_url": editor_url,
+            "raw_viewer_url": editor_url,
+            "editor_url": editor_url,
+            "map_url": map_url,
+            "initial_editor_url": editor_url,
+            "initial_map_url": map_url,
+            "paths": workspace.get("paths", {}),
+            "viewer_selection": {
+                "mode": "editor",
+                "workspace_mode": "3d",
+                "legacy_3d_backend": False,
+            },
+            "services": {
+                "editor": {
+                    "iframe_path": editor_url,
+                    "public_url": current_app.config.get("VECTOPLAN_EDITOR_PUBLIC_URL", ""),
+                    "route": current_app.config.get("VECTOPLAN_EDITOR_ROUTE", "/editor"),
+                    "embed_enabled": bool(current_app.config.get("VECTOPLAN_EDITOR_EMBED_ENABLED", True)),
+                },
+                "openlayer": {
+                    "iframe_path": map_url,
+                    "public_url": current_app.config.get("OPENLAYER_PUBLIC_URL", ""),
+                    "route": current_app.config.get("OPENLAYER_ROUTE", "/map"),
+                    "embed_enabled": bool(current_app.config.get("OPENLAYER_EMBED_ENABLED", True)),
+                },
+            },
+            "legacy_speckle": False,
+            "legacy_3d_backend": False,
+        }
 
-    pid = getattr(conv, "vectoplan_project_id", None)
-    mid = getattr(conv, "vectoplan_model_id", None)
+        resp = jsonify(payload)
+        _finalize_json_response(resp, no_store=True)
+        return resp, 200
 
-    # Optional: aktuelle gespeicherte viewer_selection mitliefern (best effort)
-    sel = {}
-    try:
-        state = ConversationState.get_or_create(conv.id)
-        sel = dict(state.state_json.get("viewer_selection") or {})
-    except Exception:
-        sel = {}
-
-    resp = jsonify({
-        "chat_id": conv.id,
-        "project_id": pid,
-        "model_id": mid,
-        "viewer_url": _proxied_viewer_url(vurl),
-        "raw_viewer_url": vurl,
-        "viewer_selection": sel or None,
-    })
-    _finalize_json_response(resp, no_store=True)
-    return resp, 200
+    except Exception as ex:
+        _log_exception("viewer_json failed", ex)
+        return _json_error(str(ex), 500, code="viewer_json_failed")
 
 
 @bp.get("/ui/chat/<chat_id>/versions.json")
 def versions_json(chat_id: str):
     conv = Conversation.query.get(chat_id)
+
     if not conv:
-        return jsonify({"error": "not found"}), 404
+        return _json_error("not found", 404, code="not_found")
+
     try:
         from versioning import list_versions_by_conversation
     except Exception:
-        resp = jsonify({"items": [], "total": 0})
+        resp = jsonify({"items": [], "total": 0, "legacy_speckle": False, "legacy_3d_backend": False})
         _finalize_json_response(resp, no_store=True)
         return resp, 200
 
     try:
         kind = request.args.get("kind") or None
         items = list_versions_by_conversation(conversation_id=conv.id, kind=kind) or []
-        resp = jsonify({"items": items, "total": len(items)})
+
+        resp = jsonify(
+            {
+                "items": items,
+                "total": len(items),
+                "legacy_speckle": False,
+                "legacy_3d_backend": False,
+            }
+        )
         _finalize_json_response(resp, no_store=True)
         return resp, 200
+
     except Exception as ex:
-        current_app.logger.exception("versions_json failed")
-        resp = jsonify({"error": str(ex)})
-        _finalize_json_response(resp, no_store=True)
-        return resp, 500
+        _log_exception("versions_json failed", ex)
+        return _json_error(str(ex), 500, code="versions_json_failed")
 
 
 @bp.get("/ui/templates.json")
 def templates_json():
-    """Schlanke Liste für das Frontend: key, renderer, title, version."""
+    """
+    Lightweight template list for the frontend.
+    """
     try:
         items = msg.list_templates() or []
         slim = []
-        for t in items:
+
+        for item in items:
             try:
+                key = item.get("key")
+
+                # Do not expose old Speckle cards to the UI.
+                if str(key or "") == "speckle_viewer":
+                    continue
+
+                renderer = item.get("renderer") or "InfoCard"
+
+                if str(renderer or "") == "SpeckleViewerCard":
+                    continue
+
                 slim.append(
                     {
-                        "key": t.get("key"),
-                        "renderer": t.get("renderer") or "InfoCard",
-                        "title": t.get("title") or t.get("key"),
-                        "version": int(t.get("version") or 1),
+                        "key": key,
+                        "renderer": renderer,
+                        "title": item.get("title") or key,
+                        "version": int(item.get("version") or 1),
                     }
                 )
             except Exception:
                 continue
-        resp = jsonify({"items": slim, "total": len(slim)})
+
+        resp = jsonify({"items": slim, "total": len(slim), "legacy_speckle": False, "legacy_3d_backend": False})
         _finalize_json_response(resp, no_store=True)
         return resp, 200
+
     except Exception as ex:
-        current_app.logger.exception("templates_json failed")
-        resp = jsonify({"error": str(ex)})
-        _finalize_json_response(resp, no_store=True)
-        return resp, 500
+        _log_exception("templates_json failed", ex)
+        return _json_error(str(ex), 500, code="templates_json_failed")
 
 
-# ───────────────────────── UI upload (multipart) ─────────────────────────
+# ─────────────────────────────────────────────────────────────
+# UI upload
+# ─────────────────────────────────────────────────────────────
 
 @bp.post("/ui/chat/<chat_id>/upload")
 def ui_upload(chat_id: str):
     """
-    multipart/form-data
-      - 'file'  (einzeln) oder 'files' (mehrere)
-      - optional: 'model_name'
+    Multipart UI upload.
 
-    Verhalten:
-      - .ifc/.obj/.stl → Upload zu Speckle + Version 'BGA_IFC'/'BGA_MESH'
-                         ⮕ Label wird (falls möglich) auf commit_message gesetzt,
-                           damit Server- und lokale Liste identisch benannt sind.
-      - .dxf           → KEIN Speckle-Upload. Blob speichern + Version 'BPA_DXF'
+    Speckle-free behavior:
+    - validate extension/MIME
+    - persist file as Blob
+    - record local neutral version when versioning.py is available
+    - for DXF, expose the existing 2D route
+    - for 3D, return stored_only=True and editor_url
+
+    No upload to Speckle.
+    No old Vectoplan server publish.
+    No viewer_selection with project/model/version IDs.
     """
-    # Readonly-Schalter beachten
     if _uploads_disabled():
         payload = {
+            "ok": False,
             "error": "uploads disabled",
             "code": "uploads_disabled",
             "view_only": bool(current_app.config.get("VIEW_ONLY_MODE")),
+            "legacy_speckle": False,
+            "legacy_3d_backend": False,
         }
         resp = jsonify(payload)
         _finalize_json_response(resp, no_store=True)
         return resp, 403
 
     conv = Conversation.query.get(chat_id)
+
     if not conv:
-        resp = jsonify({"error": "not found"})
-        _finalize_json_response(resp, no_store=True)
-        return resp, 404
+        return _json_error("not found", 404, code="not_found")
 
-    # Dateien einsammeln
-    fs = []
-    try:
-        if "files" in request.files:
-            fs = request.files.getlist("files")
-        elif "file" in request.files:
-            fs = [request.files["file"]]
-    except Exception:
-        fs = []
-    if not fs:
-        resp = jsonify({"error": "no files"})
-        _finalize_json_response(resp, no_store=True)
-        return resp, 400
+    files = _collect_uploaded_files()
 
-    model_name = (request.form.get("model_name") or "").strip() or None
+    if not files:
+        return _json_error("no files", 400, code="no_files")
+
     items: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
 
-    # Lazy import für Speckle-Upload
-    try:
-        from vectoplan import upload_file_to_project
-    except Exception as ex:
-        upload_file_to_project = None  # type: ignore
-        current_app.logger.warning("upload_file_to_project not available: %s", ex)
+    for file_storage in files:
+        original_filename = getattr(file_storage, "filename", "") or ""
 
-    # Projekt vorbereiten (nur relevant für 3D)
-    try:
-        ensure_and_refresh(conv)
-    except Exception:
-        current_app.logger.warning("ensure_and_refresh in ui_upload failed", exc_info=True)
-
-    for f in fs:
         try:
-            ok, ext = _validate_filetype(f.filename, f.mimetype)
+            filename = _safe_filename(original_filename, "upload")
+            ok, ext = _validate_filetype(filename, getattr(file_storage, "mimetype", None))
+
             if not ok:
-                errors.append({"filename": f.filename, "error": f"unsupported file type: {ext or f.mimetype}"})
+                errors.append(
+                    {
+                        "filename": original_filename,
+                        "error": f"unsupported file type: {ext or getattr(file_storage, 'mimetype', '')}",
+                    }
+                )
                 continue
 
-            data = f.read()
-            if not data:
-                errors.append({"filename": f.filename, "error": "empty file"})
-                continue
+            blob = _create_blob_from_upload(file_storage)
+            kind = _kind_for_ext(ext)
+            label = os.path.basename(blob.filename or filename or "upload")
 
-            # Blob persistieren
-            b = Blob(
-                filename=f.filename or "file",
-                mime=f.mimetype or "application/octet-stream",
-                size=len(data),
-                sha256="",
-                data=data,
+            version_meta: Dict[str, Any] = {
+                "ext": ext,
+                "kind": kind,
+                "stored_only": True,
+                "legacy_speckle": False,
+                "legacy_3d_backend": False,
+            }
+
+            _record_file_version_safe(
+                conv=conv,
+                kind=kind,
+                label=label,
+                blob=blob,
+                meta=version_meta,
             )
-            try:
-                import hashlib
-                b.sha256 = hashlib.sha256(data).hexdigest()
-            except Exception:
-                b.sha256 = ""
-            db.session.add(b)
-            db.session.flush()  # b.id verfügbar
+
+            item: Dict[str, Any] = {
+                "ok": True,
+                "file_id": blob.id,
+                "blob_id": blob.id,
+                "filename": blob.filename,
+                "mime": blob.mime,
+                "size": blob.size,
+                "sha256": blob.sha256,
+                "ext": ext,
+                "kind": kind,
+                "stored_only": True,
+                "legacy_speckle": False,
+                "legacy_3d_backend": False,
+                **_file_urls(blob.id),
+            }
 
             if ext == ".dxf":
-                # DXF nicht zu Speckle hochladen. Version anlegen.
-                kind = "BPA_DXF"
                 try:
-                    _record_version_safe(
-                        conv=conv,
-                        kind=kind,
-                        label=os.path.basename(b.filename or "upload.dxf"),
-                        speckle_info={},
-                        blob=b,
+                    item["dxf_url"] = url_for(
+                        "ui_2dviewer.dxf_blob",
+                        chat_id=conv.id,
+                        blob_id=blob.id,
                     )
                 except Exception:
-                    pass
-
-                # Optionaler direkter DXF-Link
-                try:
-                    dxf_url = url_for("ui_2dviewer.dxf_blob", chat_id=conv.id, blob_id=b.id)
-                except Exception:
-                    dxf_url = ""
-
-                items.append(
-                    {
-                        "file_id": b.id,
-                        "filename": b.filename,
-                        "mime": b.mime,
-                        "size": b.size,
-                        "sha256": b.sha256,
-                        "ext": ext,
-                        "kind": kind,
-                        "dxf_url": dxf_url,
-                        **_file_urls(b.id),
-                    }
-                )
-
+                    item["dxf_url"] = ""
             else:
-                # 3D-Uploads (IFC/OBJ/STL)
-                if not upload_file_to_project:
-                    errors.append({"filename": f.filename, "error": "3D upload not available on server"})
-                    continue
+                item["editor_url"] = _editor_url_for_chat(conv.id)
 
-                info = upload_file_to_project(conv=conv, blob=b, model_name=model_name, file_ext=ext) or {}
-                vurl = info.get("viewer_url") or ""
-                # Bevorzugt commit_message für die lokale Version übernehmen (Namensgleichheit)
-                label = (info.get("commit_message") or os.path.basename(b.filename or "upload")).strip() or "upload"
-                kind = "BGA_IFC" if ext == ".ifc" else "BGA_MESH"
+            items.append(item)
 
-                try:
-                    _record_version_safe(
-                        conv=conv,
-                        kind=kind,
-                        label=label,
-                        speckle_info=info,
-                        blob=b,
-                    )
-                except Exception:
-                    pass
-
-                # Nach erfolgreichem Upload die Viewer-Selektion auf *diese* Version setzen
-                try:
-                    if info.get("project_id") and info.get("model_id") and info.get("version_id"):
-                        ConversationState.merge_patch(conv.id, {
-                            "viewer_selection": {
-                                "mode": "version",
-                                "project_id": info.get("project_id"),
-                                "model_id": info.get("model_id"),
-                                "version_id": info.get("version_id"),
-                            }
-                        })
-                except Exception:
-                    current_app.logger.warning("ui_upload: save viewer_selection failed", exc_info=True)
-
-                items.append(
-                    {
-                        "file_id": b.id,
-                        "filename": b.filename,
-                        "mime": b.mime,
-                        "size": b.size,
-                        "sha256": b.sha256,
-                        "ext": ext,
-                        "kind": kind,
-                        "project_id": info.get("project_id"),
-                        "model_id": info.get("model_id"),
-                        "version_id": info.get("version_id"),
-                        "viewer_url": _proxied_viewer_url(vurl),
-                        **_file_urls(b.id),
-                    }
-                )
+        except ValueError as ex:
+            errors.append(
+                {
+                    "filename": original_filename,
+                    "error": str(ex),
+                }
+            )
 
         except Exception as ex:
-            current_app.logger.exception("ui_upload failed for %s", getattr(f, "filename", ""))
-            errors.append({"filename": getattr(f, "filename", ""), "error": str(ex)})
+            _log_exception(f"ui_upload failed for {original_filename}", ex)
+            errors.append(
+                {
+                    "filename": original_filename,
+                    "error": str(ex),
+                }
+            )
 
-    # Änderungen sichern
     try:
         db.session.add(conv)
         db.session.commit()
     except Exception:
-        current_app.logger.warning("DB commit after ui_upload failed", exc_info=True)
+        db.session.rollback()
+        _log_warning("DB commit after ui_upload failed", exc_info=True)
 
-    # Einheitliche, frontendsichere Antwort
     status = 201 if items and not errors else (207 if items and errors else 422)
+
     body = {
+        "ok": bool(items),
         "status": "ok" if items else "error",
         "chat_id": conv.id,
         "items": items,
         "results": items,
         "errors": errors,
         "total": len(items),
+        "legacy_speckle": False,
+        "legacy_3d_backend": False,
     }
+
     resp = jsonify(body)
     _finalize_json_response(resp, no_store=True)
     return resp, status

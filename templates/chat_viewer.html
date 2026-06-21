@@ -1,4 +1,45 @@
-<!-- services/app/templates/chat_viewer.html -->
+<!-- services/vectoplan-app/templates/chat_viewer.html -->
+{% set chat_id_s = chat_id|string %}
+{% set base_url_s = request.host_url.rstrip('/') %}
+{% set chat_id_q = chat_id_s|urlencode %}
+
+{# Local app routes only. The browser must first hit vectoplan-app routes. #}
+{% set default_editor_url = '/ui/chat/' ~ chat_id_q ~ '/editor' %}
+{% set default_map_url = '/ui/chat/' ~ chat_id_q ~ '/map' %}
+{% set default_viewer_json_url = '/ui/chat/' ~ chat_id_q ~ '/viewer.json' %}
+{% set default_versions_url = '/ui/chat/' ~ chat_id_q ~ '/versions.json' %}
+{% set default_plan2d_url = '/ui/chat/' ~ chat_id_q ~ '/plan2d.json' %}
+{% set default_cad2d_url = '/ui/chat/' ~ chat_id_q ~ '/cad2d' %}
+{% set default_cad_embed_url = '/ui/chat/' ~ chat_id_q ~ '/cad-embed.json' %}
+{% set default_admin_url = '/ui/chat/' ~ chat_id_q ~ '/admin' %}
+{% set default_lv_url = '/ui/chat/' ~ chat_id_q ~ '/lv' %}
+{% set default_upload_url = '/ui/chat/' ~ chat_id_q ~ '/upload' %}
+{% set default_selection_url = '/v1/chats/' ~ chat_id_q ~ '/viewer/selection' %}
+
+{# Values passed by routes/ui/chat.py. Keep defensive fallbacks for older route versions. #}
+{% set workspace_obj = workspace|default({}, true) %}
+{% set workspace_paths_obj = workspace_paths|default({}, true) %}
+
+{% set resolved_editor_url = initial_editor_url|default(editor_url|default(viewer_url|default(default_editor_url, true), true), true) %}
+{% set resolved_map_url = initial_map_url|default(map_url|default(default_map_url, true), true) %}
+
+{% set editor_page_path = workspace_paths_obj.get('editorPagePath', default_editor_url) if workspace_paths_obj else default_editor_url %}
+{% set initial_editor_path = workspace_paths_obj.get('initialEditorUrl', resolved_editor_url) if workspace_paths_obj else resolved_editor_url %}
+{% set viewer_json_path = workspace_paths_obj.get('viewerJsonPath', default_viewer_json_url) if workspace_paths_obj else default_viewer_json_url %}
+{% set versions_path = workspace_paths_obj.get('versionsPath', default_versions_url) if workspace_paths_obj else default_versions_url %}
+{% set map_page_path = workspace_paths_obj.get('mapPagePath', resolved_map_url) if workspace_paths_obj else resolved_map_url %}
+{% set plan2d_json_path = workspace_paths_obj.get('plan2dJsonPath', default_plan2d_url) if workspace_paths_obj else default_plan2d_url %}
+{% set cad2d_page_path = workspace_paths_obj.get('cad2dPagePath', default_cad2d_url) if workspace_paths_obj else default_cad2d_url %}
+{% set cad_embed_json_path = workspace_paths_obj.get('cadEmbedJsonPath', default_cad_embed_url) if workspace_paths_obj else default_cad_embed_url %}
+{% set admin_page_path = workspace_paths_obj.get('adminPagePath', default_admin_url) if workspace_paths_obj else default_admin_url %}
+{% set lv_page_path = workspace_paths_obj.get('lvPagePath', default_lv_url) if workspace_paths_obj else default_lv_url %}
+{% set upload_path = workspace_paths_obj.get('uploadPath', default_upload_url) if workspace_paths_obj else default_upload_url %}
+{% set state_get_path = workspace_paths_obj.get('stateGetPath', default_selection_url) if workspace_paths_obj else default_selection_url %}
+{% set state_put_path = workspace_paths_obj.get('statePutPath', default_selection_url) if workspace_paths_obj else default_selection_url %}
+
+{% set resolved_default_mode = default_mode|default(workspace_obj.get('default_mode', '3d') if workspace_obj else '3d', true) %}
+{% set resolved_workspace_mode = workspace_mode|default(workspace_obj.get('workspace_mode', 'editor') if workspace_obj else 'editor', true) %}
+
 <!doctype html>
 <html lang="de" data-theme="light">
 <head>
@@ -8,16 +49,14 @@
   <meta name="color-scheme" content="light dark">
   <title>VectoAI - Alpha</title>
 
-  <!-- DEV/robust: Browser-Caches für dieses Dokument best-effort reduzieren -->
   <meta http-equiv="Cache-Control" content="no-store, max-age=0, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
 
-  <!-- Theme vorab aus localStorage setzen, um FOUC zu vermeiden -->
   <script>
     (function () {
       try {
-        const saved = localStorage.getItem("theme");
+        var saved = localStorage.getItem("theme");
         if (saved === "dark" || saved === "light") {
           document.documentElement.setAttribute("data-theme", saved);
         }
@@ -25,67 +64,125 @@
     })();
   </script>
 
-  <!-- Stabilere vh auf Mobile (für CSS: calc(var(--vh, 1vh) * 100)) -->
   <script>
     (function () {
       try {
-        const setVh = () => {
-          const vh = (window.innerHeight || 0) * 0.01;
+        var setVh = function () {
+          var vh = (window.innerHeight || document.documentElement.clientHeight || 0) * 0.01;
           document.documentElement.style.setProperty("--vh", vh + "px");
         };
+
         setVh();
+
         window.addEventListener("resize", setVh, { passive: true });
         window.addEventListener("orientationchange", setVh, { passive: true });
+        window.addEventListener("pageshow", setVh, { passive: true });
       } catch (e) {}
     })();
   </script>
 
-  <!-- Styles (per-chat cache-bust, best-effort) -->
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}?v={{ chat_id }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/cards.css') }}?v={{ chat_id }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}?v={{ chat_id_s }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/cards.css') }}?v={{ chat_id_s }}">
 
   <script>
     (function () {
       try {
+        var chatId = {{ chat_id_s|tojson }};
+
+        var editorPagePath = {{ editor_page_path|tojson }};
+        var initialEditorUrl = {{ initial_editor_path|tojson }};
+        var mapPagePath = {{ map_page_path|tojson }};
+
+        if (!editorPagePath) {
+          editorPagePath = "/ui/chat/" + encodeURIComponent(chatId) + "/editor";
+        }
+
+        if (!initialEditorUrl) {
+          initialEditorUrl = editorPagePath;
+        }
+
+        if (!mapPagePath) {
+          mapPagePath = "/ui/chat/" + encodeURIComponent(chatId) + "/map";
+        }
+
         window.APP_CONFIG = {
-          baseUrl: "{{ request.host_url.rstrip('/') }}",
+          appName: "vectoplan-app",
+          baseUrl: {{ base_url_s|tojson }},
+          chatId: chatId,
+
+          // Chat
           chatPath: "/v1/chat",
           streamPath: "/v1/chat/stream",
-          chatId: "{{ chat_id }}",
 
-          // 3D + Versionen
-          viewerJsonPath: "/ui/chat/{{ chat_id }}/viewer.json",
-          versionsPath: "/ui/chat/{{ chat_id }}/versions.json",
+          // Workspace
+          defaultMode: {{ resolved_default_mode|tojson }},
+          workspaceMode: {{ resolved_workspace_mode|tojson }},
+
+          // 3D Editor.
+          // Important: these are local app routes. They redirect to the browser-facing editor.
+          editorPagePath: editorPagePath,
+          initialEditorUrl: initialEditorUrl,
+
+          // Backward compatibility for existing main.js.
+          viewerJsonPath: {{ viewer_json_path|tojson }},
+          initialViewerUrl: initialEditorUrl,
+          viewerUrl: initialEditorUrl,
+          viewer_url: initialEditorUrl,
+
+          // Versions
+          versionsPath: {{ versions_path|tojson }},
 
           // Templates + Messages
           templatesPath: "/v1/templates",
-          postMessagePath: "/v1/chats/{{ chat_id }}/messages",
+          postMessagePath: "/v1/chats/" + encodeURIComponent(chatId) + "/messages",
 
           // State
-          stateGetPath: "/v1/chats/{{ chat_id }}/viewer/selection",
-          statePutPath: "/v1/chats/{{ chat_id }}/viewer/selection",
+          stateGetPath: {{ state_get_path|tojson }},
+          statePutPath: {{ state_put_path|tojson }},
 
-          // 2D (CAD)
-          plan2dJsonPath: "/ui/chat/{{ chat_id }}/plan2d.json",
-          cad2dPagePath: "/ui/chat/{{ chat_id }}/cad2d",
-          cadEmbedJsonPath: "/ui/chat/{{ chat_id }}/cad-embed.json",
+          // 2D / CAD
+          plan2dJsonPath: {{ plan2d_json_path|tojson }},
+          cad2dPagePath: {{ cad2d_page_path|tojson }},
+          cadEmbedJsonPath: {{ cad_embed_json_path|tojson }},
           cadEmbedBase: "http://localhost:8050",
 
-          // Map (OpenLayers)
-          mapPagePath: "/ui/chat/{{ chat_id }}/map",
-          mapJsonPath: "/ui/chat/{{ chat_id }}/map.json",
+          // Map / OpenLayer.
+          // Important: this is the local app route. It redirects to http://localhost:5190/map.
+          mapPagePath: mapPagePath,
+          mapJsonPath: "/ui/chat/" + encodeURIComponent(chatId) + "/map.json",
 
-          // Admin + Leistungsverzeichnis (Viewer-Placeholders)
-          adminPagePath: "/ui/chat/{{ chat_id }}/admin",
-          lvPagePath: "/ui/chat/{{ chat_id }}/lv",
+          // Admin + Leistungsverzeichnis
+          adminPagePath: {{ admin_page_path|tojson }},
+          lvPagePath: {{ lv_page_path|tojson }},
+
+          // Uploads
+          uploadPath: {{ upload_path|tojson }},
+
+          // Runtime guards
+          legacySpeckleEnabled: false,
+          legacy3dBackend: false,
+          oldViewerEnabled: false,
+          workspaceTargetsAreAppRoutes: true,
+
+          // iframe capabilities expected by the shell
+          iframe: {
+            allow: "fullscreen; pointer-lock; clipboard-read; clipboard-write",
+            referrerPolicy: "no-referrer",
+            defaultTitle: "VECTOPLAN Workspace"
+          },
 
           // Debug
-          debug2dFile: "{{ request.args.get('debug2d','') }}"
+          debug2dFile: {{ request.args.get('debug2d', '')|tojson }}
         };
-      } catch (e) {}
 
-      // Optional: externer Initial-Viewer, falls vorhanden
-      try { window.INIT_VIEWER_URL = ""; } catch (e) {}
+        window.INIT_VIEWER_URL = initialEditorUrl;
+        window.INIT_EDITOR_URL = initialEditorUrl;
+        window.INIT_MAP_URL = mapPagePath;
+      } catch (e) {
+        try {
+          console.warn("[vectoplan-app] APP_CONFIG init failed", e);
+        } catch (_) {}
+      }
     })();
   </script>
 </head>
@@ -95,39 +192,46 @@
 
   <main class="app-wrap"
         role="main"
-        data-chat-id="{{ chat_id }}"
+        data-chat-id="{{ chat_id_s }}"
+        data-default-mode="{{ resolved_default_mode }}"
+        data-workspace-mode="{{ resolved_workspace_mode }}"
         data-chat-collapsed="false"
-        data-chat-drawer="closed">
+        data-chat-drawer="closed"
+        data-editor-page-path="{{ editor_page_path }}"
+        data-map-page-path="{{ map_page_path }}">
 
-    <!-- Pre-Init: Chat-Zustand möglichst früh setzen (robust via try/catch) -->
     <script>
       (function () {
         try {
-          const wrap = document.currentScript && document.currentScript.parentElement;
+          var wrap = document.currentScript && document.currentScript.parentElement;
           if (!wrap) return;
 
-          // Collapsed State (Desktop/Tablet): localStorage "chat_collapsed" = "1"/"true"
-          const raw = (function(){ try { return localStorage.getItem("chat_collapsed"); } catch { return null; } })();
-          const isCollapsed = (raw === "1" || raw === "true");
+          var raw = null;
+          try {
+            raw = localStorage.getItem("chat_collapsed");
+          } catch (e) {
+            raw = null;
+          }
+
+          var isCollapsed = raw === "1" || raw === "true";
           wrap.dataset.chatCollapsed = isCollapsed ? "true" : "false";
 
-          // Drawer Default: explizit geschlossen (öffnet layout.js später bei Bedarf)
-          if (!wrap.dataset.chatDrawer) wrap.dataset.chatDrawer = "closed";
+          if (!wrap.dataset.chatDrawer) {
+            wrap.dataset.chatDrawer = "closed";
+          }
         } catch (e) {}
       })();
     </script>
 
-    <!-- Mobile Drawer Backdrop (per CSS/JS bei geöffnetem Drawer sichtbar) -->
     <div id="chatBackdrop" class="chat-backdrop" aria-hidden="true"></div>
 
-    <!-- Chat links / als Drawer auf Mobile -->
     <section class="chat-wrap" id="chat-panel" aria-label="Chat">
       <div class="chat-top">
-        <!-- Header: Close-Button v. a. für Mobile Drawer -->
         <header class="chat-header" aria-label="Chat Steuerung">
           <div class="chat-title" aria-label="Chat Titel">
             <strong>VectoAI - Gebäudegenerierung & Datenanalyse</strong>
           </div>
+
           <div class="chat-header-actions" aria-label="Chat Aktionen">
             <button type="button"
                     id="chatCloseBtn"
@@ -145,10 +249,11 @@
       <div id="msgs" class="msgs" aria-live="polite" aria-label="Nachrichtenliste"></div>
 
       <div id="preview" class="preview" aria-label="Upload Vorschau">
-        <div id="uploadProgress" class="progress hidden" aria-hidden="true"><div></div></div>
+        <div id="uploadProgress" class="progress hidden" aria-hidden="true">
+          <div></div>
+        </div>
       </div>
 
-      <!-- Composer -->
       <form id="composer" class="composer" autocomplete="off" aria-label="Nachricht verfassen">
         <div class="bar">
           <button type="button"
@@ -173,16 +278,17 @@
 
         <div class="hint">Vectoplan kann Fehler machen. Überprüfe wichtige Informationen.</div>
 
-        <input id="fileInput" type="file" multiple class="hidden"
+        <input id="fileInput"
+               type="file"
+               multiple
+               class="hidden"
                accept="image/*,video/*,.pdf,.csv,.txt,.ifc,.stl,.obj,.gltf,.glb,.dxf">
       </form>
     </section>
 
-    <!-- Viewer rechts -->
-    <aside class="viewer-panel" id="viewer-panel" aria-label="Viewer">
+    <aside class="viewer-panel" id="viewer-panel" aria-label="Arbeitsbereich">
       <div class="viewer-toolbar">
         <div class="toolbar-left">
-          <!-- Globaler Chat Toggle (Desktop: einklappen/ausklappen, Mobile: Drawer öffnen/schließen) -->
           <button id="chatToggleBtn"
                   class="btn"
                   type="button"
@@ -193,15 +299,37 @@
           </button>
 
           <div role="group" aria-label="Ansicht" class="mode-group">
-            <button id="modeMapBtn" class="btn" aria-pressed="false" title="Karte">🗺️ Map</button>
-            <button id="mode3dBtn" class="btn" aria-pressed="false" title="3D-Ansicht">🧊 3D</button>
-            <button id="mode2dBtn" class="btn" aria-pressed="true" title="2D-Ansicht">📐 2D</button>
+            <button id="modeMapBtn"
+                    class="btn"
+                    type="button"
+                    aria-pressed="false"
+                    title="Karte">🗺️ Map</button>
 
-            <button id="modeLvBtn" class="btn" aria-pressed="false" title="Leistungsverzeichnis">📄 LV</button>
-            <button id="modeAdminBtn" class="btn" aria-pressed="false" title="Admin">🔧 Admin</button>
+            <button id="mode3dBtn"
+                    class="btn"
+                    type="button"
+                    aria-pressed="true"
+                    title="3D-Editor">🧊 3D</button>
+
+            <button id="mode2dBtn"
+                    class="btn"
+                    type="button"
+                    aria-pressed="false"
+                    title="2D-Ansicht">📐 2D</button>
+
+            <button id="modeLvBtn"
+                    class="btn"
+                    type="button"
+                    aria-pressed="false"
+                    title="Leistungsverzeichnis">📄 LV</button>
+
+            <button id="modeAdminBtn"
+                    class="btn"
+                    type="button"
+                    aria-pressed="false"
+                    title="Admin">🔧 Admin</button>
           </div>
 
-          <!-- Versionen Toggle (Dropdown) -->
           <button id="versionsToggleBtn"
                   class="btn"
                   type="button"
@@ -213,13 +341,22 @@
         </div>
 
         <div class="toolbar-right">
-          <button id="themeToggleBtn" class="btn" type="button" aria-pressed="false" title="Theme umschalten">🌗 Theme</button>
-          <a id="viewerOpenRawBtn" class="btn btn-link" href="#" target="_blank" rel="noopener"
-             title="Original im neuen Tab öffnen" aria-label="Original öffnen">🔗 Öffnen</a>
+          <button id="themeToggleBtn"
+                  class="btn"
+                  type="button"
+                  aria-pressed="false"
+                  title="Theme umschalten">🌗 Theme</button>
+
+          <a id="viewerOpenRawBtn"
+             class="btn btn-link"
+             href="{{ resolved_editor_url }}"
+             target="_blank"
+             rel="noopener noreferrer"
+             title="Aktuelle Ansicht im neuen Tab öffnen"
+             aria-label="Aktuelle Ansicht öffnen">🔗 Öffnen</a>
         </div>
       </div>
 
-      <!-- Dropdown-Container für Versionen -->
       <section id="versionsDropdown"
                class="versions-dropdown hidden"
                aria-label="Versionen"
@@ -228,23 +365,40 @@
           <div class="vers-meta">
             <strong>Versionen</strong> · <span id="versCount">0</span>
           </div>
+
           <div class="versions-dd-actions">
-            <button id="versRefreshBtn" class="btn" title="Liste aktualisieren" aria-label="Versionen aktualisieren">⟳</button>
+            <button id="versRefreshBtn"
+                    class="btn"
+                    type="button"
+                    title="Liste aktualisieren"
+                    aria-label="Versionen aktualisieren">⟳</button>
           </div>
         </header>
+
         <ul id="versionsList" class="versions-list"></ul>
       </section>
 
-      <iframe id="viewer-frame" class="viewer-iframe"
-              title="Viewer"
+      <iframe id="viewer-frame"
+              class="viewer-iframe"
+              title="VECTOPLAN Editor"
+              src="{{ resolved_editor_url }}"
               referrerpolicy="no-referrer"
-              allow="fullscreen"
-              loading="lazy"></iframe>
+              allow="fullscreen; pointer-lock; clipboard-read; clipboard-write"
+              loading="eager"></iframe>
+
+      <div id="workspaceFallback"
+           class="workspace-fallback hidden"
+           role="status"
+           aria-live="polite"
+           aria-hidden="true">
+        <strong>Arbeitsbereich konnte nicht geladen werden.</strong>
+        <span id="workspaceFallbackText">Bitte öffne die Ansicht in einem neuen Tab oder lade die Seite neu.</span>
+      </div>
 
       <div class="overlay" aria-hidden="true"></div>
     </aside>
   </main>
 
-  <script type="module" src="{{ url_for('static', filename='js/chat/main.js') }}?v=15"></script>
+  <script type="module" src="{{ url_for('static', filename='js/chat/main.js') }}?v={{ chat_id_s }}"></script>
 </body>
 </html>
