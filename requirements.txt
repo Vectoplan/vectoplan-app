@@ -1,8 +1,18 @@
-# /services/app/requirements.txt
+# /vectoplan-website/services/vectoplan-server/services/vectoplan-app/requirements.txt
 Flask==3.0.3
 Flask_SQLAlchemy==3.1.1
 SQLAlchemy==2.0.32
+
+# PostgreSQL driver for SQLAlchemy URLs like:
+#   postgresql+psycopg://user:pass@host:5432/db
+psycopg[binary]==3.2.*
+
+# Legacy compatibility driver for older URLs like:
+#   postgresql+psycopg2://user:pass@host:5432/db
+# or plain:
+#   postgresql://user:pass@host:5432/db
 psycopg2-binary==2.9.9
+
 requests==2.32.3
 gunicorn==21.2.0
 python-dotenv==1.0.1

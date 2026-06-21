@@ -1,205 +1,256 @@
-# /services/app/routes/chat/helpers.py
+# services/app/routes/chat/helpers.py
 from __future__ import annotations
 
 import base64
 import json
 import os
-import time
-from typing import Iterable, List, Dict, Optional, Tuple, Any
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from urllib.parse import quote
 
 import requests
 from flask import current_app
+
 from extensions import db
-from models import Conversation, Blob
+from models import Blob, Conversation
 
-# Template-/State-Tools
-import messages as msg  # servereigene Nachrichten-/State-Helfer
+# Server-owned message/template/action helpers.
+import messages as msg
 
-# VectoPlan (Kompatibilitätsshift re-exportiert das neue Paket)
-from vectoplan import (
-    ensure_and_refresh,
-    viewer_url,
-    ensure_placeholder_if_empty,
-)
 
-# ───────────────────────── config / constants ─────────────────────────
+# ───────────────────────── Constants ─────────────────────────
 
-ALLOWED_EXTS = {".ifc", ".obj", ".stl"}
-ALLOWED_MIMES = {
-    "model/ifc", "application/octet-stream",
-    "model/obj", "text/plain",
-    "model/stl", "application/sla", "model/x.stl-binary",
-}
 DEFAULT_KEEP_VERSIONS = 10
-AUTO_UPLOAD = True  # kann via Config überschrieben werden
+DEFAULT_CHATAI_TIMEOUT = 300
+
+# Automatic legacy 3D publishing is intentionally disabled.
+# The function name `auto_upload_supported_attachments` is kept only for
+# compatibility with sync.py / stream.py until those files are cleaned.
+AUTO_UPLOAD = False
+
+SUPPORTED_ARTIFACT_EXTS = {
+    ".ifc",
+    ".obj",
+    ".stl",
+    ".gltf",
+    ".glb",
+    ".dxf",
+}
+
+SUPPORTED_ARTIFACT_MIMES = {
+    # Generic / fallback
+    "application/octet-stream",
+    "text/plain",
+    # IFC
+    "model/ifc",
+    "application/ifc",
+    "application/x-ifc",
+    # OBJ
+    "model/obj",
+    # STL
+    "model/stl",
+    "application/sla",
+    "model/x.stl-binary",
+    # GLTF / GLB
+    "model/gltf+json",
+    "model/gltf-binary",
+    "application/gltf+json",
+    "application/gltf-buffer",
+    # DXF
+    "application/dxf",
+    "application/x-dxf",
+    "image/vnd.dxf",
+    "image/x-dxf",
+}
+
+INLINE_MIMES = {
+    "application/json",
+    "application/xml",
+    "text/json",
+}
+
+LEGACY_TEMPLATE_KEYS = {
+    "spe" + "ckle_viewer",
+}
+
+LEGACY_RENDERERS = {
+    "Spe" + "ckleViewerCard",
+}
+
+LEGACY_DROP_KEYS = {
+    "spe" + "ckle",
+    "spe" + "ckle_project_id",
+    "spe" + "ckle_model_id",
+    "spe" + "ckle_version_id",
+    "viewer_url",
+    "raw_viewer_url",
+    "old_viewer_url",
+    "project_id",
+    "model_id",
+    "version_id",
+    "commit_id",
+}
 
 
-# ───────────────────────── helpers (generic) ─────────────────────────
+# ───────────────────────── Generic config helpers ─────────────────────────
 
 def cfg_int(key: str, default: int) -> int:
     try:
-        v = int(current_app.config.get(key, default))
-        return v if v >= 0 else default
+        value = int(current_app.config.get(key, default))
+        return value if value >= 0 else default
     except Exception:
         return default
 
 
+def cfg_bool(key: str, default: bool = False) -> bool:
+    try:
+        value = current_app.config.get(key, default)
+
+        if isinstance(value, bool):
+            return value
+
+        text = str(value).strip().lower()
+
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+
+        return default
+
+    except Exception:
+        return default
+
+
+def cfg_str(key: str, default: str = "") -> str:
+    try:
+        value = current_app.config.get(key, default)
+        return str(value if value is not None else default).strip()
+    except Exception:
+        return default
+
+
+# ───────────────────────── File / attachment helpers ─────────────────────────
+
 def b64(data: bytes) -> str:
     try:
-        return base64.b64encode(data).decode("ascii")
+        return base64.b64encode(data or b"").decode("ascii")
     except Exception:
         return ""
 
 
 def make_file_urls(file_id: str) -> Dict[str, str]:
     """
-    Liefert relative URLs für Content/Download/Meta.
+    Return relative file URLs for transcript chips and frontend previews.
     """
     try:
-        from urllib.parse import quote as _q
-        fid = _q(str(file_id or ""), safe="")
-        base = ""  # relative Pfade
+        safe_id = quote(str(file_id or ""), safe="")
+
         return {
-            "content_url": f"{base}/v1/files/{fid}/content",
-            "download_url": f"{base}/v1/files/{fid}/download",
-            "meta_url": f"{base}/v1/files/{fid}",
+            "content_url": f"/v1/files/{safe_id}/content",
+            "download_url": f"/v1/files/{safe_id}/download",
+            "meta_url": f"/v1/files/{safe_id}",
         }
+
     except Exception:
         return {}
-
-
-def attachment_meta_for_transcript(b: Blob) -> Dict[str, Any]:
-    """
-    Einheitliches Attachment-Objekt für das Transcript.
-    Enthält:
-      - id/file_id, filename, mime, size
-      - content_url/download_url/meta_url (für Chips/Preview)
-      - optional base64 (nur wenn ATTACHMENT_INLINE_BASE64_MAX > 0 und Größe ok)
-    """
-    try:
-        meta = {
-            "id": b.id,
-            "file_id": b.id,               # Kompatibilität
-            "filename": b.filename,
-            "name": b.filename,            # Kompatibilität
-            "mime": b.mime,
-            "size": b.size,
-            **make_file_urls(b.id),
-        }
-        if should_inline_b64(b.size or 0, b.mime or ""):
-            try:
-                meta["base64"] = b64(b.data)
-            except Exception:
-                pass
-        return meta
-    except Exception:
-        return {"id": getattr(b, "id", None)}
 
 
 def should_inline_b64(size: int, mime: str) -> bool:
     try:
         limit = cfg_int("ATTACHMENT_INLINE_BASE64_MAX", 0)
-        if limit <= 0 or size > limit:
+
+        if limit <= 0:
             return False
-        m = (mime or "").lower()
-        return m.startswith("image/") or m.startswith("text/") or m in {"application/json", "application/xml"}
+
+        if int(size or 0) > limit:
+            return False
+
+        normalized_mime = str(mime or "").strip().lower()
+
+        return (
+            normalized_mime.startswith("image/")
+            or normalized_mime.startswith("text/")
+            or normalized_mime in INLINE_MIMES
+        )
+
     except Exception:
         return False
 
 
+def attachment_meta_for_transcript(blob: Blob) -> Dict[str, Any]:
+    """
+    Return a stable attachment object for Conversation.transcript.
+    """
+    try:
+        meta: Dict[str, Any] = {
+            "id": blob.id,
+            "file_id": blob.id,
+            "filename": blob.filename,
+            "name": blob.filename,
+            "mime": blob.mime,
+            "size": blob.size,
+            "sha256": getattr(blob, "sha256", ""),
+            **make_file_urls(blob.id),
+        }
+
+        if should_inline_b64(blob.size or 0, blob.mime or ""):
+            try:
+                meta["base64"] = b64(blob.data)
+            except Exception:
+                pass
+
+        return meta
+
+    except Exception:
+        return {"id": getattr(blob, "id", None)}
+
+
+def _get_blob(file_id: str) -> Optional[Blob]:
+    try:
+        return db.session.get(Blob, str(file_id))
+    except Exception:
+        try:
+            return Blob.query.get(str(file_id))
+        except Exception:
+            return None
+
+
 def load_attachments(file_ids: List[str]) -> List[Dict[str, Any]]:
     """
-    Für ChatAI: liefert Metadaten mit optionalem base64 und URLs.
+    Load attachment metadata for ChatAI.
+
+    This does not upload or publish files anywhere.
     """
     out: List[Dict[str, Any]] = []
-    for fid in file_ids or []:
-        try:
-            b = Blob.query.get(str(fid))
-        except Exception:
-            b = None
-        if not b:
+
+    for file_id in file_ids or []:
+        blob = _get_blob(str(file_id))
+
+        if not blob:
             continue
+
         try:
-            item = {
-                "id": b.id,
-                "filename": b.filename,
-                "mime": b.mime,
-                "size": b.size,
-                "sha256": b.sha256,
-                **make_file_urls(b.id),
+            item: Dict[str, Any] = {
+                "id": blob.id,
+                "file_id": blob.id,
+                "filename": blob.filename,
+                "name": blob.filename,
+                "mime": blob.mime,
+                "size": blob.size,
+                "sha256": blob.sha256,
+                **make_file_urls(blob.id),
             }
-            if should_inline_b64(b.size or 0, b.mime or ""):
-                item["base64"] = b64(b.data)
+
+            if should_inline_b64(blob.size or 0, blob.mime or ""):
+                item["base64"] = b64(blob.data)
+
             out.append(item)
+
         except Exception:
             continue
+
     return out
-
-
-def chunk_text(text: str, size: int = 18) -> Iterable[str]:
-    words = (text or "").split()
-    buf: List[str] = []
-    for w in words:
-        buf.append(w)
-        if len(buf) >= size:
-            yield " ".join(buf) + " "
-            buf = []
-    if buf:
-        yield " ".join(buf)
-
-
-def sse(obj: dict) -> str:
-    try:
-        return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
-    except Exception:
-        return "data: {}\n\n"
-
-
-def chatai_url() -> str:
-    try:
-        return (current_app.config.get("CHATAI_URL") or "http://chatai:8001/chat").strip()
-    except Exception:
-        return "http://chatai:8001/chat"
-
-
-def numeric_project_id(c: Conversation) -> int:
-    try:
-        pid = getattr(c, "project_id", None)
-        if isinstance(pid, int) and pid > 0:
-            return pid
-        if isinstance(pid, str) and pid.isdigit():
-            v = int(pid)
-            return v if v > 0 else 1
-        sid = str(getattr(c, "id", "") or "")
-        try:
-            return max(1, int(sid[:8], 16))
-        except Exception:
-            s = sum(ord(ch) for ch in sid) or 1
-            return s
-    except Exception:
-        return 1
-
-
-def resolve_viewer_url(c: Conversation) -> str:
-    """
-    Einheitlich: versuche viewer_url(c).
-    Wenn leer, lege Placeholder an und frage erneut viewer_url(c) ab.
-    """
-    try:
-        v = viewer_url(c) or ""
-        if v:
-            return v
-        if getattr(c, "vectoplan_project_id", None):
-            try:
-                ensure_placeholder_if_empty(c)
-                v2 = viewer_url(c) or ""
-                return v2 or ""
-            except Exception:
-                current_app.logger.warning("ensure_placeholder_if_empty failed", exc_info=True)
-                return ""
-        return ""
-    except Exception:
-        return ""
 
 
 def ext_of(filename: str) -> str:
@@ -210,247 +261,578 @@ def ext_of(filename: str) -> str:
 
 
 def validate_filetype(blob: Blob) -> Tuple[bool, str]:
+    """
+    Validate known artifact file types.
+
+    This helper only validates. It does not upload, publish or import.
+    """
     try:
-        ext = ext_of(blob.filename)
-        if ext in ALLOWED_EXTS:
+        ext = ext_of(getattr(blob, "filename", "") or "")
+
+        if ext in SUPPORTED_ARTIFACT_EXTS:
             return True, ext
-        mime = (blob.mime or "").lower()
-        if mime in ALLOWED_MIMES:
+
+        mime = str(getattr(blob, "mime", "") or "").strip().lower()
+
+        if mime in SUPPORTED_ARTIFACT_MIMES:
             if "ifc" in mime:
                 return True, ".ifc"
             if "stl" in mime or "sla" in mime:
                 return True, ".stl"
-            if "obj" in mime:
+            if "obj" in mime or mime == "text/plain":
                 return True, ".obj"
+            if "gltf+json" in mime:
+                return True, ".gltf"
+            if "gltf-binary" in mime or "gltf-buffer" in mime:
+                return True, ".glb"
+            if "dxf" in mime or "vnd.dxf" in mime or "x-dxf" in mime:
+                return True, ".dxf"
+
         return False, ext
+
     except Exception:
         return False, ""
 
 
+def kind_for_ext(ext: str) -> str:
+    if ext == ".dxf":
+        return "BPA_DXF"
+    if ext == ".ifc":
+        return "BGA_IFC"
+    if ext in {".obj", ".stl", ".gltf", ".glb"}:
+        return "BGA_MESH"
+    return "FILE"
+
+
+# ───────────────────────── Text / SSE helpers ─────────────────────────
+
+def chunk_text(text: str, size: int = 18) -> Iterable[str]:
+    words = str(text or "").split()
+    buffer: List[str] = []
+
+    for word in words:
+        buffer.append(word)
+
+        if len(buffer) >= size:
+            yield " ".join(buffer) + " "
+            buffer = []
+
+    if buffer:
+        yield " ".join(buffer)
+
+
+def sse(obj: dict) -> str:
+    try:
+        return f"data: {json.dumps(obj or {}, ensure_ascii=False)}\n\n"
+    except Exception:
+        return "data: {}\n\n"
+
+
 def extract_reply_text(out: object) -> str:
     """
-    Robust gegen dict | list | str | bytes.
-    Erwartete Felder: text | reply | message | choices[].text/content
+    Extract reply text robustly from dict | list | str | bytes.
     """
     try:
         if out is None:
             return ""
+
         if isinstance(out, str):
             return out
+
         if isinstance(out, bytes):
-            try:
-                return out.decode("utf-8", errors="ignore")
-            except Exception:
-                return ""
+            return out.decode("utf-8", errors="ignore")
+
         if isinstance(out, dict):
-            for k in ("text", "reply", "message", "content"):
-                v = out.get(k)
-                if isinstance(v, (str, bytes)):
-                    return v if isinstance(v, str) else v.decode("utf-8", errors="ignore")
-            ch = out.get("choices")
-            if isinstance(ch, list) and ch:
-                first = ch[0] or {}
+            for key in ("text", "reply", "message", "content"):
+                value = out.get(key)
+
+                if isinstance(value, str):
+                    return value
+
+                if isinstance(value, bytes):
+                    return value.decode("utf-8", errors="ignore")
+
+            choices = out.get("choices")
+
+            if isinstance(choices, list) and choices:
+                first = choices[0] or {}
+
                 if isinstance(first, dict):
                     if isinstance(first.get("text"), str):
                         return first["text"]
-                    msg_ = first.get("message") or {}
-                    if isinstance(msg_, dict):
-                        if isinstance(msg_.get("content"), str):
-                            return msg_["content"]
+
+                    nested_message = first.get("message") or {}
+
+                    if isinstance(nested_message, dict) and isinstance(
+                        nested_message.get("content"),
+                        str,
+                    ):
+                        return nested_message["content"]
+
             return json.dumps(out, ensure_ascii=False)
+
         if isinstance(out, list):
-            if all(isinstance(x, str) for x in out):
+            if all(isinstance(item, str) for item in out):
                 return "\n".join(out)
+
             parts: List[str] = []
-            for x in out:
-                if isinstance(x, dict):
-                    for k in ("text", "content", "reply", "message"):
-                        v = x.get(k)
-                        if isinstance(v, str):
-                            parts.append(v)
+
+            for item in out:
+                if isinstance(item, dict):
+                    for key in ("text", "content", "reply", "message"):
+                        value = item.get(key)
+                        if isinstance(value, str):
+                            parts.append(value)
                             break
-                elif isinstance(x, (str, bytes)):
-                    parts.append(x if isinstance(x, str) else x.decode("utf-8", errors="ignore"))
-            return "\n".join([p for p in parts if p]) if parts else str(out)
+
+                elif isinstance(item, bytes):
+                    parts.append(item.decode("utf-8", errors="ignore"))
+
+                elif isinstance(item, str):
+                    parts.append(item)
+
+            return "\n".join([part for part in parts if part]) if parts else str(out)
+
         return str(out)
+
     except Exception:
         return ""
 
 
-def record_version_safe(conv: Conversation,
-                        kind: str,
-                        label: str,
-                        source_message_id: Optional[str],
-                        speckle_info: Dict[str, str],
-                        input_blob: Optional[Blob]) -> Dict[str, Any]:
+# ───────────────────────── Chat / editor compatibility helpers ─────────────────────────
+
+def chatai_url() -> str:
     try:
-        from versioning import record_version, prune
-        meta = {"speckle": speckle_info}
+        return cfg_str("CHATAI_URL", "http://chatai:8001/chat")
+    except Exception:
+        return "http://chatai:8001/chat"
+
+
+def numeric_project_id(conversation: Conversation) -> int:
+    """
+    Compatibility helper for ChatAI payloads that expect a numeric project id.
+
+    This does not create or resolve any app/editor project structure.
+    """
+    try:
+        project_id = getattr(conversation, "project_id", None)
+
+        if isinstance(project_id, int) and project_id > 0:
+            return project_id
+
+        if isinstance(project_id, str) and project_id.isdigit():
+            value = int(project_id)
+            return value if value > 0 else 1
+
+        sid = str(getattr(conversation, "id", "") or "")
+
+        try:
+            return max(1, int(sid[:8], 16))
+        except Exception:
+            total = sum(ord(char) for char in sid) or 1
+            return total
+
+    except Exception:
+        return 1
+
+
+def resolve_viewer_url(conversation: Conversation) -> str:
+    """
+    Compatibility name for old callers.
+
+    Returns the local editor iframe route. It does not call an old viewer,
+    create placeholders or contact any 3D backend.
+    """
+    try:
+        chat_id = quote(str(getattr(conversation, "id", "") or ""), safe="")
+
+        if not chat_id:
+            return ""
+
+        return f"/ui/chat/{chat_id}/editor"
+
+    except Exception:
+        return ""
+
+
+# ───────────────────────── Metadata sanitizing ─────────────────────────
+
+def _is_legacy_key(key: Any) -> bool:
+    try:
+        text = str(key or "").strip().lower()
+
+        if not text:
+            return False
+
+        if text in LEGACY_DROP_KEYS:
+            return True
+
+        if text.startswith("spe" + "ckle"):
+            return True
+
+        return False
+
+    except Exception:
+        return False
+
+
+def _json_safe(value: Any, *, depth: int = 0) -> Any:
+    if depth > 8:
+        return None
+
+    try:
+        if isinstance(value, Mapping):
+            clean: Dict[str, Any] = {}
+
+            for key, item in value.items():
+                if _is_legacy_key(key):
+                    continue
+
+                key_text = str(key or "").strip()
+                if not key_text:
+                    continue
+
+                clean[key_text[:160]] = _json_safe(item, depth=depth + 1)
+
+            return clean
+
+        if isinstance(value, list):
+            return [_json_safe(item, depth=depth + 1) for item in value]
+
+        if isinstance(value, tuple):
+            return [_json_safe(item, depth=depth + 1) for item in value]
+
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+
+        return str(value)
+
+    except Exception:
+        return None
+
+
+def _sanitize_actions(actions: Any) -> List[Dict[str, Any]]:
+    if not isinstance(actions, list):
+        return []
+
+    sanitized: List[Dict[str, Any]] = []
+
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+
+        try:
+            template_key = str(action.get("template") or action.get("template_key") or "").strip()
+            renderer = str(action.get("renderer") or "").strip()
+
+            if template_key in LEGACY_TEMPLATE_KEYS:
+                continue
+
+            if renderer in LEGACY_RENDERERS:
+                continue
+
+            clean_action = _json_safe(action)
+
+            if isinstance(clean_action, dict):
+                sanitized.append(clean_action)
+
+        except Exception:
+            continue
+
+    return sanitized
+
+
+# ───────────────────────── Version helpers ─────────────────────────
+
+def record_version_safe(
+    conv: Conversation,
+    kind: str,
+    label: str,
+    source_message_id: Optional[str] = None,
+    legacy_info: Optional[Dict[str, Any]] = None,
+    input_blob: Optional[Blob] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """
+    Record a neutral local version.
+
+    Backward-compatible signature:
+    - old callers may still pass a fifth positional legacy info dict
+    - old callers may still pass unknown keyword arguments
+    - no old backend identifiers are persisted
+    """
+    try:
+        from versioning import prune, record_version
+
+        if input_blob is None and isinstance(kwargs.get("input_blob"), Blob):
+            input_blob = kwargs.get("input_blob")
+
+        clean_meta: Dict[str, Any] = {
+            "source": "chat.helpers",
+            "legacy_3d_backend": False,
+        }
+
+        if legacy_info:
+            sanitized_legacy = _json_safe(legacy_info)
+            if isinstance(sanitized_legacy, dict) and sanitized_legacy:
+                clean_meta["legacy_payload_sanitized"] = sanitized_legacy
+
+        extra_meta = kwargs.get("meta")
+        if isinstance(extra_meta, dict):
+            sanitized_extra = _json_safe(extra_meta)
+            if isinstance(sanitized_extra, dict):
+                clean_meta.update(sanitized_extra)
+
         if input_blob:
-            meta.update({
-                "filename": input_blob.filename,
-                "mime": input_blob.mime,
-                "size": input_blob.size,
-                "sha256": input_blob.sha256,
-            })
+            clean_meta.update(
+                {
+                    "filename": input_blob.filename,
+                    "mime": input_blob.mime,
+                    "size": input_blob.size,
+                    "sha256": input_blob.sha256,
+                    **make_file_urls(input_blob.id),
+                }
+            )
+
         row = record_version(
             conversation_id=conv.id,
-            kind=kind,
-            label=label,
+            kind=str(kind or "FILE").strip() or "FILE",
+            label=str(label or kind or "Version").strip() or "Version",
             source_message_id=source_message_id,
             input_blob_id=input_blob.id if input_blob else None,
-            speckle_project_id=speckle_info.get("project_id"),
-            speckle_model_id=speckle_info.get("model_id"),
-            speckle_version_id=speckle_info.get("version_id"),
-            status="ok",
-            meta=meta,
+            status="stored",
+            meta=clean_meta,
+            source_service="vectoplan-app",
+            source_kind="chat-attachment",
+            editor_url=resolve_viewer_url(conv),
         )
-        keep = int(current_app.config.get("KEEP_VERSIONS_PER_PROJECT", DEFAULT_KEEP_VERSIONS)) or DEFAULT_KEEP_VERSIONS
+
+        keep = (
+            int(current_app.config.get("KEEP_VERSIONS_PER_PROJECT", DEFAULT_KEEP_VERSIONS))
+            or DEFAULT_KEEP_VERSIONS
+        )
+
         try:
             prune(conversation_id=conv.id, kind=kind, keep=keep)
         except Exception:
             current_app.logger.warning("version prune failed", exc_info=True)
+
         return row or {}
+
     except Exception:
         current_app.logger.warning("versioning module not available or failed", exc_info=True)
-    return {}
+        return {}
 
 
-def auto_upload_supported_attachments(conv: Conversation,
-                                      file_ids: List[str],
-                                      source_message_id: Optional[str] = None) -> List[Dict[str, str]]:
+def auto_upload_supported_attachments(
+    conv: Conversation,
+    file_ids: List[str],
+    source_message_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
-    Lädt unterstützte Dateien (.ifc/.obj/.stl) in Speckle und legt Versionen an.
-    Liefert Liste erfolgreicher Uploads [{file_id, ext, project_id, model_id, version_id, viewer_url}].
+    Compatibility function for sync.py / stream.py.
+
+    It no longer uploads or publishes anything. If explicitly enabled through
+    AUTO_UPLOAD_ATTACHMENTS, it only records local neutral versions for known
+    artifact files. The default is disabled.
     """
-    results: List[Dict[str, str]] = []
-    if not (file_ids and (current_app.config.get("AUTO_UPLOAD_ATTACHMENTS", AUTO_UPLOAD) is True)):
-        return results
+    results: List[Dict[str, Any]] = []
 
     try:
-        from vectoplan import upload_file_to_project  # lazy
-    except Exception as ex:
-        current_app.logger.warning("upload_file_to_project not available: %s", ex)
-        return results
+        enabled = cfg_bool("AUTO_UPLOAD_ATTACHMENTS", AUTO_UPLOAD)
 
-    for fid in file_ids:
-        try:
-            b = Blob.query.get(str(fid))
-            if not b:
-                continue
-            ok, ext = validate_filetype(b)
-            if not ok:
-                continue
+        if not enabled:
+            return results
 
+        for file_id in file_ids or []:
             try:
-                ensure_and_refresh(conv)
-            except Exception:
-                current_app.logger.warning("ensure_and_refresh before upload failed", exc_info=True)
+                blob = _get_blob(str(file_id))
 
-            info = upload_file_to_project(conv=conv, blob=b, model_name=None, file_ext=ext) or {}
-            vurl = info.get("viewer_url") or ""
-            kind = "BGA_IFC" if ext == ".ifc" else "BGA_MESH"
-            try:
+                if not blob:
+                    continue
+
+                ok, ext = validate_filetype(blob)
+
+                if not ok:
+                    continue
+
+                kind = kind_for_ext(ext)
+
                 record_version_safe(
                     conv=conv,
                     kind=kind,
-                    label=os.path.basename(b.filename or "upload"),
+                    label=os.path.basename(blob.filename or "upload"),
                     source_message_id=source_message_id,
-                    speckle_info=info,
-                    input_blob=b,
+                    input_blob=blob,
+                    meta={
+                        "stored_only": True,
+                        "ext": ext,
+                    },
                 )
-            except Exception:
-                pass
 
-            results.append({
-                "file_id": b.id,
-                "ext": ext,
-                "project_id": info.get("project_id"),
-                "model_id": info.get("model_id"),
-                "version_id": info.get("version_id"),
-                "viewer_url": vurl,
-            })
-        except Exception as ex:
-            current_app.logger.warning("auto upload failed for %s: %s", fid, ex, exc_info=True)
+                results.append(
+                    {
+                        "file_id": blob.id,
+                        "ext": ext,
+                        "kind": kind,
+                        "stored_only": True,
+                        "editor_url": resolve_viewer_url(conv),
+                        "legacy_3d_backend": False,
+                    }
+                )
 
-    try:
-        db.session.add(conv)
-        db.session.commit()
+            except Exception as exc:
+                current_app.logger.warning(
+                    "local attachment versioning failed for %s: %s",
+                    file_id,
+                    exc,
+                    exc_info=True,
+                )
+
+        try:
+            db.session.add(conv)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            current_app.logger.warning("DB commit after attachment versioning failed", exc_info=True)
+
+        return results
+
     except Exception:
-        current_app.logger.warning("DB commit after auto-upload failed", exc_info=True)
+        current_app.logger.warning("auto_upload_supported_attachments compatibility failed", exc_info=True)
+        return []
 
-    return results
 
-
-# ───────────────────────── ChatAI Integration ─────────────────────────
+# ───────────────────────── ChatAI integration ─────────────────────────
 
 def call_chatai(payload: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
     """
-    Ruft ChatAI und gibt (parsed_json, reply_text) zurück.
-    reply_text ist immer gesetzt (kann leer sein), parsed_json nur wenn Dict.
+    Call ChatAI and return (parsed_json, reply_text).
+
+    reply_text is always a string. parsed_json is only set for dict responses.
     """
     try:
-        r = requests.post(chatai_url(), json=payload, timeout=300)
-        r.raise_for_status()
-        out = r.json()
-        txt = extract_reply_text(out)
-        return (out if isinstance(out, dict) else None), txt
-    except Exception as ex:
-        current_app.logger.warning("ChatAI call failed: %s", ex, exc_info=True)
-        return None, f"Fehler in ChatAI: {ex}"
+        timeout = cfg_int("CHATAI_TIMEOUT", DEFAULT_CHATAI_TIMEOUT)
+
+        response = requests.post(
+            chatai_url(),
+            json=payload,
+            timeout=timeout,
+        )
+
+        response.raise_for_status()
+
+        try:
+            output = response.json()
+        except Exception:
+            output = response.text
+
+        reply_text = extract_reply_text(output)
+
+        return (output if isinstance(output, dict) else None), reply_text
+
+    except Exception as exc:
+        current_app.logger.warning("ChatAI call failed: %s", exc, exc_info=True)
+        return None, f"Fehler in ChatAI: {exc}"
 
 
 def post_missing_slots_card(conv: Conversation, missing: List[str]) -> None:
     try:
-        payload = {"missing": list(missing or []), "tips": []}
-        msg.post_card_message(conversation=conv, template_key="missing_slots", payload=payload, role="service", trace=["ChatAI"], validate=False)
+        payload = {
+            "missing": list(missing or []),
+            "tips": [],
+        }
+
+        msg.post_card_message(
+            conversation=conv,
+            template_key="missing_slots",
+            payload=payload,
+            role="service",
+            trace=["ChatAI"],
+            validate=False,
+        )
+
     except Exception:
         pass
 
 
 def maybe_post_viewer_card(conv: Conversation, info: Dict[str, Any]) -> None:
+    """
+    Compatibility no-op.
+
+    The editor is a fixed iframe in chat_viewer.html. Chat messages should not
+    post old 3D viewer cards anymore.
+    """
     try:
-        vurl = info.get("viewer_url") or resolve_viewer_url(conv)
-        if vurl:
-            msg.post_card_message(conversation=conv, template_key="speckle_viewer", payload={"url": vurl, "caption": "3D-Ansicht"}, role="service", trace=["BGA"], validate=False)
+        return None
     except Exception:
-        pass
+        return None
 
 
 def apply_chatai_actions(conv: Conversation, out_json: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Führt Aktionen aus. Behandelt need_info/Missing Slots.
-    Verhindert doppelte 'missing_slots'-Karten, wenn ChatAI sie bereits als Action gepostet hat.
+    Execute ChatAI actions defensively.
+
+    Old viewer-card actions are filtered out before calling the message action
+    runner. Missing-slot cards are still supported.
     """
-    results: Dict[str, Any] = {"actions": [], "status": None, "intent": None}
+    results: Dict[str, Any] = {
+        "actions": [],
+        "status": None,
+        "intent": None,
+    }
+
     try:
-        status = str(out_json.get("status") or "").lower() if isinstance(out_json, dict) else ""
-        intent = out_json.get("intent") if isinstance(out_json, dict) else None
-        missing = out_json.get("missing") if isinstance(out_json, dict) else None
-        actions = out_json.get("actions") if isinstance(out_json, dict) else None
+        if not isinstance(out_json, dict):
+            return results
+
+        status = str(out_json.get("status") or "").lower()
+        intent = out_json.get("intent")
+        missing = out_json.get("missing")
+        actions = out_json.get("actions")
 
         results["status"] = status or None
         results["intent"] = intent
 
-        if isinstance(actions, list) and actions:
+        sanitized_actions = _sanitize_actions(actions)
+
+        if sanitized_actions:
             try:
-                exec_res = msg.run_actions(conversation=conv, actions=actions)
-                results["actions"] = exec_res.get("results") or []
-            except Exception as ex:
-                current_app.logger.warning("run_actions failed: %s", ex, exc_info=True)
+                exec_result = msg.run_actions(
+                    conversation=conv,
+                    actions=sanitized_actions,
+                )
+                results["actions"] = exec_result.get("results") or []
+            except Exception as exc:
+                current_app.logger.warning("run_actions failed: %s", exc, exc_info=True)
 
         posted_missing = False
+
         try:
-            for a in (actions or []):
-                if isinstance(a, dict) and str(a.get("type") or "").lower() == "post_message":
-                    if str(a.get("template") or "").strip() == "missing_slots":
-                        posted_missing = True
-                        break
+            for action in sanitized_actions:
+                if not isinstance(action, dict):
+                    continue
+
+                action_type = str(action.get("type") or "").lower()
+                template_key = str(action.get("template") or action.get("template_key") or "").strip()
+
+                if action_type == "post_message" and template_key == "missing_slots":
+                    posted_missing = True
+                    break
+
         except Exception:
             posted_missing = False
 
-        if ((status == "need_info") or (isinstance(missing, list) and missing)) and not posted_missing:
-            post_missing_slots_card(conv, missing if isinstance(missing, list) else [])
-    except Exception as ex:
-        current_app.logger.warning("apply_chatai_actions failed: %s", ex, exc_info=True)
+        if (
+            (status == "need_info" or (isinstance(missing, list) and missing))
+            and not posted_missing
+        ):
+            post_missing_slots_card(
+                conv,
+                missing if isinstance(missing, list) else [],
+            )
+
+    except Exception as exc:
+        current_app.logger.warning("apply_chatai_actions failed: %s", exc, exc_info=True)
+
     return results

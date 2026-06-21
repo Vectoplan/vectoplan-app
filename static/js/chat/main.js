@@ -1,302 +1,875 @@
-// services/app/static/js/chat/main.js
-// Orchestrator: verdrahtet Layout, Viewer, Versionen, Transcript, Composer.
-// Robustheitsziele:
-// - Doppelinits verhindern
-// - Jeder Schritt isoliert (try/catch), damit ein Fehler nicht alles stoppt
-// - Defensive DOM-Checks (Template-Varianten / fehlende Elemente)
-// - Dropdown-Verhalten stabil (Outside-Click, ESC, Blur)
-// - Viewer-Version-Auswahl + Persistenz (Selection) robust
-// - Admin/LV: als lokale Iframe-Seiten, inkl. Cache-Bust + ohne Polling-Überschreiben
-//
-// Hinweis:
-// - Chat-Layout (Drawer/Collapse) ist ausgelagert nach ./layout.js (auto-init + export initChatLayout).
-// - Projektinfo ist bewusst entfernt (kein Button, keine Orchestrator-Logik).
+// services/vectoplan-app/static/js/chat/main.js
+// Orchestrator for the VECTOPLAN app shell.
+// Responsibilities:
+// - initialize layout, transcript, composer and templates
+// - switch workspace iframe between Editor, Map, 2D, LV and Admin
+// - keep version dropdown usable as a neutral list
+// - avoid any legacy 3D backend calls
+// - never use Docker-internal URLs as browser iframe targets
+// - isolate each boot step with try/catch so one failing module does not stop the shell
 
 import { initChatLayout } from "./layout.js";
 
 import { $, uiState } from "./core.js";
 import { getConfig } from "./api.js";
+import { loadVersions } from "./versions.js";
 import {
-  showViewer,
-  wireViewerToolbar,
-  initViewerModeFromServer,
-  ensureInitialViewer,
-  stopViewerPolling,
-} from "./viewer.js";
-import { wireVersionsToolbar, loadVersions } from "./versions.js";
-import { loadTranscript, refreshTranscriptIncremental, wireTranscriptRefresh } from "./transcript.js";
+  loadTranscript,
+  refreshTranscriptIncremental,
+  wireTranscriptRefresh,
+} from "./transcript.js";
 import { wireComposer } from "./composer.js";
 import { loadTemplatesIndex } from "./cards.js";
 
-/* ───────────────────────── Boot-Safety Helpers ───────────────────────── */
 
-function safeCall(label, fn) {
-  try { return fn(); }
-  catch (e) {
-    try { console.warn(`[boot] ${label} failed`, e); } catch {}
-    return undefined;
-  }
-}
-async function safeAwait(label, fn) {
-  try { return await fn(); }
-  catch (e) {
-    try { console.warn(`[boot] ${label} failed`, e); } catch {}
-    return undefined;
-  }
-}
-function safeOn(el, ev, handler, opts) {
-  try {
-    if (!el) return false;
-    el.addEventListener(ev, handler, opts);
-    return true;
-  } catch { return false; }
-}
+/* ───────────────────────── Constants ───────────────────────── */
 
-/* ───────────────────────── Local URL Cache-Busting ───────────────────────── */
+const WORKSPACE_IFRAME_ALLOW = "fullscreen; pointer-lock; clipboard-read; clipboard-write";
+const WORKSPACE_IFRAME_REFERRER_POLICY = "no-referrer";
 
-function cacheBustLocalUrl(u) {
-  try {
-    const s = String(u || "").trim();
-    if (!s) return s;
-    if (!s.startsWith("/")) return s; // only same-origin relative
+const DEFAULT_EDITOR_ROUTE_TEMPLATE = "/ui/chat/{{chat_id}}/editor";
+const DEFAULT_MAP_ROUTE_TEMPLATE = "/ui/chat/{{chat_id}}/map";
+const DEFAULT_2D_ROUTE_TEMPLATE = "/ui/chat/{{chat_id}}/cad2d";
+const DEFAULT_ADMIN_ROUTE_TEMPLATE = "/ui/chat/{{chat_id}}/admin";
+const DEFAULT_LV_ROUTE_TEMPLATE = "/ui/chat/{{chat_id}}/lv";
 
-    const url = new URL(s, location.origin);
-    url.searchParams.set("r", String(Date.now()));
-    return url.pathname + "?" + url.searchParams.toString() + (url.hash || "");
-  } catch {
-    return u;
-  }
-}
+const LEGACY_OR_INTERNAL_BROWSER_TARGETS = [
+  "http://localhost:8090",
+  "http://127.0.0.1:8090",
+  "http://openlayer:8090",
+  "http://vectoplan-openlayer:8090",
+  "http://localhost:5100/",
+  "http://127.0.0.1:5100/",
+];
 
-/* ───────────────────────── Viewer-Kontext & Persistenz (Version-Selection) ─────────────────────────
-   Steuert:
-   - Speckle Model/Version-URL Bau (für 3D Viewer)
-   - Speichern/Laden der Auswahl über stateGetPath/statePutPath
-
-   WICHTIG:
-   - Der Viewer-Mode (3D/2D/Map) bleibt in viewer.js.
-   - Admin/LV werden hier als "local iframe swap" gehandhabt.
-------------------------------------------------------------------- */
-
-const VIEW = {
-  rawModelUrl: "",          // Model-Viewer-URL (neueste Version)
-  origin: "",               // https://vectoplan.com
-  token: "",                // "?token=..."
-  embed: "",                // "#embed=..."
-
-  // Persistierte Auswahl (nur für 3D relevant)
-  selectedProjectId: "",
-  selectedModelId: "",
-  selectedCommitId: null,   // versionId/commitId oder null (Model)
+const MODE_TO_BUTTON_ID = {
+  map: "modeMapBtn",
+  "3d": "mode3dBtn",
+  "2d": "mode2dBtn",
+  lv: "modeLvBtn",
+  admin: "modeAdminBtn",
 };
 
-async function initViewerCtx() {
+const MODE_TITLE = {
+  "3d": "VECTOPLAN Editor",
+  editor: "VECTOPLAN Editor",
+  map: "Karte",
+  "2d": "2D Ansicht",
+  cad2d: "2D Ansicht",
+  lv: "Leistungsverzeichnis",
+  admin: "Admin",
+};
+
+
+/* ───────────────────────── Boot safety ───────────────────────── */
+
+function safeCall(label, fn) {
   try {
-    const cfg = getConfig();
-    const p = cfg.viewerJsonPath || window.APP_CONFIG?.viewerJsonPath;
-    if (!p) return;
-
-    const r = await fetch(p, { credentials: "same-origin", cache: "no-store" }).then(x => x.json()).catch(() => null);
-    const raw = r?.raw_viewer_url || "";
-    VIEW.rawModelUrl = raw;
-
-    if (!raw) return;
-
-    const u = new URL(raw, location.href);
-    VIEW.origin = u.origin;
-    VIEW.token  = u.search || "";
-    VIEW.embed  = u.hash   || "";
-
-    const a = $("viewerOpenRawBtn");
-    if (a) a.href = raw;
-  } catch (e) {
-    try { console.warn("[viewerCtx] init failed", e); } catch {}
+    return fn();
+  } catch (error) {
+    try {
+      console.warn(`[boot] ${label} failed`, error);
+    } catch (_) {}
+    return undefined;
   }
 }
 
-function buildVersionUrl(projectId, modelId, versionId) {
+async function safeAwait(label, fn) {
   try {
-    if (!(VIEW.origin && projectId && modelId && versionId)) return "";
+    return await fn();
+  } catch (error) {
+    try {
+      console.warn(`[boot] ${label} failed`, error);
+    } catch (_) {}
+    return undefined;
+  }
+}
 
-    const base = `${VIEW.origin}/projects/${encodeURIComponent(projectId)}/models/${encodeURIComponent(modelId)}`;
-    const q = new URLSearchParams();
+function safeOn(el, eventName, handler, options) {
+  try {
+    if (!el || !eventName || typeof handler !== "function") return false;
+    el.addEventListener(eventName, handler, options);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
-    // Speckle v3: versionId (nicht commitId)
-    q.set("versionId", String(versionId));
-    q.set("r", String(Date.now())); // cache-bust (Viewer-Seite)
+function nowString() {
+  try {
+    return String(Date.now());
+  } catch (_) {
+    return String(new Date().getTime());
+  }
+}
 
-    // Token-Query berücksichtigen
-    const tokenStr = (VIEW.token || "").trim();
-    if (tokenStr) {
-      const t = tokenStr.startsWith("?") ? tokenStr.slice(1) : tokenStr;
-      try {
-        const add = new URLSearchParams(t);
-        add.forEach((v, k) => q.append(k, v));
-      } catch {
-        const mt = t.match(/(?:^|&)token=([^&]+)/);
-        if (mt && mt[1]) q.append("token", mt[1]);
-      }
+
+/* ───────────────────────── Config helpers ───────────────────────── */
+
+function cfg() {
+  try {
+    return {
+      ...(window.APP_CONFIG || {}),
+      ...(getConfig ? getConfig() : {}),
+    };
+  } catch (_) {
+    try {
+      return window.APP_CONFIG || {};
+    } catch (__) {
+      return {};
     }
+  }
+}
 
-    return `${base}?${q.toString()}${VIEW.embed || ""}`;
-  } catch {
+function cfgValue(key, fallback = "") {
+  try {
+    const c = cfg();
+    const value = c && c[key] != null ? c[key] : fallback;
+    return String(value == null ? "" : value).trim();
+  } catch (_) {
+    return String(fallback || "").trim();
+  }
+}
+
+function cfgObject(key, fallback = {}) {
+  try {
+    const c = cfg();
+    const value = c && c[key] != null ? c[key] : fallback;
+    return value && typeof value === "object" ? value : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function chatId() {
+  return cfgValue("chatId", "");
+}
+
+function encodePathPart(value) {
+  try {
+    return encodeURIComponent(String(value || ""));
+  } catch (_) {
     return "";
   }
 }
 
-function hardSwapIframe(nextSrc) {
-  const old = $("viewer-frame");
-  if (!old || !nextSrc) return;
-
+function withChatPath(templatePath) {
   try {
-    // Wichtig: viewer.js nutzt uiState.lastViewerUrl als Guard. Reset, da wir iframe ersetzen.
-    try { uiState.lastViewerUrl = ""; } catch {}
-
-    const fresh = document.createElement("iframe");
-    fresh.id = old.id;
-    fresh.className = old.className;
-    fresh.setAttribute("title", old.getAttribute("title") || "Viewer");
-    fresh.setAttribute("frameborder", "0");
-
-    if (old.getAttribute("allow")) fresh.setAttribute("allow", old.getAttribute("allow"));
-    if (old.getAttribute("referrerpolicy")) fresh.setAttribute("referrerpolicy", old.getAttribute("referrerpolicy"));
-    if (old.getAttribute("sandbox")) fresh.setAttribute("sandbox", old.getAttribute("sandbox"));
-    if (old.getAttribute("loading")) fresh.setAttribute("loading", old.getAttribute("loading"));
-
-    old.replaceWith(fresh);
-
-    // Quelle setzen + best-effort Retry
-    fresh.src = nextSrc;
-    setTimeout(() => {
-      try {
-        // Wenn iframe "blank" bleibt, nochmal setzen
-        const blank = !fresh.contentWindow || !fresh.contentDocument || fresh.contentDocument.location.href === "about:blank";
-        if (blank) fresh.src = nextSrc;
-      } catch {
-        try { fresh.src = nextSrc; } catch {}
-      }
-    }, 1200);
-  } catch {}
-}
-
-/** Setzt 3D Viewer (rawUrl), iframe bekommt Proxy nur für vectoplan.com (wie viewer.js). */
-function setViewerRawUrl(rawUrl) {
-  try {
-    const raw = String(rawUrl || "").trim();
-    if (!raw) return;
-
-    // Relative Speckle-Pfade unterstützen
-    const abs = raw.startsWith("/projects/") ? `https://vectoplan.com${raw}` : raw;
-
-    let nextSrc = abs;
-
-    // Proxy nur für vectoplan.com (kompatibel zu viewer.js)
-    try {
-      const host = new URL(abs, location.href).hostname.toLowerCase();
-      if (host.endsWith("vectoplan.com")) {
-        nextSrc = `/embed/frame?url=${encodeURIComponent(abs)}`;
-      }
-    } catch {}
-
-    hardSwapIframe(nextSrc);
-
-    const a = $("viewerOpenRawBtn");
-    if (a) a.href = abs;
-  } catch {}
-}
-
-/** Setzt lokale Viewer-Seiten (Map/2D/Admin/LV) direkt im iframe; mit Cache-Bust gegen „alte“ Inhalte. */
-function setViewerLocalUrl(localPath, { cacheBust = true } = {}) {
-  try {
-    const s = String(localPath || "").trim();
-    if (!s) return;
-
-    const src = cacheBust ? cacheBustLocalUrl(s) : s;
-    hardSwapIframe(src);
-
-    // "Öffnen" zeigt die stabile URL (ohne r=)
-    const a = $("viewerOpenRawBtn");
-    if (a) a.href = s;
-  } catch {}
-}
-
-async function fetchViewerSelection() {
-  const cfg = getConfig();
-  if (!cfg.stateGetPath || cfg.stateGetPath === "__DISABLED__") return null;
-  try {
-    return await fetch(cfg.stateGetPath, { credentials: "same-origin", cache: "no-store" }).then(r => r.json()).catch(() => null);
-  } catch {
-    return null;
+    const id = chatId();
+    const p = String(templatePath || "");
+    return p.replaceAll("{{chat_id}}", encodePathPart(id));
+  } catch (_) {
+    return templatePath;
   }
 }
 
-async function saveViewerSelection(sel) {
-  const cfg = getConfig();
-  if (!cfg.statePutPath || cfg.statePutPath === "__DISABLED__") return;
+function pathFromConfig(keys, fallbackTemplate) {
   try {
-    await fetch(cfg.statePutPath, {
+    for (const key of keys) {
+      const value = cfgValue(key, "");
+      if (value) return withChatPath(value);
+    }
+
+    return withChatPath(fallbackTemplate);
+  } catch (_) {
+    return withChatPath(fallbackTemplate);
+  }
+}
+
+function appPaths() {
+  try {
+    const paths = cfgObject("paths", {});
+    return paths && typeof paths === "object" ? paths : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function pathValue(key, fallback = "") {
+  try {
+    const paths = appPaths();
+    const value = paths && paths[key] != null ? paths[key] : cfgValue(key, fallback);
+    return String(value == null ? "" : value).trim();
+  } catch (_) {
+    return cfgValue(key, fallback);
+  }
+}
+
+function isAbsoluteUrl(input) {
+  try {
+    const raw = String(input || "").trim();
+    return /^https?:\/\//i.test(raw);
+  } catch (_) {
+    return false;
+  }
+}
+
+function isLocalAppRoute(input) {
+  try {
+    const raw = String(input || "").trim();
+    return raw.startsWith("/");
+  } catch (_) {
+    return false;
+  }
+}
+
+function normalizeRelativeUrl(input) {
+  try {
+    const raw = String(input || "").trim();
+
+    if (!raw) return "";
+
+    if (raw.startsWith("/")) {
+      const url = new URL(raw, location.origin);
+      return url.pathname + (url.search ? url.search : "") + (url.hash || "");
+    }
+
+    return raw;
+  } catch (_) {
+    return String(input || "").trim();
+  }
+}
+
+function cacheBustLocalUrl(input) {
+  try {
+    const raw = String(input || "").trim();
+    if (!raw) return raw;
+
+    // Only cache-bust relative same-origin URLs.
+    // This keeps external Editor/OpenLayer public URLs stable if they ever appear.
+    if (!raw.startsWith("/")) return raw;
+
+    const url = new URL(raw, location.origin);
+    url.searchParams.set("r", nowString());
+
+    return url.pathname + "?" + url.searchParams.toString() + (url.hash || "");
+  } catch (_) {
+    return input;
+  }
+}
+
+function stableLocalUrl(input) {
+  try {
+    const raw = String(input || "").trim();
+    if (!raw) return raw;
+
+    if (!raw.startsWith("/")) return raw;
+
+    const url = new URL(raw, location.origin);
+    url.searchParams.delete("r");
+
+    const query = url.searchParams.toString();
+    return url.pathname + (query ? "?" + query : "") + (url.hash || "");
+  } catch (_) {
+    return input;
+  }
+}
+
+function isUnsafeLegacyTarget(input) {
+  try {
+    const raw = String(input || "").trim();
+
+    if (!raw) return false;
+
+    const normalized = raw.endsWith("/") && !raw.includes("?", raw.length - 1)
+      ? raw
+      : raw.replace(/[?#].*$/, "");
+
+    for (const bad of LEGACY_OR_INTERNAL_BROWSER_TARGETS) {
+      if (normalized === bad || raw.startsWith(bad + "?") || raw.startsWith(bad + "#")) {
+        return true;
+      }
+    }
+
+    // Explicitly block Docker-internal host names in browser iframe targets.
+    try {
+      const url = new URL(raw, location.origin);
+      const host = String(url.hostname || "").toLowerCase();
+      if (["openlayer", "vectoplan-openlayer", "server-openlayer", "vectoplan-editor", "editor"].includes(host)) {
+        return true;
+      }
+    } catch (_) {}
+
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+function sanitizeWorkspaceUrl(input, fallback) {
+  try {
+    const raw = normalizeRelativeUrl(input);
+
+    if (!raw || isUnsafeLegacyTarget(raw)) {
+      return normalizeRelativeUrl(fallback);
+    }
+
+    return raw;
+  } catch (_) {
+    return normalizeRelativeUrl(fallback);
+  }
+}
+
+
+/* ───────────────────────── Workspace URL resolution ───────────────────────── */
+
+function editorUrl() {
+  try {
+    const fallback = `/ui/chat/${encodePathPart(chatId())}/editor`;
+
+    // Editor must always be reached through the local app route.
+    // Do not use viewer_url/raw external URL as primary 3D source.
+    const candidate =
+      pathValue("editorPagePath") ||
+      pathValue("initialEditorUrl") ||
+      cfgValue("editorPagePath") ||
+      cfgValue("initialEditorUrl") ||
+      withChatPath(DEFAULT_EDITOR_ROUTE_TEMPLATE);
+
+    return sanitizeWorkspaceUrl(candidate, fallback);
+  } catch (_) {
+    return `/ui/chat/${encodePathPart(chatId())}/editor`;
+  }
+}
+
+function mapUrl() {
+  try {
+    const fallback = `/ui/chat/${encodePathPart(chatId())}/map`;
+
+    // Map must always be reached through the local app route.
+    // The app route redirects to the browser-facing OpenLayer public URL.
+    const candidate =
+      pathValue("mapPagePath") ||
+      cfgValue("mapPagePath") ||
+      withChatPath(DEFAULT_MAP_ROUTE_TEMPLATE);
+
+    return sanitizeWorkspaceUrl(candidate, fallback);
+  } catch (_) {
+    return `/ui/chat/${encodePathPart(chatId())}/map`;
+  }
+}
+
+function twoDPageUrl() {
+  try {
+    return pathFromConfig(["cad2dPagePath"], DEFAULT_2D_ROUTE_TEMPLATE);
+  } catch (_) {
+    return `/ui/chat/${encodePathPart(chatId())}/cad2d`;
+  }
+}
+
+function adminUrl() {
+  try {
+    return pathFromConfig(["adminPagePath"], DEFAULT_ADMIN_ROUTE_TEMPLATE);
+  } catch (_) {
+    return `/ui/chat/${encodePathPart(chatId())}/admin`;
+  }
+}
+
+function lvUrl() {
+  try {
+    return pathFromConfig(["lvPagePath"], DEFAULT_LV_ROUTE_TEMPLATE);
+  } catch (_) {
+    return `/ui/chat/${encodePathPart(chatId())}/lv`;
+  }
+}
+
+async function resolve2dUrl() {
+  try {
+    const jsonPath = pathValue("cadEmbedJsonPath") || cfgValue("cadEmbedJsonPath");
+    if (!jsonPath) return twoDPageUrl();
+
+    const data = await fetch(jsonPath, {
+      credentials: "same-origin",
+      cache: "no-store",
+    })
+      .then((response) => response.json())
+      .catch(() => null);
+
+    const candidates = [
+      data?.iframe_url,
+      data?.embed_url,
+      data?.viewer_url,
+      data?.url,
+      data?.src,
+    ];
+
+    for (const candidate of candidates) {
+      const value = String(candidate || "").trim();
+      if (value && !isUnsafeLegacyTarget(value)) return value;
+    }
+
+    return twoDPageUrl();
+  } catch (_) {
+    return twoDPageUrl();
+  }
+}
+
+
+/* ───────────────────────── Workspace fallback UI ───────────────────────── */
+
+function workspaceFallback() {
+  try {
+    return $("workspaceFallback") || document.getElementById("workspaceFallback");
+  } catch (_) {
+    return document.getElementById("workspaceFallback");
+  }
+}
+
+function workspaceFallbackText() {
+  try {
+    return $("workspaceFallbackText") || document.getElementById("workspaceFallbackText");
+  } catch (_) {
+    return document.getElementById("workspaceFallbackText");
+  }
+}
+
+function showWorkspaceFallback(message) {
+  try {
+    const box = workspaceFallback();
+    const text = workspaceFallbackText();
+
+    if (text) {
+      text.textContent = String(message || "Bitte öffne die Ansicht in einem neuen Tab oder lade die Seite neu.");
+    }
+
+    if (box) {
+      box.classList.remove("hidden");
+      box.setAttribute("aria-hidden", "false");
+    }
+  } catch (_) {}
+}
+
+function hideWorkspaceFallback() {
+  try {
+    const box = workspaceFallback();
+    if (!box) return;
+
+    box.classList.add("hidden");
+    box.setAttribute("aria-hidden", "true");
+  } catch (_) {}
+}
+
+
+/* ───────────────────────── Workspace iframe control ───────────────────────── */
+
+function viewerFrame() {
+  try {
+    return $("viewer-frame");
+  } catch (_) {
+    return document.getElementById("viewer-frame");
+  }
+}
+
+function setRawOpenUrl(url) {
+  try {
+    const a = $("viewerOpenRawBtn");
+    if (!a) return;
+
+    const stable = stableLocalUrl(url || "#");
+    a.href = stable || "#";
+  } catch (_) {}
+}
+
+function setFrameTitle(mode) {
+  try {
+    const frame = viewerFrame();
+    if (!frame) return;
+
+    frame.setAttribute("title", MODE_TITLE[mode] || "Arbeitsbereich");
+  } catch (_) {}
+}
+
+function setFrameDataset(frame, data) {
+  try {
+    if (!frame || !data || typeof data !== "object") return;
+
+    for (const [key, value] of Object.entries(data)) {
+      try {
+        frame.dataset[key] = String(value == null ? "" : value);
+      } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+function applyIframeCapabilities(frame) {
+  try {
+    if (!frame) return;
+
+    frame.setAttribute("allow", WORKSPACE_IFRAME_ALLOW);
+    frame.setAttribute("referrerpolicy", WORKSPACE_IFRAME_REFERRER_POLICY);
+    frame.setAttribute("loading", "eager");
+    frame.setAttribute("frameborder", "0");
+
+    // Do not set sandbox here. A sandbox without all needed flags can break
+    // Editor pointer lock, module loading, storage and OpenLayer behavior.
+    try {
+      frame.removeAttribute("sandbox");
+    } catch (_) {}
+  } catch (_) {}
+}
+
+function makeIframeLoadHandlers(frame, rawSrc, mode) {
+  let loaded = false;
+  let timeoutId = null;
+
+  const clear = () => {
+    try {
+      if (timeoutId) clearTimeout(timeoutId);
+      timeoutId = null;
+    } catch (_) {}
+  };
+
+  const onLoad = () => {
+    try {
+      loaded = true;
+      clear();
+      hideWorkspaceFallback();
+
+      try {
+        uiState.lastWorkspaceLoad = {
+          mode,
+          src: rawSrc,
+          loadedAt: Date.now(),
+        };
+      } catch (_) {}
+    } catch (_) {}
+  };
+
+  const onError = () => {
+    try {
+      loaded = false;
+      clear();
+      showWorkspaceFallback("Arbeitsbereich konnte nicht geladen werden. Prüfe, ob der Zielservice läuft und iframe-Header erlaubt sind.");
+
+      try {
+        uiState.lastWorkspaceError = {
+          mode,
+          src: rawSrc,
+          errorAt: Date.now(),
+        };
+      } catch (_) {}
+    } catch (_) {}
+  };
+
+  safeOn(frame, "load", onLoad);
+  safeOn(frame, "error", onError);
+
+  timeoutId = setTimeout(() => {
+    try {
+      if (!loaded) {
+        showWorkspaceFallback("Arbeitsbereich lädt noch oder wurde vom Browser blockiert. Prüfe Console, CSP und X-Frame-Options.");
+      }
+    } catch (_) {}
+  }, mode === "map" ? 6000 : 8000);
+
+  return { onLoad, onError, clear };
+}
+
+function hardSwapIframe(nextSrc, options = {}) {
+  try {
+    const oldFrame = viewerFrame();
+    const rawSrc = String(nextSrc || "").trim();
+
+    if (!oldFrame || !rawSrc) return false;
+
+    const mode = String(options.mode || "").trim();
+    const normalizedMode = normalizeMode(mode || "3d");
+    const title = String(options.title || MODE_TITLE[normalizedMode] || oldFrame.getAttribute("title") || "Arbeitsbereich");
+
+    if (isUnsafeLegacyTarget(rawSrc)) {
+      const fallback = normalizedMode === "map" ? mapUrl() : editorUrl();
+      try {
+        console.warn("[workspace] blocked unsafe iframe target", rawSrc, "fallback", fallback);
+      } catch (_) {}
+      return hardSwapIframe(cacheBustLocalUrl(fallback), { ...options, mode: normalizedMode });
+    }
+
+    hideWorkspaceFallback();
+
+    try {
+      uiState.lastViewerUrl = "";
+      uiState.rawViewerUrl = rawSrc;
+      uiState.workspaceMode = normalizedMode;
+      uiState.viewerMode = normalizedMode;
+    } catch (_) {}
+
+    const fresh = document.createElement("iframe");
+    fresh.id = oldFrame.id;
+    fresh.className = oldFrame.className;
+
+    fresh.setAttribute("title", title);
+    applyIframeCapabilities(fresh);
+
+    setFrameDataset(fresh, {
+      mode: normalizedMode,
+      target: rawSrc,
+      swappedAt: Date.now(),
+    });
+
+    makeIframeLoadHandlers(fresh, rawSrc, normalizedMode);
+
+    oldFrame.replaceWith(fresh);
+    fresh.src = rawSrc;
+
+    setRawOpenUrl(rawSrc);
+
+    // Best-effort retry for browsers/extensions that occasionally leave iframes blank.
+    setTimeout(() => {
+      try {
+        if (!fresh.src || fresh.src === "about:blank") {
+          fresh.src = rawSrc;
+        }
+      } catch (_) {
+        try {
+          fresh.src = rawSrc;
+        } catch (__) {}
+      }
+    }, 800);
+
+    return true;
+  } catch (error) {
+    try {
+      console.warn("[workspace] iframe swap failed", error);
+    } catch (_) {}
+    showWorkspaceFallback("Arbeitsbereich konnte nicht initialisiert werden.");
+    return false;
+  }
+}
+
+function setModePressed(activeMode) {
+  try {
+    const mode = normalizeMode(activeMode);
+
+    for (const [m, id] of Object.entries(MODE_TO_BUTTON_ID)) {
+      const btn = $(id);
+      if (!btn) continue;
+
+      btn.setAttribute("aria-pressed", String(m === mode));
+    }
+  } catch (_) {}
+}
+
+function normalizeMode(mode) {
+  try {
+    const value = String(mode || "").trim().toLowerCase();
+
+    if (value === "editor") return "3d";
+    if (value === "cad") return "2d";
+    if (value === "cad2d") return "2d";
+    if (value === "viewer") return "3d";
+    if (value === "viewer3d") return "3d";
+    if (value === "model") return "3d";
+    if (value === "version") return "3d";
+
+    if (["3d", "2d", "map", "lv", "admin"].includes(value)) return value;
+
+    return "3d";
+  } catch (_) {
+    return "3d";
+  }
+}
+
+function setUiMode(mode) {
+  try {
+    const normalized = normalizeMode(mode);
+
+    uiState.viewerMode = normalized;
+    uiState.workspaceMode = normalized;
+
+    const root = document.querySelector(".app-wrap");
+    if (root) {
+      root.dataset.workspaceMode = normalized;
+      root.dataset.viewerMode = normalized;
+    }
+
+    setModePressed(normalized);
+    setFrameTitle(normalized);
+
+    return normalized;
+  } catch (_) {
+    return normalizeMode(mode);
+  }
+}
+
+async function persistWorkspaceMode(mode) {
+  try {
+    const statePath = pathValue("statePutPath") || cfgValue("statePutPath");
+    if (!statePath || statePath === "__DISABLED__") return;
+
+    const normalized = normalizeMode(mode);
+
+    await fetch(statePath, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
       cache: "no-store",
-      body: JSON.stringify(sel || {}),
+      body: JSON.stringify({
+        mode: normalized === "3d" ? "editor" : normalized,
+        workspace_mode: normalized,
+        legacy_3d_backend: false,
+        legacy_speckle: false,
+        updated_at: Date.now(),
+      }),
     }).catch(() => {});
-  } catch {}
+  } catch (_) {}
 }
 
-/** Nur anwenden, wenn wir im 3D-Kontext sind (sonst Admin/LV/2D/Map nicht überschreiben). */
-function canApply3dSelectionNow() {
-  const mode = String(uiState.viewerMode || "");
-  return mode === "3d" || mode === ""; // defensiv: "" behandeln wir als 3d-kontext
+async function fetchWorkspaceState() {
+  try {
+    const statePath = pathValue("stateGetPath") || cfgValue("stateGetPath");
+    if (!statePath || statePath === "__DISABLED__") return null;
+
+    return await fetch(statePath, {
+      credentials: "same-origin",
+      cache: "no-store",
+    })
+      .then((response) => response.json())
+      .catch(() => null);
+  } catch (_) {
+    return null;
+  }
 }
 
-async function applySavedSelection() {
-  const saved = await fetchViewerSelection();
+function extractModeFromState(state) {
+  try {
+    if (!state || typeof state !== "object") return "";
 
-  // Auswahl merken (auch wenn wir nicht im 3D sind)
-  if (saved && saved.mode === "version" && saved.version_id && saved.project_id && saved.model_id) {
-    VIEW.selectedProjectId = String(saved.project_id || "");
-    VIEW.selectedModelId   = String(saved.model_id || "");
-    VIEW.selectedCommitId  = String(saved.version_id || "");
-  } else {
-    VIEW.selectedProjectId = "";
-    VIEW.selectedModelId   = "";
-    VIEW.selectedCommitId  = null;
+    const candidates = [
+      state.workspace_mode,
+      state.viewer_mode,
+      state.mode,
+      state?.viewer_selection?.workspace_mode,
+      state?.viewer_selection?.mode,
+      state?.selection?.workspace_mode,
+      state?.selection?.mode,
+      state?.payload?.workspace_mode,
+      state?.payload?.mode,
+    ];
+
+    for (const candidate of candidates) {
+      const value = String(candidate || "").trim();
+      if (value) return normalizeMode(value);
+    }
+
+    return "";
+  } catch (_) {
+    return "";
   }
+}
 
-  // Nicht im 3D-Modus? Dann hier nicht ins iframe schreiben.
-  if (!canApply3dSelectionNow()) {
-    try { markSelectedVersion(VIEW.selectedCommitId); } catch {}
-    return;
+async function setWorkspaceMode(mode, options = {}) {
+  const normalized = setUiMode(mode);
+  const shouldPersist = options.persist !== false;
+
+  try {
+    let target = "";
+
+    if (normalized === "3d") {
+      target = editorUrl();
+      hardSwapIframe(target, {
+        mode: "3d",
+        title: "VECTOPLAN Editor",
+      });
+    } else if (normalized === "map") {
+      target = mapUrl();
+      hardSwapIframe(cacheBustLocalUrl(target), {
+        mode: "map",
+        title: "Karte",
+      });
+    } else if (normalized === "2d") {
+      target = await resolve2dUrl();
+      hardSwapIframe(cacheBustLocalUrl(target), {
+        mode: "2d",
+        title: "2D Ansicht",
+      });
+    } else if (normalized === "lv") {
+      target = lvUrl();
+      hardSwapIframe(cacheBustLocalUrl(target), {
+        mode: "lv",
+        title: "Leistungsverzeichnis",
+      });
+    } else if (normalized === "admin") {
+      target = adminUrl();
+      hardSwapIframe(cacheBustLocalUrl(target), {
+        mode: "admin",
+        title: "Admin",
+      });
+    }
+
+    if (shouldPersist) {
+      await persistWorkspaceMode(normalized);
+    }
+
+    try {
+      versionsClose();
+    } catch (_) {}
+
+    return true;
+  } catch (error) {
+    try {
+      console.warn("[workspace] setWorkspaceMode failed", normalized, error);
+    } catch (_) {}
+    showWorkspaceFallback("Arbeitsbereich konnte nicht gewechselt werden.");
+    return false;
   }
+}
 
-  if (VIEW.selectedCommitId && VIEW.selectedProjectId && VIEW.selectedModelId) {
-    const u = buildVersionUrl(VIEW.selectedProjectId, VIEW.selectedModelId, VIEW.selectedCommitId);
-    if (u) {
-      setViewerRawUrl(u);
-      try { markSelectedVersion(VIEW.selectedCommitId); } catch {}
+async function applyInitialWorkspaceMode() {
+  try {
+    const currentFrame = viewerFrame();
+    if (currentFrame) {
+      applyIframeCapabilities(currentFrame);
+      makeIframeLoadHandlers(currentFrame, currentFrame.getAttribute("src") || currentFrame.src || "", "3d");
+    }
+  } catch (_) {}
+
+  try {
+    const queryMode = new URLSearchParams(location.search).get("mode");
+    if (queryMode) {
+      await setWorkspaceMode(queryMode, { persist: false });
       return;
     }
+
+    const saved = await fetchWorkspaceState();
+    const savedMode = extractModeFromState(saved);
+
+    if (savedMode) {
+      await setWorkspaceMode(savedMode, { persist: false });
+      return;
+    }
+
+    const configured = cfgValue("defaultMode", "3d");
+    await setWorkspaceMode(configured || "3d", { persist: false });
+  } catch (_) {
+    await setWorkspaceMode("3d", { persist: false });
   }
-
-  // Fallback: Model
-  if (VIEW.rawModelUrl) setViewerRawUrl(VIEW.rawModelUrl);
-  try { markSelectedVersion(null); } catch {}
 }
 
-async function selectLatestModel() {
-  VIEW.selectedCommitId = null;
-  VIEW.selectedProjectId = "";
-  VIEW.selectedModelId = "";
+function wireWorkspaceToolbar() {
+  const bindings = [
+    ["modeMapBtn", "map"],
+    ["mode3dBtn", "3d"],
+    ["mode2dBtn", "2d"],
+    ["modeLvBtn", "lv"],
+    ["modeAdminBtn", "admin"],
+  ];
 
-  // User-Aktion → wir dürfen in 3D gehen
-  try { uiState.viewerMode = "3d"; } catch {}
-  setModePressed("mode3dBtn");
+  for (const [id, mode] of bindings) {
+    const btn = $(id);
+    if (!btn || btn._workspaceModeWired) continue;
 
-  setViewerRawUrl(VIEW.rawModelUrl || "");
-  try { markSelectedVersion(null); } catch {}
-  await saveViewerSelection({ mode: "model", project_id: null, model_id: null, version_id: null });
+    btn._workspaceModeWired = true;
+
+    safeOn(btn, "click", (event) => {
+      try {
+        event.preventDefault();
+      } catch (_) {}
+
+      void setWorkspaceMode(mode);
+    });
+  }
 }
+
 
 /* ───────────────────────── Theme ───────────────────────── */
 
@@ -304,52 +877,66 @@ function themeGet() {
   try {
     const saved = localStorage.getItem("theme");
     if (saved === "dark" || saved === "light") return saved;
-  } catch {}
-  const attr = document.documentElement.getAttribute("data-theme");
-  return (attr === "dark" || attr === "light") ? attr : "light";
+  } catch (_) {}
+
+  try {
+    const attr = document.documentElement.getAttribute("data-theme");
+    if (attr === "dark" || attr === "light") return attr;
+  } catch (_) {}
+
+  return "light";
 }
 
-function themeApply(t = "light") {
+function themeApply(theme = "light") {
   try {
+    const next = theme === "dark" ? "dark" : "light";
     const root = document.documentElement;
-    const next = (t === "dark") ? "dark" : "light";
 
     root.setAttribute("data-theme", next);
-    try { localStorage.setItem("theme", next); } catch {}
+
+    try {
+      localStorage.setItem("theme", next);
+    } catch (_) {}
 
     const btn = $("themeToggleBtn");
     if (btn) {
-      const isDark = (next === "dark");
+      const isDark = next === "dark";
       btn.setAttribute("aria-pressed", String(isDark));
       btn.textContent = isDark ? "☀️ Hell" : "🌙 Dunkel";
-      btn.title = isDark ? "Auf helles Theme umschalten" : "Auf dunkles Theme umschalten";
+      btn.title = isDark
+        ? "Auf helles Theme umschalten"
+        : "Auf dunkles Theme umschalten";
     }
-  } catch {}
+  } catch (_) {}
 }
 
 function themeToggle() {
   try {
-    const cur = document.documentElement.getAttribute("data-theme") || "light";
-    themeApply(cur === "dark" ? "light" : "dark");
-  } catch {}
+    const current = document.documentElement.getAttribute("data-theme") || "light";
+    themeApply(current === "dark" ? "light" : "dark");
+  } catch (_) {}
 }
 
 function wireThemeToggle() {
-  if (window.__THEME_WIRED__) return;
-  window.__THEME_WIRED__ = true;
+  try {
+    if (window.__VECTOPLAN_THEME_WIRED__) return;
+    window.__VECTOPLAN_THEME_WIRED__ = true;
 
-  const btn = $("themeToggleBtn");
-  if (btn && !btn._wired) {
-    btn._wired = true;
-    btn.addEventListener("click", themeToggle);
-  }
+    const btn = $("themeToggleBtn");
 
-  themeApply(themeGet());
+    if (btn && !btn._themeWired) {
+      btn._themeWired = true;
+      safeOn(btn, "click", themeToggle);
+    }
+
+    themeApply(themeGet());
+  } catch (_) {}
 }
 
-/* ───────────────────────── Versionen: Dropdown/Panel Helpers ───────────────────────── */
 
-function getVersionsContainer() {
+/* ───────────────────────── Versions dropdown ───────────────────────── */
+
+function versionsContainer() {
   return $("versionsDropdown") || $("versionsPanel") || null;
 }
 
@@ -359,7 +946,7 @@ function isHidden(el) {
     if (el.classList.contains("hidden")) return true;
     if (String(el.getAttribute("aria-hidden") || "") === "true") return true;
     return false;
-  } catch {
+  } catch (_) {
     return true;
   }
 }
@@ -367,7 +954,8 @@ function isHidden(el) {
 function versionsOpen() {
   try {
     const toggle = $("versionsToggleBtn");
-    const box = getVersionsContainer();
+    const box = versionsContainer();
+
     if (!toggle || !box) return false;
 
     box.classList.remove("hidden");
@@ -376,13 +964,15 @@ function versionsOpen() {
 
     setTimeout(() => {
       try {
-        const firstBtn = box.querySelector("button, [href], [tabindex]:not([tabindex='-1'])");
-        if (firstBtn && typeof firstBtn.focus === "function") firstBtn.focus();
-      } catch {}
+        const first = box.querySelector("button, [href], [tabindex]:not([tabindex='-1'])");
+        if (first && typeof first.focus === "function") first.focus();
+      } catch (_) {}
     }, 0);
 
+    void refreshVersionsUI();
+
     return true;
-  } catch {
+  } catch (_) {
     return false;
   }
 }
@@ -390,453 +980,298 @@ function versionsOpen() {
 function versionsClose() {
   try {
     const toggle = $("versionsToggleBtn");
-    const box = getVersionsContainer();
+    const box = versionsContainer();
+
     if (!toggle || !box) return false;
 
     box.classList.add("hidden");
     box.setAttribute("aria-hidden", "true");
     toggle.setAttribute("aria-expanded", "false");
+
     return true;
-  } catch {
+  } catch (_) {
     return false;
   }
 }
 
 function versionsToggle() {
   try {
-    const box = getVersionsContainer();
+    const box = versionsContainer();
     if (!box) return false;
+
     if (isHidden(box)) return versionsOpen();
+
     versionsClose();
     return false;
-  } catch {
+  } catch (_) {
     return false;
   }
 }
 
-function wireVersionsDropdown() {
-  const toggle = $("versionsToggleBtn");
-  const box = getVersionsContainer();
-  if (!toggle || !box) return;
-
-  if (toggle._versionsDropdownWired) return;
-  toggle._versionsDropdownWired = true;
-
-  try { if (box.id) toggle.setAttribute("aria-controls", box.id); } catch {}
-
-  safeOn(toggle, "click", (e) => {
-    try {
-      e.preventDefault();
-      const nowOpen = versionsToggle();
-      if (nowOpen) setTimeout(() => { void refreshVersionsUI(); }, 0);
-    } catch {}
-  });
-
-  // Outside click/tap
-  const onOutside = (ev) => {
-    try {
-      const box2 = getVersionsContainer();
-      if (!box2 || isHidden(box2)) return;
-
-      const t = ev?.target;
-      if (!t) return;
-      if (box2.contains(t)) return;
-      if (toggle.contains(t)) return;
-
-      versionsClose();
-    } catch {}
-  };
-
-  safeOn(document, "mousedown", onOutside, { capture: true, passive: true });
-  safeOn(document, "touchstart", onOutside, { capture: true, passive: true });
-
-  // Escape closes dropdown
-  safeOn(document, "keydown", (e) => {
-    try {
-      if (e.key !== "Escape") return;
-      const box2 = getVersionsContainer();
-      if (!box2 || isHidden(box2)) return;
-      versionsClose();
-    } catch {}
-  });
-
-  // Optional: beim Tab-Wechsel schließen
-  safeOn(window, "blur", () => { try { versionsClose(); } catch {} }, { passive: true });
-}
-
-/* ───────────────────────── Versionsliste: Auswahl-Button + Markierung ───────────────────────── */
-
 async function fetchVersionsRaw() {
   try {
-    const p = window.APP_CONFIG?.versionsPath || getConfig().versionsPath;
-    if (!p) return [];
+    const path = pathValue("versionsPath") || cfgValue("versionsPath");
+    if (!path) return [];
 
-    const r = await fetch(p, { credentials: "same-origin", cache: "no-store" }).then(x => x.json()).catch(() => null);
-    return Array.isArray(r?.items) ? r.items : [];
-  } catch {
+    const data = await fetch(path, {
+      credentials: "same-origin",
+      cache: "no-store",
+    })
+      .then((response) => response.json())
+      .catch(() => null);
+
+    if (Array.isArray(data?.items)) return data.items;
+
+    return [];
+  } catch (_) {
     return [];
   }
 }
 
-function markSelectedVersion(commitIdOrNull) {
+function setVersionCount(count) {
   try {
-    const ul = $("versionsList");
-    if (!ul) return;
+    const el = $("versCount");
+    if (el) el.textContent = String(Number.isFinite(count) ? count : 0);
+  } catch (_) {}
+}
 
-    [...ul.querySelectorAll("li")].forEach(li => {
-      const cid = li.getAttribute("data-commit-id") || "";
-      const isSel = !!commitIdOrNull && cid === commitIdOrNull;
+function neutralizeVersionViewerActions() {
+  try {
+    const list = $("versionsList");
+    if (!list) return;
 
-      li.classList.toggle("is-selected", isSel);
-      li.setAttribute("aria-selected", isSel ? "true" : "false");
+    const actionSelectors = [
+      "[data-action='select-version']",
+      "[data-action='open-viewer']",
+      "[data-action='open-model']",
+      "[data-action='open-version']",
+    ];
 
-      const selBtn = li.querySelector("[data-action='select-version']");
-      if (selBtn) {
-        selBtn.disabled = isSel ? true : (selBtn._disabledOrig || false);
-        selBtn.textContent = isSel ? "Ausgewählt" : "Version auswählen";
-      }
+    for (const selector of actionSelectors) {
+      const buttons = list.querySelectorAll(selector);
+      buttons.forEach((btn) => {
+        try {
+          btn.disabled = true;
+          btn.setAttribute("aria-disabled", "true");
+          btn.title = "Diese Version ist gespeichert. Die Editor-Integration lädt keine alte 3D-Viewer-Version.";
+          if (!String(btn.textContent || "").trim()) {
+            btn.textContent = "Gespeichert";
+          }
+        } catch (_) {}
+      });
+    }
+
+    list.querySelectorAll("li").forEach((li) => {
+      try {
+        li.classList.remove("is-selected");
+        li.setAttribute("aria-selected", "false");
+      } catch (_) {}
     });
-  } catch {}
-}
-
-function extractSpeckle(it) {
-  try {
-    const meta = it?.meta || {};
-    const sp  = it?.speckle || meta?.speckle || {};
-    const pid = sp.project_id || it.speckle_project_id || meta.speckle_project_id || it.project_id || "";
-    const mid = sp.model_id   || it.speckle_model_id   || meta.speckle_model_id   || it.model_id   || "";
-    const vid = sp.version_id || sp.commit_id ||
-                it.speckle_version_id || meta.speckle_version_id ||
-                it.version_id || it.commit_id || it.rev || it.id || "";
-    return { project_id: String(pid || ""), model_id: String(mid || ""), version_id: String(vid || "") };
-  } catch {
-    return { project_id: "", model_id: "", version_id: "" };
-  }
-}
-
-function enhanceVersionsListDOM(versions) {
-  const ul = $("versionsList");
-  if (!ul) return;
-
-  const lis = [...ul.children];
-  for (let i = 0; i < lis.length; i++) {
-    const li = lis[i];
-    const v  = versions[i] || null;
-    if (!v) continue;
-
-    let pid = li.getAttribute("data-project-id") || "";
-    let mid = li.getAttribute("data-model-id")   || "";
-    let cid = li.getAttribute("data-commit-id")  || "";
-
-    if (!(pid && mid && cid)) {
-      const sp = extractSpeckle(v);
-      pid = pid || sp.project_id;
-      mid = mid || sp.model_id;
-      cid = cid || sp.version_id;
-
-      if (pid) li.setAttribute("data-project-id", pid);
-      if (mid) li.setAttribute("data-model-id",   mid);
-      if (cid) li.setAttribute("data-commit-id",  cid);
-    }
-
-    if (!li.classList.contains("vers-item")) li.classList.add("vers-item");
-
-    let btn = li.querySelector("[data-action='select-version']");
-    if (!btn) {
-      const actions = li.querySelector(".vers-actions") || li;
-      btn = document.createElement("button");
-      btn.className = "btn";
-      btn.type = "button";
-      btn.setAttribute("data-action", "select-version");
-      actions.appendChild(btn);
-    }
-
-    btn.setAttribute("data-project-id", pid || "");
-    btn.setAttribute("data-model-id",   mid || "");
-    btn.setAttribute("data-commit-id",  cid || "");
-    btn.textContent = "Version auswählen";
-
-    const ready = !!(pid && mid && cid);
-    btn.disabled = !ready;
-    btn._disabledOrig = !ready;
-  }
-
-  markSelectedVersion(VIEW.selectedCommitId);
+  } catch (_) {}
 }
 
 async function refreshVersionsUI() {
-  try { await loadVersions(); } catch {}
-  const items = await fetchVersionsRaw();
-  enhanceVersionsListDOM(items);
-}
-
-function wireVersionSelection() {
-  const ul = $("versionsList");
-  if (!ul || ul._selectWired) return;
-  ul._selectWired = true;
-
-  ul.addEventListener("click", async (e) => {
-    const btn = e.target && e.target.closest?.("[data-action='select-version']");
-    if (!btn) return;
-
-    const pid = btn.getAttribute("data-project-id") || "";
-    const mid = btn.getAttribute("data-model-id")   || "";
-    const cid = btn.getAttribute("data-commit-id")  || "";
-    if (!(pid && mid && cid)) return;
-
-    // Version selection ist 3D-Kontext
-    try { uiState.viewerMode = "3d"; } catch {}
-    setModePressed("mode3dBtn");
-
-    VIEW.selectedProjectId = pid;
-    VIEW.selectedModelId   = mid;
-    VIEW.selectedCommitId  = cid;
-
-    const url = buildVersionUrl(pid, mid, cid);
-    if (!url) return;
-
-    // Dropdown schließen (UX) + Polling stoppen (wir setzen URL manuell)
-    try { versionsClose(); } catch {}
-    try { stopViewerPolling(); } catch {}
-
-    setViewerRawUrl(url);
-    markSelectedVersion(cid);
-
-    await saveViewerSelection({ mode: "version", project_id: pid, model_id: mid, version_id: cid });
-  });
-
-  const refreshBtn = $("versRefreshBtn");
-  if (refreshBtn && !refreshBtn._refreshWired) {
-    refreshBtn._refreshWired = true;
-    refreshBtn.addEventListener("click", () => { void refreshVersionsUI(); });
-  }
-
-  const mo = new MutationObserver(() => {
-    void (async () => {
-      const items = await fetchVersionsRaw();
-      enhanceVersionsListDOM(items);
-    })();
-  });
-  mo.observe(ul, { childList: true, subtree: false });
-}
-
-/* ───────────────────────── Viewer: Extra Modes (Admin/LV) ───────────────────────── */
-
-function setModePressed(activeId) {
   try {
-    const ids = ["modeMapBtn", "mode3dBtn", "mode2dBtn", "modeAdminBtn", "modeLvBtn"];
-    for (const id of ids) {
-      const b = $(id);
-      if (!b) continue;
-      b.setAttribute("aria-pressed", String(id === activeId));
-    }
-  } catch {}
-}
-
-function wireExtraViewerModes() {
-  const cfg = getConfig();
-
-  const btnAdmin = $("modeAdminBtn");
-  const btnLv    = $("modeLvBtn");
-
-  if (btnAdmin && !btnAdmin._wired) {
-    btnAdmin._wired = true;
-    btnAdmin.addEventListener("click", () => {
-      try {
-        const p = cfg.adminPagePath || window.APP_CONFIG?.adminPagePath || "";
-        if (!p) return;
-
-        // Modus setzen, Polling stoppen, lokale Seite cache-busten
-        try { uiState.viewerMode = "admin"; } catch {}
-        try { stopViewerPolling(); } catch {}
-
-        setModePressed("modeAdminBtn");
-        setViewerLocalUrl(p, { cacheBust: true });
-
-        // Versionen-Dropdown schließen
-        try { versionsClose(); } catch {}
-      } catch {}
-    });
-  }
-
-  if (btnLv && !btnLv._wired) {
-    btnLv._wired = true;
-    btnLv.addEventListener("click", () => {
-      try {
-        const p = cfg.lvPagePath || window.APP_CONFIG?.lvPagePath || "";
-        if (!p) return;
-
-        try { uiState.viewerMode = "lv"; } catch {}
-        try { stopViewerPolling(); } catch {}
-
-        setModePressed("modeLvBtn");
-        setViewerLocalUrl(p, { cacheBust: true });
-
-        try { versionsClose(); } catch {}
-      } catch {}
-    });
-  }
-
-  // Wenn Map/3D/2D geklickt wird, Admin/LV visuell zurücksetzen.
-  const clearAdminLv = () => {
+    await loadVersions();
+  } catch (error) {
     try {
-      const a = $("modeAdminBtn"); if (a) a.setAttribute("aria-pressed", "false");
-      const l = $("modeLvBtn");    if (l) l.setAttribute("aria-pressed", "false");
-    } catch {}
-  };
+      console.warn("[versions] loadVersions failed", error);
+    } catch (_) {}
+  }
 
-  ["modeMapBtn", "mode3dBtn", "mode2dBtn"].forEach((id) => {
-    const b = $(id);
-    if (b && !b._clearExtraWired) {
-      b._clearExtraWired = true;
-      b.addEventListener("click", () => { clearAdminLv(); });
-    }
-  });
+  try {
+    const items = await fetchVersionsRaw();
+    setVersionCount(items.length);
+  } catch (_) {
+    setVersionCount(0);
+  }
 
-  // Wenn 3D geklickt wird: ggf. gespeicherte Version-Auswahl wieder anwenden (nach kurzer Verzögerung)
-  const b3d = $("mode3dBtn");
-  if (b3d && !b3d._applySelWired) {
-    b3d._applySelWired = true;
-    b3d.addEventListener("click", () => {
+  neutralizeVersionViewerActions();
+}
+
+function wireVersionsDropdown() {
+  try {
+    const toggle = $("versionsToggleBtn");
+    const box = versionsContainer();
+
+    if (!toggle || !box) return;
+    if (toggle._versionsDropdownWired) return;
+
+    toggle._versionsDropdownWired = true;
+
+    try {
+      if (box.id) toggle.setAttribute("aria-controls", box.id);
+    } catch (_) {}
+
+    safeOn(toggle, "click", (event) => {
       try {
-        setTimeout(() => {
-          try { uiState.viewerMode = "3d"; } catch {}
-          // Wenn eine Version ausgewählt ist: direkt setzen
-          if (VIEW.selectedCommitId && VIEW.selectedProjectId && VIEW.selectedModelId) {
-            const u = buildVersionUrl(VIEW.selectedProjectId, VIEW.selectedModelId, VIEW.selectedCommitId);
-            if (u) {
-              try { stopViewerPolling(); } catch {}
-              setViewerRawUrl(u);
-              markSelectedVersion(VIEW.selectedCommitId);
-            }
-          }
-        }, 300);
-      } catch {}
+        event.preventDefault();
+      } catch (_) {}
+      versionsToggle();
     });
-  }
-}
 
-/* ───────────────────────── Repair & Alignment ───────────────────────── */
+    const onOutside = (event) => {
+      try {
+        const currentBox = versionsContainer();
+        if (!currentBox || isHidden(currentBox)) return;
 
-async function runRepair(limit = 100) {
-  try {
-    const cfg = getConfig();
-    const chatId = cfg.chatId || "";
-    if (!chatId) return false;
+        const target = event?.target;
+        if (!target) return;
+        if (currentBox.contains(target)) return;
+        if (toggle.contains(target)) return;
 
-    const url = `/v1/chats/${encodeURIComponent(chatId)}/vectoplan/repair`;
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      cache: "no-store",
-      body: JSON.stringify({ limit }),
+        versionsClose();
+      } catch (_) {}
+    };
+
+    safeOn(document, "mousedown", onOutside, {
+      capture: true,
+      passive: true,
     });
-    if (!r.ok) return false;
 
-    await r.json().catch(() => ({}));
-    await refreshVersionsUI();
+    safeOn(document, "touchstart", onOutside, {
+      capture: true,
+      passive: true,
+    });
 
-    // Auswahl nachziehen
-    const sel = await fetchViewerSelection();
-    if (sel && sel.mode === "version" && sel.version_id && sel.project_id && sel.model_id) {
-      VIEW.selectedProjectId = String(sel.project_id || "");
-      VIEW.selectedModelId   = String(sel.model_id || "");
-      VIEW.selectedCommitId  = String(sel.version_id || "");
-      markSelectedVersion(VIEW.selectedCommitId);
+    safeOn(document, "keydown", (event) => {
+      try {
+        if (event.key === "Escape") versionsClose();
+      } catch (_) {}
+    });
 
-      if (canApply3dSelectionNow()) {
-        const u = buildVersionUrl(VIEW.selectedProjectId, VIEW.selectedModelId, VIEW.selectedCommitId);
-        if (u) setViewerRawUrl(u);
-      }
+    safeOn(window, "blur", () => {
+      try {
+        versionsClose();
+      } catch (_) {}
+    }, { passive: true });
+
+    const refreshBtn = $("versRefreshBtn");
+    if (refreshBtn && !refreshBtn._refreshWired) {
+      refreshBtn._refreshWired = true;
+      safeOn(refreshBtn, "click", (event) => {
+        try {
+          event.preventDefault();
+        } catch (_) {}
+        void refreshVersionsUI();
+      });
     }
 
-    return true;
-  } catch {
-    return false;
-  }
-}
+    const list = $("versionsList");
+    if (list && !list._neutralObserverWired) {
+      list._neutralObserverWired = true;
 
-async function alignVersionsIfNeeded() {
-  try {
-    const cfg = getConfig();
-    const chatId = cfg.chatId || "";
-    if (!chatId) return;
+      const observer = new MutationObserver(() => {
+        neutralizeVersionViewerActions();
+      });
 
-    // 1) Repair versuchen
-    const okRepair = await runRepair(100);
-    if (okRepair) return;
-
-    // 2) Fallback: ensure
-    const ensureUrl = `/v1/chats/${encodeURIComponent(chatId)}/vectoplan/ensure`;
-    const resp = await fetch(ensureUrl, { method: "POST", credentials: "same-origin", cache: "no-store" }).catch(() => null);
-    if (resp && resp.ok) await refreshVersionsUI();
-  } catch {}
-}
-
-function wireMaintenanceButtons() {
-  const repairBtn = $("repairBtn");
-  if (repairBtn && !repairBtn._wired) {
-    repairBtn._wired = true;
-    repairBtn.addEventListener("click", async () => {
-      repairBtn.disabled = true;
-      try { await runRepair(200); } finally { repairBtn.disabled = false; }
-    });
-  }
-
-  const alignBtn = $("alignBtn");
-  if (alignBtn && !alignBtn._wired) {
-    alignBtn._wired = true;
-    alignBtn.addEventListener("click", async () => {
-      alignBtn.disabled = true;
-      try { await alignVersionsIfNeeded(); } finally { alignBtn.disabled = false; }
-    });
-  }
-}
-
-/* ───────────────────────── Sonstige Helpers ───────────────────────── */
-
-function initViewerFromServerHint() {
-  try {
-    const initUrl = (window.INIT_VIEWER_URL || "").trim();
-    if (initUrl && (uiState.viewerMode === "3d" || !uiState.viewerMode)) {
-      showViewer(initUrl);
-      const a = $("viewerOpenRawBtn");
-      if (a) a.href = uiState.rawViewerUrl || "#";
+      observer.observe(list, {
+        childList: true,
+        subtree: true,
+      });
     }
-  } catch {}
+  } catch (_) {}
 }
+
+
+/* ───────────────────────── 2D event bridge ───────────────────────── */
 
 function wire2dEventBridge() {
-  if (window._cad2dBridgeWired) return;
-  window._cad2dBridgeWired = true;
+  try {
+    if (window.__VECTOPLAN_2D_BRIDGE_WIRED__) return;
+    window.__VECTOPLAN_2D_BRIDGE_WIRED__ = true;
 
-  const cfg = getConfig();
+    async function putState(patch) {
+      try {
+        const statePath = pathValue("statePutPath") || cfgValue("statePutPath");
+        if (!statePath || statePath === "__DISABLED__") return;
 
-  async function putState(patch) {
-    try {
-      if (!cfg.statePutPath || cfg.statePutPath === "__DISABLED__") return;
-      await fetch(cfg.statePutPath, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        cache: "no-store",
-        body: JSON.stringify(patch || {}),
-      }).catch(() => {});
-    } catch {}
-  }
+        await fetch(statePath, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          cache: "no-store",
+          body: JSON.stringify(patch || {}),
+        }).catch(() => {});
+      } catch (_) {}
+    }
 
-  window.addEventListener("cad2d-select", (ev) => {
-    try {
-      const items = ev?.detail?.items || [];
-      uiState.last2DSelection = items;
-      void putState({ last_2d_selection: items, last_2d_selection_ts: Date.now() });
-    } catch {}
-  });
+    window.addEventListener("cad2d-select", (event) => {
+      try {
+        const items = event?.detail?.items || [];
+        uiState.last2DSelection = items;
 
-  window.addEventListener("cad2d-hover", (ev) => {
-    try { uiState.last2DHover = ev?.detail?.item || null; } catch {}
-  });
+        void putState({
+          mode: "2d",
+          workspace_mode: "2d",
+          last_2d_selection: items,
+          last_2d_selection_ts: Date.now(),
+          legacy_3d_backend: false,
+        });
+      } catch (_) {}
+    });
+
+    window.addEventListener("cad2d-hover", (event) => {
+      try {
+        uiState.last2DHover = event?.detail?.item || null;
+      } catch (_) {}
+    });
+  } catch (_) {}
+}
+
+
+/* ───────────────────────── Editor message bridge ───────────────────────── */
+
+function wireEditorEventBridge() {
+  try {
+    if (window.__VECTOPLAN_EDITOR_BRIDGE_WIRED__) return;
+    window.__VECTOPLAN_EDITOR_BRIDGE_WIRED__ = true;
+
+    window.addEventListener("message", (event) => {
+      try {
+        if (!event || !event.data) return;
+
+        const data = event.data;
+        const type = String(data.type || data.kind || "").toLowerCase();
+
+        if (!type.includes("editor") && !type.includes("vectoplan")) {
+          return;
+        }
+
+        uiState.lastEditorMessage = data;
+        uiState.lastEditorMessageTs = Date.now();
+
+        if (type.includes("ready")) {
+          uiState.editorReady = true;
+          hideWorkspaceFallback();
+        }
+
+        if (type.includes("selection")) {
+          uiState.lastEditorSelection = data.selection || data.payload || data;
+        }
+
+        if (type.includes("error")) {
+          try {
+            showStatus("Editor meldet einen Fehler. Details stehen in der Browser-Konsole.");
+          } catch (_) {}
+        }
+      } catch (_) {}
+    });
+  } catch (_) {}
+}
+
+
+/* ───────────────────────── Status / hotkeys ───────────────────────── */
+
+function showStatus(message) {
+  try {
+    const box = $("systemAlert");
+    if (!box) return;
+
+    const text = String(message || "");
+    box.textContent = text;
+    box.classList.toggle("hidden", !text);
+  } catch (_) {}
 }
 
 function wireGlobalStatus() {
@@ -844,94 +1279,139 @@ function wireGlobalStatus() {
     const alertBox = $("systemAlert");
     if (!alertBox) return;
 
-    const show = (msg) => {
-      alertBox.textContent = msg || "";
-      alertBox.classList.toggle("hidden", !msg);
-    };
+    safeOn(window, "offline", () => {
+      showStatus("Offline erkannt. Vorgänge werden eventuell verzögert.");
+    });
 
-    window.addEventListener("offline", () => show("Offline erkannt. Vorgänge werden evtl. verzögert."));
-    window.addEventListener("online", () => show(""));
-  } catch {}
+    safeOn(window, "online", () => {
+      showStatus("");
+    });
+  } catch (_) {}
 }
 
 function wireHotkeys() {
   try {
-    if (window.__VECTOAI_HOTKEYS_WIRED__) return;
-    window.__VECTOAI_HOTKEYS_WIRED__ = true;
+    if (window.__VECTOPLAN_HOTKEYS_WIRED__) return;
+    window.__VECTOPLAN_HOTKEYS_WIRED__ = true;
 
-    document.addEventListener("keydown", (e) => {
+    safeOn(document, "keydown", (event) => {
       try {
-        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
           const send = $("sendBtn");
-          if (send) { e.preventDefault(); send.click(); }
+          if (send) {
+            event.preventDefault();
+            send.click();
+          }
         }
-        if (e.altKey && (e.key === "l" || e.key === "L")) {
-          e.preventDefault();
-          void selectLatestModel();
+
+        if (event.altKey && event.key === "1") {
+          event.preventDefault();
+          void setWorkspaceMode("3d");
         }
-        // ESC schließt Versionen-Dropdown (layout.js nutzt ESC fürs Drawer)
-        if (e.key === "Escape") {
+
+        if (event.altKey && event.key === "2") {
+          event.preventDefault();
+          void setWorkspaceMode("2d");
+        }
+
+        if (event.altKey && event.key === "3") {
+          event.preventDefault();
+          void setWorkspaceMode("map");
+        }
+
+        if (event.key === "Escape") {
           versionsClose();
         }
-      } catch {}
+      } catch (_) {}
     });
-  } catch {}
+  } catch (_) {}
 }
+
+
+/* ───────────────────────── Upload / refresh glue ───────────────────────── */
+
+function wirePostUploadRefresh() {
+  try {
+    if (window.__VECTOPLAN_POST_UPLOAD_REFRESH_WIRED__) return;
+    window.__VECTOPLAN_POST_UPLOAD_REFRESH_WIRED__ = true;
+
+    window.addEventListener("chat:uploaded", () => {
+      try {
+        void refreshVersionsUI();
+        void refreshTranscriptIncremental();
+      } catch (_) {}
+    });
+
+    window.addEventListener("chat:refresh", () => {
+      try {
+        void refreshTranscriptIncremental();
+      } catch (_) {}
+    });
+
+    window.addEventListener("versions:refresh", () => {
+      try {
+        void refreshVersionsUI();
+      } catch (_) {}
+    });
+  } catch (_) {}
+}
+
+
+/* ───────────────────────── Diagnostics ───────────────────────── */
+
+function exposeWorkspaceDebugApi() {
+  try {
+    if (window.__VECTOPLAN_WORKSPACE_DEBUG__) return;
+
+    window.__VECTOPLAN_WORKSPACE_DEBUG__ = {
+      cfg,
+      editorUrl,
+      mapUrl,
+      setWorkspaceMode,
+      viewerFrame,
+      isUnsafeLegacyTarget,
+      stableLocalUrl,
+      cacheBustLocalUrl,
+    };
+  } catch (_) {}
+}
+
 
 /* ───────────────────────── Boot ───────────────────────── */
 
 async function boot() {
-  if (window.__VECTOAI_BOOTED__) return;
-  window.__VECTOAI_BOOTED__ = true;
+  if (window.__VECTOPLAN_APP_BOOTED__) return;
+  window.__VECTOPLAN_APP_BOOTED__ = true;
 
-  // Layout init (idempotent; layout.js auto-init existiert ebenfalls)
+  safeCall("exposeWorkspaceDebugApi", exposeWorkspaceDebugApi);
+
   safeCall("initChatLayout", () => initChatLayout({ breakpointPx: 900 }));
 
   safeCall("wireThemeToggle", wireThemeToggle);
   safeCall("wireGlobalStatus", wireGlobalStatus);
   safeCall("wireHotkeys", wireHotkeys);
 
+  safeCall("wireWorkspaceToolbar", wireWorkspaceToolbar);
+  safeCall("wireVersionsDropdown", wireVersionsDropdown);
+
   safeCall("wireComposer", wireComposer);
-  safeCall("wireViewerToolbar", wireViewerToolbar);
-
-  // versions.js kann bei Template-Änderungen brechen → isoliert
-  safeCall("wireVersionsToolbar", wireVersionsToolbar);
-
   safeCall("wireTranscriptRefresh", wireTranscriptRefresh);
   safeCall("wire2dEventBridge", wire2dEventBridge);
-  safeCall("wireMaintenanceButtons", wireMaintenanceButtons);
+  safeCall("wireEditorEventBridge", wireEditorEventBridge);
+  safeCall("wirePostUploadRefresh", wirePostUploadRefresh);
 
   await safeAwait("loadTemplatesIndex", loadTemplatesIndex);
   await safeAwait("loadTranscript", loadTranscript);
 
-  await safeAwait("initViewerModeFromServer", initViewerModeFromServer);
-  safeCall("initViewerFromServerHint", initViewerFromServerHint);
-  await safeAwait("ensureInitialViewer", ensureInitialViewer);
+  await safeAwait("applyInitialWorkspaceMode", applyInitialWorkspaceMode);
 
-  await safeAwait("initViewerCtx", initViewerCtx);
-  await safeAwait("applySavedSelection", applySavedSelection);
-
-  // Dropdown + Version-Selection + Extra Modes
-  safeCall("wireVersionsDropdown", wireVersionsDropdown);
-  safeCall("wireVersionSelection", wireVersionSelection);
-  safeCall("wireExtraViewerModes", wireExtraViewerModes);
-
-  // Soft-Alignment beim Start
-  await safeAwait("alignVersionsIfNeeded", alignVersionsIfNeeded);
-
-  // Wenn Dropdown offen ist: initial refresh
-  safeCall("initialVersionsRefreshIfOpen", () => {
-    const box = getVersionsContainer();
-    if (box && !isHidden(box)) { void refreshVersionsUI(); }
+  safeCall("initialVersionsCount", () => {
+    void (async () => {
+      const items = await fetchVersionsRaw();
+      setVersionCount(items.length);
+      neutralizeVersionViewerActions();
+    })();
   });
 }
 
-// Globales Refresh-Signal (zusätzlicher Guard; transcript.js bindet ebenfalls)
-safeCall("wireGlobalRefreshOnce", () => {
-  if (window.__VECTOAI_REFRESH_WIRED__) return;
-  window.__VECTOAI_REFRESH_WIRED__ = true;
-  window.addEventListener("chat:refresh", () => { void refreshTranscriptIncremental(); });
-});
-
-// Start
 void boot();

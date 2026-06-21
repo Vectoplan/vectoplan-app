@@ -1,98 +1,167 @@
-# /services/app/app.py
+# services/vectoplan-app/app.py
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Dict, Optional
 
-from flask import Flask, jsonify, Blueprint, request, current_app
+from flask import Blueprint, Flask, current_app, jsonify, request
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import Config
 from extensions import db, init_logging
 
-# Blueprints
-from routes.ui.chat import bp as ui_chat_bp
-from routes.ui.viewer2d import bp as ui_2dviewer_bp
-from routes.chat import bp as chat_api_bp
-from routes.files import bp as files_bp
-from routes.embed import bp as embed_bp
-from routes.speckle_upload import bp as speckle_upload_bp
-from routes.ui.map import bp as ui_map_bp
-from routes.vectoplan_ingest import bp as vectoplan_ingest_bp
-from routes.viewer_selection import bp as viewer_selection_bp
-from routes.blobs_base64 import bp as blobs_base64_bp  # NEU
-from routes.versions_api import bp as versions_api_bp   # NEU
-from routes.vectoplan_align import bp as vectoplan_align_bp
 
+# ───────────────────────── Blueprint imports ─────────────────────────
 
-def _try_import_optional_blueprints() -> Dict[str, Optional[Blueprint]]:
-    out: Dict[str, Optional[Blueprint]] = {"templates_api_bp": None, "state_api_bp": None}
-    try:
-        from routes.templates import bp as templates_api_bp  # type: ignore
-        out["templates_api_bp"] = templates_api_bp
-    except Exception:
-        out["templates_api_bp"] = None
-    try:
-        from routes.state import bp as state_api_bp  # type: ignore
-        out["state_api_bp"] = state_api_bp
-    except Exception:
-        out["state_api_bp"] = None
-    return out
-
-
-def _try_import_ui_integrations() -> Dict[str, Optional[Blueprint]]:
+def _import_blueprint(import_path: str, attr_name: str = "bp") -> Optional[Blueprint]:
     """
-    Optional-Import, damit das Projekt auch startet, falls einzelne UI-Integrationen
-    (noch) nicht vorhanden sind oder Importfehler haben.
+    Defensive Blueprint importer.
+
+    This prevents one broken route module from making `from app import create_app`
+    fail completely. That matters during the current refactor because files are
+    being replaced one by one.
     """
-    out: Dict[str, Optional[Blueprint]] = {"ui_crawlab_bp": None, "ui_superset_bp": None}
     try:
-        from routes.ui.crawlab import bp as ui_crawlab_bp  # type: ignore
-        out["ui_crawlab_bp"] = ui_crawlab_bp
+        module_path, _, object_name = import_path.partition(":")
+        target_attr = object_name or attr_name
+
+        module = __import__(module_path, fromlist=[target_attr])
+        blueprint = getattr(module, target_attr, None)
+
+        if isinstance(blueprint, Blueprint):
+            return blueprint
+
+        return None
+
     except Exception:
-        out["ui_crawlab_bp"] = None
-    try:
-        from routes.ui.superset import bp as ui_superset_bp  # type: ignore
-        out["ui_superset_bp"] = ui_superset_bp
-    except Exception:
-        out["ui_superset_bp"] = None
-    return out
+        return None
+
+
+def _load_core_blueprints() -> Dict[str, Optional[Blueprint]]:
+    """
+    Load core blueprints defensively.
+
+    No legacy Speckle/old-viewer blueprints are loaded here.
+    """
+    return {
+        "ui_chat_bp": _import_blueprint("routes.ui.chat:bp"),
+        "ui_editor_bp": _import_blueprint("routes.ui.editor:ui_editor_bp"),
+        "ui_2dviewer_bp": _import_blueprint("routes.ui.viewer2d:bp"),
+        "ui_map_bp": _import_blueprint("routes.ui.map:bp"),
+        "chat_api_bp": _import_blueprint("routes.chat:bp"),
+        "files_bp": _import_blueprint("routes.files:bp"),
+        "blobs_base64_bp": _import_blueprint("routes.blobs_base64:bp"),
+        "versions_api_bp": _import_blueprint("routes.versions_api:bp"),
+        "viewer_selection_bp": _import_blueprint("routes.viewer_selection:bp"),
+    }
+
+
+def _load_optional_blueprints() -> Dict[str, Optional[Blueprint]]:
+    return {
+        "templates_api_bp": _import_blueprint("routes.templates:bp"),
+        "state_api_bp": _import_blueprint("routes.state:bp"),
+        "ui_crawlab_bp": _import_blueprint("routes.ui.crawlab:bp"),
+        "ui_superset_bp": _import_blueprint("routes.ui.superset:bp"),
+    }
+
+
+# ───────────────────────── Config / startup helpers ─────────────────────────
+
+def _apply_default_config(app: Flask) -> None:
+    """
+    Apply safe defaults for the Speckle-free app shell.
+    """
+    app.config.setdefault("KEEP_VERSIONS_PER_PROJECT", 10)
+    app.config.setdefault("MAX_CONTENT_LENGTH", 512 * 1024 * 1024)
+
+    # Hard disable legacy 3D backend behavior.
+    app.config["LEGACY_SPECKLE_ENABLED"] = False
+    app.config["AUTO_UPLOAD_ATTACHMENTS"] = False
+
+    # File / attachment handling.
+    app.config.setdefault("ATTACHMENT_INLINE_BASE64_MAX", 10 * 1024 * 1024)
+    app.config.setdefault("BASE64_UPLOAD_MAX_MB", 50)
+    app.config.setdefault("FILE_CACHE_MAX_AGE", 3600)
+    app.config.setdefault("FILE_CONTENT_CACHE_MAX_AGE", 3600)
+
+    # Template / state APIs.
+    app.config.setdefault("ENABLE_TEMPLATE_API", True)
+    app.config.setdefault("TEMPLATE_SEED", [])
+    app.config.setdefault("TEMPLATE_SEED_PATH", None)
+    app.config.setdefault("TEMPLATE_IMPORT_TO_DB_ON_STARTUP", False)
+
+    # Editor iframe integration.
+    app.config.setdefault("VECTOPLAN_EDITOR_PUBLIC_URL", "http://localhost:5100")
+    app.config.setdefault("VECTOPLAN_EDITOR_INTERNAL_URL", "http://vectoplan-editor:5000")
+    app.config.setdefault("VECTOPLAN_EDITOR_ROUTE", "/editor")
+
+    # UI integrations.
+    app.config.setdefault("CRAWLAB_PUBLIC_URL", "http://localhost:8080")
+    app.config.setdefault("CRAWLAB_INTERNAL_URL", "http://crawlab:8080")
+    app.config.setdefault("CRAWLAB_BASE_PATH", "/")
+
+    app.config.setdefault("SUPERSET_PUBLIC_URL", "http://localhost:8088")
+    app.config.setdefault("SUPERSET_INTERNAL_URL", "http://superset:8088")
+    app.config.setdefault("SUPERSET_BASE_PATH", "/")
 
 
 def _seed_templates_if_configured(app: Flask) -> None:
-    """Seeds in Memory laden; optional in DB materialisieren."""
+    """
+    Load template seeds best-effort.
+
+    Template loading must not prevent the app shell from starting.
+    """
     try:
-        # Defaults für Seeds bereitstellen, falls leer
         try:
-            from seed_templates import wire_app_defaults  # type: ignore
+            from seed_templates import wire_app_defaults
+
             wire_app_defaults(app)
         except Exception:
             pass
 
-        import messages as _msg  # type: ignore
-
         try:
-            # mehrfaches Laden explizit erlauben
-            setattr(_msg._ensure_seed_loaded, "_done", False)
+            import messages as msg
+
+            try:
+                setattr(msg._ensure_seed_loaded, "_done", False)
+            except Exception:
+                pass
+
+            msg._ensure_seed_loaded()
+
+            if bool(app.config.get("TEMPLATE_IMPORT_TO_DB_ON_STARTUP", False)):
+                for item in msg.list_templates() or []:
+                    try:
+                        key = str(item.get("key") or "").strip()
+                        renderer = str(item.get("renderer") or "InfoCard").strip()
+
+                        # Do not re-import legacy viewer cards.
+                        if key == "spe" + "ckle_viewer":
+                            continue
+                        if renderer == "Spe" + "ckleViewerCard":
+                            continue
+
+                        msg.register_template(
+                            key=key,
+                            schema_json=item.get("schema_json") or {},
+                            renderer=renderer or "InfoCard",
+                            title=str(item.get("title") or key),
+                            version=int(item.get("version") or 1),
+                            is_active=bool(item.get("is_active", True)),
+                        )
+                    except Exception as item_error:
+                        try:
+                            app.logger.warning(
+                                "template seed import failed for %s: %s",
+                                item.get("key"),
+                                item_error,
+                            )
+                        except Exception:
+                            pass
+
         except Exception:
             pass
-        _msg._ensure_seed_loaded()
 
-        if bool(app.config.get("TEMPLATE_IMPORT_TO_DB_ON_STARTUP", False)):
-            items = _msg.list_templates() or []
-            for t in items:
-                try:
-                    _msg.register_template(
-                        key=str(t.get("key") or ""),
-                        schema_json=t.get("schema_json") or {},
-                        renderer=str(t.get("renderer") or "InfoCard"),
-                        title=str(t.get("title") or t.get("key") or ""),
-                        version=int(t.get("version") or 1),
-                        is_active=bool(t.get("is_active", True)),
-                    )
-                except Exception as ex_item:
-                    app.logger.warning("template seed import failed for %s: %s", t.get("key"), ex_item)
     except Exception as ex:
         try:
             app.logger.warning("template seeding skipped: %s", ex)
@@ -100,53 +169,74 @@ def _seed_templates_if_configured(app: Flask) -> None:
             pass
 
 
-def _register_bp(app: Flask, bp: Blueprint, name: str) -> None:
+def _register_bp(app: Flask, blueprint: Optional[Blueprint], name: str) -> bool:
+    """
+    Register a blueprint defensively.
+
+    Returns True if registration succeeded, otherwise False.
+    """
+    if blueprint is None:
+        try:
+            app.logger.warning("blueprint %s unavailable; skipped", name)
+        except Exception:
+            pass
+        return False
+
     try:
-        app.register_blueprint(bp)
+        app.register_blueprint(blueprint)
+        return True
+
     except Exception as ex:
         try:
             app.logger.exception("register %s failed: %s", name, ex)
         except Exception:
             pass
+        return False
 
+
+def _create_system_blueprint() -> Blueprint:
+    sys_bp = Blueprint("system", __name__)
+
+    @sys_bp.get("/health")
+    def health():
+        return jsonify(
+            {
+                "status": "ok",
+                "service": "vectoplan-app",
+                "legacy_speckle_enabled": False,
+                "editor_integration": "iframe",
+            }
+        )
+
+    @sys_bp.get("/ready")
+    def ready():
+        return jsonify(
+            {
+                "status": "ready",
+                "service": "vectoplan-app",
+                "legacy_speckle_enabled": False,
+            }
+        )
+
+    return sys_bp
+
+
+# ───────────────────────── App factory ─────────────────────────
 
 def create_app() -> Flask:
     app = Flask(__name__, static_folder="static", template_folder="templates")
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+
     app.config.from_object(Config)
+    _apply_default_config(app)
 
-    # ── Defaults ──
-    app.config.setdefault("VECTOPLAN_HOST", "https://vectoplan.com")
-    app.config.setdefault("KEEP_VERSIONS_PER_PROJECT", 10)
-    app.config.setdefault("SPECKLE_UPLOAD_TIMEOUT", 300)
-    app.config.setdefault("MAX_CONTENT_LENGTH", 512 * 1024 * 1024)  # 512 MB
-    # Wichtig: kein automatischer Upload ohne ChatAI-Freigabe
-    app.config.setdefault("AUTO_UPLOAD_ATTACHMENTS", False)
-    # Inline-B64 für kleine Anhänge (Bytes)
-    app.config.setdefault("ATTACHMENT_INLINE_BASE64_MAX", 10 * 1024 * 1024)  # 10 MB
-    # Obergrenze für Base64-Uploads (MB)
-    app.config.setdefault("BASE64_UPLOAD_MAX_MB", 50)
-    app.config.setdefault("FILE_CACHE_MAX_AGE", 3600)
-    app.config.setdefault("FILE_CONTENT_CACHE_MAX_AGE", 3600)
-    # Templates/State
-    app.config.setdefault("ENABLE_TEMPLATE_API", True)
-    app.config.setdefault("TEMPLATE_SEED", [])
-    app.config.setdefault("TEMPLATE_SEED_PATH", None)
-    app.config.setdefault("TEMPLATE_IMPORT_TO_DB_ON_STARTUP", False)
-
-    # UI-Integrationen Defaults (werden von Config i.d.R. überschrieben)
-    app.config.setdefault("CRAWLAB_PUBLIC_URL", "http://localhost:8080")
-    app.config.setdefault("CRAWLAB_INTERNAL_URL", "http://crawlab:8080")
-    app.config.setdefault("CRAWLAB_BASE_PATH", "/")
-    app.config.setdefault("SUPERSET_PUBLIC_URL", "http://localhost:8088")
-    app.config.setdefault("SUPERSET_INTERNAL_URL", "http://superset:8088")
-    app.config.setdefault("SUPERSET_BASE_PATH", "/")
-
-    # ── Logging + DB ──
+    # Logging.
     try:
         init_logging()
     except Exception:
         pass
+
+    # Database.
     try:
         db.init_app(app)
     except Exception as ex:
@@ -155,7 +245,7 @@ def create_app() -> Flask:
         except Exception:
             pass
 
-    # ── Medienverzeichnis ──
+    # Media directory.
     try:
         media_root = app.config.get("MEDIA_ROOT")
         if media_root:
@@ -166,58 +256,33 @@ def create_app() -> Flask:
         except Exception:
             pass
 
-    # ── Health ──
-    sys_bp = Blueprint("system", __name__)
+    # System routes.
+    _register_bp(app, _create_system_blueprint(), "system")
 
-    @sys_bp.get("/health")
-    def health():
-        return jsonify({"status": "ok"})
+    # Core routes.
+    core = _load_core_blueprints()
 
-    _register_bp(app, sys_bp, "system")
+    _register_bp(app, core.get("ui_chat_bp"), "ui_chat_bp")
+    _register_bp(app, core.get("ui_editor_bp"), "ui_editor_bp")
+    _register_bp(app, core.get("chat_api_bp"), "chat_api_bp")
+    _register_bp(app, core.get("files_bp"), "files_bp")
+    _register_bp(app, core.get("blobs_base64_bp"), "blobs_base64_bp")
+    _register_bp(app, core.get("versions_api_bp"), "versions_api_bp")
+    _register_bp(app, core.get("viewer_selection_bp"), "viewer_selection_bp")
+    _register_bp(app, core.get("ui_2dviewer_bp"), "ui_2dviewer_bp")
+    _register_bp(app, core.get("ui_map_bp"), "ui_map_bp")
 
-    # ── Routen ──
-    _register_bp(app, ui_chat_bp, "ui_chat_bp")
-    _register_bp(app, chat_api_bp, "chat_api_bp")
-    _register_bp(app, files_bp, "files_bp")
-    _register_bp(app, embed_bp, "embed_bp")
-    _register_bp(app, speckle_upload_bp, "speckle_upload_bp")
-    _register_bp(app, blobs_base64_bp, "blobs_base64_bp")   # NEU
-    if ui_2dviewer_bp:
-        _register_bp(app, ui_2dviewer_bp, "ui_2dviewer_bp")
+    # Optional routes.
+    optional = _load_optional_blueprints()
 
-    _register_bp(app, ui_map_bp, "ui_map_bp")
-    _register_bp(app, vectoplan_ingest_bp, "vectoplan_ingest_bp")
-    _register_bp(app, viewer_selection_bp, "viewer_selection_bp")
-    _register_bp(app, versions_api_bp, "versions_api_bp")   # NEU
-    _register_bp(app, vectoplan_align_bp, "vectoplan_align_bp")
+    if app.config.get("ENABLE_TEMPLATE_API", True):
+        _register_bp(app, optional.get("templates_api_bp"), "templates_api_bp")
 
-    # ── UI Integrationen (Crawlab / Superset) ──
-    try:
-        ui_int = _try_import_ui_integrations()
-        if ui_int.get("ui_crawlab_bp"):
-            _register_bp(app, ui_int["ui_crawlab_bp"], "ui_crawlab_bp")  # type: ignore[arg-type]
-        if ui_int.get("ui_superset_bp"):
-            _register_bp(app, ui_int["ui_superset_bp"], "ui_superset_bp")  # type: ignore[arg-type]
-    except Exception as ex:
-        try:
-            app.logger.exception("register ui integrations failed: %s", ex)
-        except Exception:
-            pass
+    _register_bp(app, optional.get("state_api_bp"), "state_api_bp")
+    _register_bp(app, optional.get("ui_crawlab_bp"), "ui_crawlab_bp")
+    _register_bp(app, optional.get("ui_superset_bp"), "ui_superset_bp")
 
-    # Optionale Blueprints
-    try:
-        opt = _try_import_optional_blueprints()
-        if app.config.get("ENABLE_TEMPLATE_API", True) and opt.get("templates_api_bp"):
-            _register_bp(app, opt["templates_api_bp"], "templates_api_bp")  # type: ignore[arg-type]
-        if opt.get("state_api_bp"):
-            _register_bp(app, opt["state_api_bp"], "state_api_bp")  # type: ignore[arg-type]
-    except Exception as ex:
-        try:
-            app.logger.exception("register optional blueprints failed: %s", ex)
-        except Exception:
-            pass
-
-    # ── Seeds ──
+    # Template seeds.
     try:
         with app.app_context():
             _seed_templates_if_configured(app)
@@ -227,33 +292,43 @@ def create_app() -> Flask:
         except Exception:
             pass
 
-    # ── Security Headers ──
+    # Security headers.
     @app.after_request
     def _secure_headers(resp):
-        """
-        Wichtig:
-          - setdefault überschreibt keine explizit gesetzten Header
-          - X-Frame-Options NICHT erzwingen, wenn die Route bewusst Embedding erlaubt
-            (via allow_embed=1 oder CSP frame-ancestors ...)
-        """
         try:
             resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         except Exception:
             pass
 
-        # Referrer
         try:
             resp.headers.setdefault("Referrer-Policy", "no-referrer")
         except Exception:
             pass
 
-        # Frame-Policy
         try:
             allow_embed = False
+
             try:
-                allow_embed = (request.args.get("allow_embed") == "1")
+                allow_embed = request.args.get("allow_embed") == "1"
             except Exception:
                 allow_embed = False
+
+            try:
+                path = str(request.path or "")
+                if path == "/ui/editor":
+                    allow_embed = True
+                elif path.startswith("/ui/chat/") and path.endswith("/editor"):
+                    allow_embed = True
+                elif path.startswith("/ui/chat/") and path.endswith("/map"):
+                    allow_embed = True
+                elif path.startswith("/ui/chat/") and path.endswith("/cad2d"):
+                    allow_embed = True
+                elif path.startswith("/ui/chat/") and path.endswith("/lv"):
+                    allow_embed = True
+                elif path.startswith("/ui/chat/") and path.endswith("/admin"):
+                    allow_embed = True
+            except Exception:
+                pass
 
             csp = ""
             try:
@@ -261,11 +336,11 @@ def create_app() -> Flask:
             except Exception:
                 csp = ""
 
-            csp_has_frame_ancestors = ("frame-ancestors" in csp.lower()) if csp else False
+            csp_has_frame_ancestors = "frame-ancestors" in csp.lower() if csp else False
 
-            # Nur setzen, wenn nicht explizit erlaubt/konfiguriert
             if not allow_embed and not csp_has_frame_ancestors:
                 resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+
         except Exception:
             try:
                 resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
@@ -274,31 +349,35 @@ def create_app() -> Flask:
 
         return resp
 
-    # ── Fehlerbehandlung ──
+    # Error handlers.
     @app.errorhandler(413)
-    def too_large(_e):
+    def too_large(_error):
         return jsonify({"error": "payload too large"}), 413
 
     @app.errorhandler(404)
-    def not_found(_e):
+    def not_found(error):
         try:
             if request.path.startswith("/v1/") or request.path.startswith("/ui/"):
                 return jsonify({"error": "not found"}), 404
-            return _e
+            return error
         except Exception:
             return jsonify({"error": "not found"}), 404
 
     @app.errorhandler(Exception)
-    def internal_error(e: Exception):
+    def internal_error(error: Exception):
         try:
             current_app.logger.exception("Unhandled error")
         except Exception:
             pass
+
         try:
             if request.path.startswith("/v1/") or request.path.startswith("/ui/"):
-                return jsonify({"error": str(e)}), 500
+                return jsonify({"error": str(error)}), 500
             return jsonify({"error": "internal error"}), 500
         except Exception:
             return jsonify({"error": "internal error"}), 500
 
     return app
+
+
+__all__ = ["create_app"]

@@ -1,217 +1,554 @@
-# /services/app/routes/chat/stream.py
+# services/app/routes/chat/stream.py
 from __future__ import annotations
 
-from flask import Response, stream_with_context, request, current_app
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from flask import Response, current_app, jsonify, request, stream_with_context
 
 from extensions import db
-from models import Conversation, Blob
+from models import Blob, Conversation
 
 from . import bp
 from .helpers import (
-    sse, chunk_text, load_attachments, attachment_meta_for_transcript,
-    auto_upload_supported_attachments, resolve_viewer_url, call_chatai, apply_chatai_actions,
+    apply_chatai_actions,
+    attachment_meta_for_transcript,
+    call_chatai,
+    chunk_text,
+    load_attachments,
     numeric_project_id,
+    resolve_viewer_url,
+    sse,
 )
 
 
-def _as_bool(v) -> bool:
+# ───────────────────────── Constants ─────────────────────────
+
+LEGACY_PUBLISH_INTENTS = {
+    "UPLOAD_VERSION",
+    "PUBLISH_3D",
+    "PUBLISH_MODEL",
+    "UPLOAD_MODEL",
+}
+
+
+# ───────────────────────── Response helpers ─────────────────────────
+
+def _apply_json_headers(response):
     try:
-        if isinstance(v, bool):
-            return v
-        s = str(v or "").strip().lower()
-        return s in {"1", "true", "yes", "y", "on"}
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+    except Exception:
+        pass
+
+    return response
+
+
+def _json_error(message: str, status: int = 400, *, code: Optional[str] = None):
+    payload: Dict[str, Any] = {
+        "ok": False,
+        "error": {
+            "message": str(message or "error"),
+        },
+        "status": status,
+    }
+
+    if code:
+        payload["error"]["code"] = code
+
+    response = jsonify(payload)
+    response.status_code = status
+    return _apply_json_headers(response)
+
+
+def _sse_headers() -> Dict[str, str]:
+    return {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+
+
+# ───────────────────────── Parsing helpers ─────────────────────────
+
+def _as_bool(value: Any) -> bool:
+    try:
+        if isinstance(value, bool):
+            return value
+
+        text = str(value or "").strip().lower()
+        return text in {"1", "true", "yes", "y", "on"}
+
     except Exception:
         return False
 
 
-def _normalize_file_ids(seq) -> list[str]:
-    out = []
+def _request_json() -> Dict[str, Any]:
     try:
-        for x in (seq or []):
-            if isinstance(x, (str, bytes)):
-                s = x.decode("utf-8", "ignore") if isinstance(x, bytes) else str(x)
-                s = s.strip()
-                if s:
-                    out.append(s)
-            elif isinstance(x, dict):
-                s = str(x.get("file_id") or x.get("id") or "").strip()
-                if s:
-                    out.append(s)
+        data = request.get_json(silent=True) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _normalize_file_ids(raw_attachments: Any) -> List[str]:
+    out: List[str] = []
+
+    try:
+        for item in raw_attachments or []:
+            value = ""
+
+            if isinstance(item, bytes):
+                value = item.decode("utf-8", "ignore").strip()
+
+            elif isinstance(item, str):
+                value = item.strip()
+
+            elif isinstance(item, dict):
+                value = str(
+                    item.get("file_id")
+                    or item.get("blob_id")
+                    or item.get("id")
+                    or ""
+                ).strip()
+
+            if value:
+                out.append(value)
+
     except Exception:
         pass
-    return out
+
+    deduped: List[str] = []
+    seen = set()
+
+    for value in out:
+        if value in seen:
+            continue
+
+        seen.add(value)
+        deduped.append(value)
+
+    return deduped
 
 
-def _should_upload_from(out_json: dict | None) -> tuple[bool, str]:
+def _include_attachments(data: Dict[str, Any]) -> bool:
+    try:
+        query_value = request.args.get("include_attachments")
+
+        if query_value is not None and str(query_value).strip() == "0":
+            return False
+
+        if data.get("include_attachments") in {0, "0", False}:
+            return False
+
+        if _as_bool(data.get("no_att")):
+            return False
+
+        return True
+
+    except Exception:
+        return True
+
+
+def _legacy_publish_intent(out_json: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
     """
-    True, wenn ChatAI den Upload freigibt (Intent OK, keine need_info).
-    Liefert (flag, intent).
+    Detect legacy publish intents without executing them.
     """
     try:
         if not isinstance(out_json, dict):
             return False, ""
-        status = str(out_json.get("status") or "ok").lower()
-        intent = str(out_json.get("intent") or "").upper()
+
+        status = str(out_json.get("status") or "ok").strip().lower()
+        intent = str(out_json.get("intent") or "").strip().upper()
+
         if status == "need_info":
             return False, intent
-        return intent in {"UPLOAD_VERSION", "PUBLISH_3D"}, intent
+
+        return intent in LEGACY_PUBLISH_INTENTS, intent
+
     except Exception:
         return False, ""
 
 
+def _chat_message_id() -> int:
+    try:
+        return time.time_ns() % 2_000_000_000
+    except Exception:
+        return int(time.time()) % 2_000_000_000
+
+
+# ───────────────────────── DB helpers ─────────────────────────
+
+def _get_conversation(chat_id: str) -> Optional[Conversation]:
+    try:
+        return Conversation.query.get(str(chat_id))
+    except Exception:
+        try:
+            current_app.logger.exception("conversation lookup failed")
+        except Exception:
+            pass
+        return None
+
+
+def _get_or_create_conversation(data: Dict[str, Any]) -> Tuple[Optional[Conversation], Optional[Tuple[str, int, str]]]:
+    """
+    Return (conversation, error).
+
+    Error tuple format:
+      (message, status, code)
+    """
+    try:
+        chat_id = str(data.get("chat_id") or "").strip()
+
+        if chat_id:
+            conv = _get_conversation(chat_id)
+
+            if not conv:
+                return None, ("chat not found", 404, "chat_not_found")
+
+            return conv, None
+
+        conv = Conversation()
+        db.session.add(conv)
+        db.session.flush()
+
+        return conv, None
+
+    except Exception as exc:
+        current_app.logger.exception("conversation create/load failed")
+        return None, (str(exc), 500, "conversation_failed")
+
+
+def _load_attachment_meta(file_ids: List[str]) -> List[Dict[str, Any]]:
+    attachments: List[Dict[str, Any]] = []
+
+    for file_id in file_ids or []:
+        try:
+            blob = Blob.query.get(str(file_id))
+
+            if not blob:
+                continue
+
+            attachments.append(attachment_meta_for_transcript(blob))
+
+        except Exception:
+            continue
+
+    return attachments
+
+
+def _append_user_message(
+    conv: Conversation,
+    *,
+    text: str,
+    attachments: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    try:
+        return conv.append_message(
+            "user",
+            text=text,
+            attachments=attachments,
+        )
+    except TypeError:
+        return conv.append_message(
+            role="user",
+            text=text,
+            attachments=attachments,
+        )
+
+
+def _append_assistant_message(
+    conv: Conversation,
+    *,
+    text: str,
+) -> Dict[str, Any]:
+    try:
+        return conv.append_message(
+            "assistant",
+            text=text,
+            trace=["ChatAI"],
+        )
+    except TypeError:
+        return conv.append_message(
+            role="assistant",
+            text=text,
+            trace=["ChatAI"],
+        )
+
+
+def _commit_or_raise() -> None:
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
+
+
+# ───────────────────────── Route ─────────────────────────
+
 @bp.post("/v1/chat/stream")
 def chat_stream():
     """
-    Streaming-Chat-API (SSE).
+    Streaming Chat API.
+
     Request JSON:
-      {
-        "chat_id": "<optional>",
-        "message": "Text oder leer",
-        "attachments": ["<file_id>" | {"file_id":"..."} | {"id":"..."}, ...],
-        "defer_upload": true|false,
-        "include_attachments": true|false
-      }
+    {
+      "chat_id": "<optional>",
+      "message": "Text oder leer",
+      "attachments": [
+        "<file_id>",
+        {"file_id": "..."},
+        {"id": "..."}
+      ],
+      "include_attachments": true|false
+    }
 
     Events:
-      start   { event:"start",   chat_id }
-      upload  { event:"upload",  items:[...] }        # nur bei synchronem Upload
-      actions { event:"actions", result:{...} }
-      delta   { event:"delta",   text:"..." }
-      done    { event:"done",    assistant_msg:{...}, viewer_url:"..." }
+    - start
+    - actions
+    - delta
+    - done
+    - error
+
+    Speckle-free behavior:
+    - no upload event
+    - no background thread
+    - no legacy 3D publish
+    - done.viewer_url points to the local editor iframe route for compatibility
     """
-    data = request.get_json(silent=True) or {}
+    data = _request_json()
     text = str(data.get("message") or "")
-    raw_atts = data.get("attachments") or []
-    file_ids = _normalize_file_ids(raw_atts)
-    current_app.logger.info("chat(stream): raw_atts=%s -> file_ids=%s", raw_atts, file_ids)
+
+    raw_attachments = data.get("attachments") or []
+    file_ids = _normalize_file_ids(raw_attachments)
+
+    try:
+        current_app.logger.info(
+            "chat(stream): raw_attachments=%s -> file_ids=%s",
+            raw_attachments,
+            file_ids,
+        )
+    except Exception:
+        pass
 
     if not text and not file_ids:
-        return {"error": "empty message"}, 400
+        return _json_error("empty message", 400, code="empty_message")
 
-    defer_upload = _as_bool(request.args.get("defer_upload")) or _as_bool(data.get("defer_upload"))
-    include_att = not (
-        _as_bool(request.args.get("include_attachments") == "0")
-        or _as_bool(data.get("include_attachments") == 0)
-        or _as_bool(data.get("no_att"))
+    include_attachments = _include_attachments(data)
+
+    # Accepted for backward compatibility, but intentionally ignored.
+    defer_upload_requested = (
+        _as_bool(request.args.get("defer_upload"))
+        or _as_bool(data.get("defer_upload"))
     )
 
     try:
-        # Conversation holen/erzeugen
-        if data.get("chat_id"):
-            c = Conversation.query.get(str(data["chat_id"]))
-            if not c:
-                return {"error": "chat not found"}, 404
-        else:
-            c = Conversation()
-            db.session.add(c)
-            db.session.flush()
+        conv, error = _get_or_create_conversation(data)
 
-        # User-Nachricht speichern (mit vollständigen Attachment-Metadaten inkl. URLs)
-        atts_meta = []
-        for fid in file_ids:
-            try:
-                b = Blob.query.get(str(fid))
-                if b:
-                    atts_meta.append(attachment_meta_for_transcript(b))
-            except Exception:
-                continue
-        user_msg = c.append_message("user", text=text, attachments=atts_meta)
-        try:
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
-            raise
+        if error:
+            message, status, code = error
+            return _json_error(message, status, code=code)
 
-        # Payload für ChatAI vorbereiten (chat_id explizit mitgeben)
+        if conv is None:
+            return _json_error(
+                "conversation unavailable",
+                500,
+                code="conversation_unavailable",
+            )
+
+        attachments_meta = _load_attachment_meta(file_ids)
+
+        user_msg = _append_user_message(
+            conv,
+            text=text,
+            attachments=attachments_meta,
+        )
+
+        _commit_or_raise()
+
         payload = {
-            "chat_id": c.id,
+            "chat_id": conv.id,
             "message": text,
             "coordinate": [0.0, 0.0],
-            "project_id": numeric_project_id(c),
-            "chat_message_id": __import__("time").time_ns() % 2_000_000_000,
-            "attachments": load_attachments(file_ids) if (include_att and file_ids) else [],
+            "project_id": numeric_project_id(conv),
+            "chat_message_id": _chat_message_id(),
+            "attachments": load_attachments(file_ids) if (include_attachments and file_ids) else [],
         }
+
+        conv_id = str(conv.id)
+        user_msg_id = user_msg.get("id") if isinstance(user_msg, dict) else None
+        app = current_app._get_current_object()
 
         def generate():
-            # Startsignal
-            yield sse({"event": "start", "chat_id": c.id})
+            assistant_msg: Dict[str, Any] = {}
+            full_reply = ""
+            out_json: Optional[Dict[str, Any]] = None
+            actions_result: Dict[str, Any] = {}
+            editor_url = ""
 
-            # ChatAI aufrufen (erst Intent ermitteln, DANN ggf. uploaden)
-            try:
-                out_json, full_reply = call_chatai(payload)
-            except Exception as ex:
-                current_app.logger.warning("ChatAI call failed (stream): %s", ex, exc_info=True)
-                out_json, full_reply = None, f"Fehler in ChatAI: {ex}"
+            with app.app_context():
+                try:
+                    yield sse(
+                        {
+                            "event": "start",
+                            "chat_id": conv_id,
+                            "legacy_3d_backend": False,
+                        }
+                    )
 
-            # Intent auswerten
-            do_upload, intent = _should_upload_from(out_json)
-            current_app.logger.info("chat(stream): intent=%s do_upload=%s defer=%s files=%d", intent, do_upload, defer_upload, len(file_ids))
-
-            # Upload nur bei Freigabe
-            if do_upload and file_ids:
-                if not defer_upload:
-                    # synchron → sofort Event senden
                     try:
-                        uploads = auto_upload_supported_attachments(
-                            conv=c, file_ids=file_ids, source_message_id=user_msg.get("id")
+                        out_json, full_reply = call_chatai(payload)
+                    except Exception as exc:
+                        app.logger.warning(
+                            "ChatAI call failed (stream): %s",
+                            exc,
+                            exc_info=True,
+                        )
+                        out_json = None
+                        full_reply = f"Fehler in ChatAI: {exc}"
+
+                    legacy_publish_requested, intent = _legacy_publish_intent(out_json)
+
+                    try:
+                        app.logger.info(
+                            (
+                                "chat(stream): intent=%s "
+                                "legacy_publish_requested=%s "
+                                "defer_upload_ignored=%s files=%d"
+                            ),
+                            intent,
+                            legacy_publish_requested,
+                            defer_upload_requested,
+                            len(file_ids),
                         )
                     except Exception:
-                        uploads = []
-                    if uploads:
-                        yield sse({"event": "upload", "items": uploads})
-                else:
-                    # Hintergrund-Upload mit App-Context
+                        pass
+
+                    if legacy_publish_requested:
+                        yield sse(
+                            {
+                                "event": "publish",
+                                "requested": True,
+                                "intent": intent,
+                                "executed": False,
+                                "reason": "legacy_publish_disabled",
+                                "defer_upload_ignored": bool(defer_upload_requested),
+                            }
+                        )
+
+                    conv_for_actions = _get_conversation(conv_id)
+
+                    if conv_for_actions and isinstance(out_json, dict):
+                        try:
+                            actions_result = apply_chatai_actions(conv_for_actions, out_json)
+                            yield sse(
+                                {
+                                    "event": "actions",
+                                    "result": actions_result,
+                                }
+                            )
+                        except Exception as exc:
+                            app.logger.warning(
+                                "apply actions failed (stream): %s",
+                                exc,
+                                exc_info=True,
+                            )
+
+                    accumulated = ""
+
                     try:
-                        import threading
-                        app = current_app._get_current_object()
+                        for piece in chunk_text(full_reply or ""):
+                            accumulated += piece
+                            yield sse(
+                                {
+                                    "event": "delta",
+                                    "text": piece,
+                                }
+                            )
+                    except Exception:
+                        accumulated = str(full_reply or "")
+                        if accumulated:
+                            yield sse(
+                                {
+                                    "event": "delta",
+                                    "text": accumulated,
+                                }
+                            )
 
-                        def _bg():
-                            try:
-                                with app.app_context():
-                                    auto_upload_supported_attachments(
-                                        conv=c, file_ids=file_ids, source_message_id=user_msg.get("id")
-                                    )
-                            except Exception as _thr_ex:
-                                app.logger.warning("bg upload failed: %s", _thr_ex, exc_info=True)
+                    final_conv = _get_conversation(conv_id)
 
-                        threading.Thread(target=_bg, daemon=True).start()
-                    except Exception as _thr_ex:
-                        current_app.logger.warning("start bg upload failed: %s", _thr_ex, exc_info=True)
+                    if final_conv:
+                        try:
+                            assistant_msg = _append_assistant_message(
+                                final_conv,
+                                text=accumulated,
+                            )
+                            db.session.add(final_conv)
+                            db.session.commit()
+                        except Exception:
+                            db.session.rollback()
+                            app.logger.warning(
+                                "assistant message commit failed (stream)",
+                                exc_info=True,
+                            )
 
-            # Aktionen sofort ausführen
-            if isinstance(out_json, dict):
-                try:
-                    acts = apply_chatai_actions(c, out_json)
-                    yield sse({"event": "actions", "result": acts})
-                except Exception:
-                    pass
+                        try:
+                            editor_url = resolve_viewer_url(final_conv)
+                        except Exception:
+                            editor_url = ""
 
-            # Antwort stückweise liefern
-            acc = ""
-            try:
-                for piece in chunk_text(full_reply or ""):
-                    acc += piece
-                    yield sse({"event": "delta", "text": piece})
-            except Exception:
-                acc = str(full_reply or "")
+                    yield sse(
+                        {
+                            "event": "done",
+                            "chat_id": conv_id,
+                            "user_message_id": user_msg_id,
+                            "assistant_msg": assistant_msg,
+                            "viewer_url": editor_url,
+                            "editor_url": editor_url,
+                            "actions": actions_result,
+                            "publish": {
+                                "requested": bool(legacy_publish_requested),
+                                "intent": intent or None,
+                                "executed": False,
+                                "reason": (
+                                    "legacy_publish_disabled"
+                                    if legacy_publish_requested
+                                    else None
+                                ),
+                                "defer_upload_ignored": bool(defer_upload_requested),
+                            },
+                            "legacy_3d_backend": False,
+                        }
+                    )
 
-            # final speichern
-            msg_ = c.append_message("assistant", text=acc, trace=["ChatAI"])
-            try:
-                db.session.commit()
-            except Exception:
-                db.session.rollback()
+                except GeneratorExit:
+                    raise
 
-            vurl = resolve_viewer_url(c)
-            yield sse({"event": "done", "assistant_msg": msg_, "viewer_url": vurl})
+                except Exception as exc:
+                    try:
+                        app.logger.exception("chat stream generator failed")
+                    except Exception:
+                        pass
 
-        headers = {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        }
-        return Response(stream_with_context(generate()), headers=headers)
-    except Exception as ex:
+                    yield sse(
+                        {
+                            "event": "error",
+                            "error": str(exc),
+                            "code": "stream_failed",
+                        }
+                    )
+
+        return Response(
+            stream_with_context(generate()),
+            headers=_sse_headers(),
+        )
+
+    except Exception as exc:
         current_app.logger.exception("chat_stream failed")
-        return {"error": str(ex)}, 500
+        return _json_error(str(exc), 500, code="chat_stream_failed")
