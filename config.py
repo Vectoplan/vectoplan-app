@@ -32,6 +32,11 @@ def refresh_env_cache() -> Dict[str, str]:
     except Exception:
         _ENV_CACHE = {}
 
+    try:
+        _cached_origin_list.cache_clear()
+    except Exception:
+        pass
+
     return dict(_ENV_CACHE)
 
 
@@ -89,8 +94,8 @@ def _env_str_first(keys: Sequence[str], default: str = "") -> str:
 _STYLE_RE = re.compile(r"^[a-z0-9\-]+/[a-z0-9\-\.]+$", re.IGNORECASE)
 _SPLIT_RE = re.compile(r"[\s,;]+")
 
-_TRUE_VALUES = frozenset({"1", "true", "t", "yes", "y", "on", "ja"})
-_FALSE_VALUES = frozenset({"0", "false", "f", "no", "n", "off", "nein"})
+_TRUE_VALUES = frozenset({"1", "true", "t", "yes", "y", "on", "ja", "enabled"})
+_FALSE_VALUES = frozenset({"0", "false", "f", "no", "n", "off", "nein", "disabled"})
 
 
 def _as_bool(value: Optional[str], default: bool = False) -> bool:
@@ -338,7 +343,7 @@ def _as_center_pair(value: Optional[str], default_lon: float, default_lat: float
 @lru_cache(maxsize=64)
 def _cached_origin_list(raw: str, fallback: str = "") -> List[str]:
     """
-    Cached parser for frame-ancestor / frame-src style origin lists.
+    Cached parser for frame-ancestor / frame-src / connect-src style origin lists.
 
     Keeps values stable and avoids repeated parsing in app-factory/security code
     that may read config several times.
@@ -386,17 +391,42 @@ def _space_join(values: Sequence[str]) -> str:
         return ""
 
 
+def _dedupe_texts(values: Iterable[str]) -> List[str]:
+    """Return non-empty unique strings preserving order."""
+    result: List[str] = []
+
+    try:
+        for value in values:
+            text = _safe_string(value, "").strip()
+            if text and text not in result:
+                result.append(text)
+    except Exception:
+        pass
+
+    return result
+
+
 # ─────────────────────────────────────────────────────────────
 # Defaults
 # ─────────────────────────────────────────────────────────────
 
 _DEFAULT_APP_PUBLIC_URL = "http://localhost:5103"
+
 _DEFAULT_EDITOR_PUBLIC_URL = "http://localhost:5100"
 _DEFAULT_EDITOR_INTERNAL_URL = "http://vectoplan-editor:5000"
 _DEFAULT_EDITOR_ROUTE = "/editor"
+
 _DEFAULT_OPENLAYER_PUBLIC_URL = "http://localhost:5190"
 _DEFAULT_OPENLAYER_INTERNAL_URL = "http://openlayer:8090"
 _DEFAULT_OPENLAYER_ROUTE = "/map"
+
+_DEFAULT_CHUNK_PUBLIC_URL = "http://localhost:5102"
+_DEFAULT_CHUNK_INTERNAL_URL = "http://vectoplan-chunk:5000"
+_DEFAULT_CHUNK_DEFAULT_TEMPLATE_ID = "flat"
+_DEFAULT_CHUNK_DEFAULT_WORLD_ID = "world_spawn"
+
+_DEFAULT_LIBRARY_PUBLIC_URL = "http://localhost:5101"
+_DEFAULT_LIBRARY_INTERNAL_URL = "http://vectoplan-library:5000"
 
 _DEFAULT_ALLOWED_FRAME_PARENTS = (
     "http://localhost:5103",
@@ -407,6 +437,22 @@ _DEFAULT_APP_ALLOWED_FRAME_SRC = (
     "self",
     "http://localhost:5100",
     "http://127.0.0.1:5100",
+    "http://localhost:5190",
+    "http://127.0.0.1:5190",
+)
+
+_DEFAULT_APP_ALLOWED_CONNECT_SRC = (
+    "self",
+    "http://localhost:5100",
+    "http://127.0.0.1:5100",
+    "http://localhost:5101",
+    "http://127.0.0.1:5101",
+    "http://localhost:5102",
+    "http://127.0.0.1:5102",
+    "http://localhost:5110",
+    "http://127.0.0.1:5110",
+    "http://localhost:5182",
+    "http://127.0.0.1:5182",
     "http://localhost:5190",
     "http://127.0.0.1:5190",
 )
@@ -634,6 +680,233 @@ class Config:
     MAP_ROUTE = OPENLAYER_ROUTE
     MAP_IFRAME_URL = OPENLAYER_IFRAME_URL
 
+    # ───────── Chunk / Library service references ─────────
+    # Chunk PUBLIC URL is browser-facing only.
+    # Chunk INTERNAL URL is the only valid backend URL for project provisioning.
+    VECTOPLAN_CHUNK_PUBLIC_URL = _norm_url(
+        _env_str_first(
+            (
+                "VECTOPLAN_CHUNK_PUBLIC_URL",
+                "VECTOPLAN_CHUNK_PUBLIC_BASE_URL",
+                "CHUNK_PUBLIC_URL",
+                "CHUNK_PUBLIC_BASE_URL",
+            ),
+            _DEFAULT_CHUNK_PUBLIC_URL,
+        ),
+        _DEFAULT_CHUNK_PUBLIC_URL,
+    )
+
+    VECTOPLAN_CHUNK_PUBLIC_BASE_URL = VECTOPLAN_CHUNK_PUBLIC_URL
+    CHUNK_PUBLIC_URL = VECTOPLAN_CHUNK_PUBLIC_URL
+    CHUNK_PUBLIC_BASE_URL = VECTOPLAN_CHUNK_PUBLIC_BASE_URL
+
+    VECTOPLAN_CHUNK_INTERNAL_URL = _norm_url(
+        _env_str_first(
+            (
+                "VECTOPLAN_CHUNK_INTERNAL_URL",
+                "VECTOPLAN_CHUNK_INTERNAL_BASE_URL",
+                "CHUNK_INTERNAL_URL",
+                "CHUNK_INTERNAL_BASE_URL",
+            ),
+            _DEFAULT_CHUNK_INTERNAL_URL,
+        ),
+        _DEFAULT_CHUNK_INTERNAL_URL,
+    )
+
+    VECTOPLAN_CHUNK_INTERNAL_BASE_URL = VECTOPLAN_CHUNK_INTERNAL_URL
+    CHUNK_INTERNAL_URL = VECTOPLAN_CHUNK_INTERNAL_URL
+    CHUNK_INTERNAL_BASE_URL = VECTOPLAN_CHUNK_INTERNAL_BASE_URL
+
+    # Server-side app -> chunk provisioning.
+    # project_service.py will call services/chunk_client.py after the app Project
+    # has a stable public id. The app DB remains the app truth. The chunk DB
+    # remains the chunk-world truth.
+    VECTOPLAN_CHUNK_PROVISION_ON_PROJECT_CREATE = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_CHUNK_PROVISION_ON_PROJECT_CREATE",
+                "CHUNK_PROVISION_ON_PROJECT_CREATE",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    # Development default is intentionally soft:
+    # the App project can still be created if the Chunk service is temporarily
+    # unavailable. project_service.py will store pending/error state and allow retry.
+    VECTOPLAN_CHUNK_PROVISION_REQUIRED = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_CHUNK_PROVISION_REQUIRED",
+                "CHUNK_PROVISION_REQUIRED",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    VECTOPLAN_CHUNK_PROVISION_TIMEOUT_SECONDS = _clamp_float(
+        _as_float(
+            _env_first(
+                (
+                    "VECTOPLAN_CHUNK_PROVISION_TIMEOUT_SECONDS",
+                    "CHUNK_PROVISION_TIMEOUT_SECONDS",
+                    "VECTOPLAN_CHUNK_REQUEST_TIMEOUT",
+                ),
+                None,
+            ),
+            10.0,
+        ),
+        0.1,
+        120.0,
+    )
+
+    VECTOPLAN_CHUNK_PROVISION_RETRIES = _clamp_int(
+        _as_int(
+            _env_first(
+                (
+                    "VECTOPLAN_CHUNK_PROVISION_RETRIES",
+                    "CHUNK_PROVISION_RETRIES",
+                    "VECTOPLAN_CHUNK_REQUEST_RETRIES",
+                ),
+                None,
+            ),
+            2,
+        ),
+        0,
+        10,
+    )
+
+    VECTOPLAN_CHUNK_PROVISION_RETRY_SECONDS = _clamp_float(
+        _as_float(
+            _env_first(
+                (
+                    "VECTOPLAN_CHUNK_PROVISION_RETRY_SECONDS",
+                    "CHUNK_PROVISION_RETRY_SECONDS",
+                    "VECTOPLAN_CHUNK_RETRY_SECONDS",
+                ),
+                None,
+            ),
+            1.0,
+        ),
+        0.0,
+        60.0,
+    )
+
+    VECTOPLAN_CHUNK_MAX_RESPONSE_BYTES = _clamp_int(
+        _as_int(
+            _env_first(
+                (
+                    "VECTOPLAN_CHUNK_MAX_RESPONSE_BYTES",
+                    "CHUNK_MAX_RESPONSE_BYTES",
+                ),
+                None,
+            ),
+            8 * 1024 * 1024,
+        ),
+        1024,
+        64 * 1024 * 1024,
+    )
+
+    VECTOPLAN_CHUNK_CLIENT_USER_AGENT = _env_str_first(
+        (
+            "VECTOPLAN_CHUNK_CLIENT_USER_AGENT",
+            "CHUNK_CLIENT_USER_AGENT",
+        ),
+        "vectoplan-app/chunk-client",
+    )
+
+    # Optional token for future internal auth. Empty by default.
+    VECTOPLAN_CHUNK_INTERNAL_TOKEN = _env_str_first(
+        (
+            "VECTOPLAN_CHUNK_INTERNAL_TOKEN",
+            "VECTOPLAN_CHUNK_API_TOKEN",
+            "CHUNK_INTERNAL_TOKEN",
+            "CHUNK_API_TOKEN",
+        ),
+        "",
+    )
+
+    VECTOPLAN_CHUNK_PROVISION_DEFAULT_TEMPLATE_ID = _env_str_first(
+        (
+            "VECTOPLAN_CHUNK_PROVISION_DEFAULT_TEMPLATE_ID",
+            "VECTOPLAN_CHUNK_PROJECT_PROVISIONING_DEFAULT_TEMPLATE_ID",
+            "CHUNK_PROVISION_DEFAULT_TEMPLATE_ID",
+        ),
+        _DEFAULT_CHUNK_DEFAULT_TEMPLATE_ID,
+    )
+
+    VECTOPLAN_CHUNK_PROVISION_DEFAULT_WORLD_ID = _env_str_first(
+        (
+            "VECTOPLAN_CHUNK_PROVISION_DEFAULT_WORLD_ID",
+            "VECTOPLAN_CHUNK_PROJECT_PROVISIONING_DEFAULT_WORLD_ID",
+            "CHUNK_PROVISION_DEFAULT_WORLD_ID",
+        ),
+        _DEFAULT_CHUNK_DEFAULT_WORLD_ID,
+    )
+
+    VECTOPLAN_CHUNK_SERVICE_LINK_AUTO_CREATE = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_CHUNK_SERVICE_LINK_AUTO_CREATE",
+                "CHUNK_SERVICE_LINK_AUTO_CREATE",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    VECTOPLAN_CHUNK_PROVISION_RETRY_ON_WORKSPACE_OPEN = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_CHUNK_PROVISION_RETRY_ON_WORKSPACE_OPEN",
+                "CHUNK_PROVISION_RETRY_ON_WORKSPACE_OPEN",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    VECTOPLAN_CHUNK_PROVISION_STATUS_PENDING = "pending"
+    VECTOPLAN_CHUNK_PROVISION_STATUS_READY = "ready"
+    VECTOPLAN_CHUNK_PROVISION_STATUS_ERROR = "error"
+    VECTOPLAN_CHUNK_PROVISION_STATUS_DISABLED = "disabled"
+
+    VECTOPLAN_CHUNK_PROVISION_API_PATH_ENSURE_BY_APP = "/projects/by-app/{app_project_public_id}"
+    VECTOPLAN_CHUNK_PROVISION_API_PATH_ENSURE = "/projects/ensure"
+    VECTOPLAN_CHUNK_PROVISION_API_PATH_PREVIEW_BY_APP = "/projects/preview/by-app/{app_project_public_id}"
+    VECTOPLAN_CHUNK_STATUS_API_PATH = "/projects/_status"
+
+    VECTOPLAN_LIBRARY_PUBLIC_URL = _norm_url(
+        _env_str_first(
+            (
+                "VECTOPLAN_LIBRARY_PUBLIC_URL",
+                "VECTOPLAN_LIBRARY_PUBLIC_BASE_URL",
+                "LIBRARY_PUBLIC_URL",
+            ),
+            _DEFAULT_LIBRARY_PUBLIC_URL,
+        ),
+        _DEFAULT_LIBRARY_PUBLIC_URL,
+    )
+
+    VECTOPLAN_LIBRARY_PUBLIC_BASE_URL = VECTOPLAN_LIBRARY_PUBLIC_URL
+    LIBRARY_PUBLIC_URL = VECTOPLAN_LIBRARY_PUBLIC_URL
+    LIBRARY_PUBLIC_BASE_URL = VECTOPLAN_LIBRARY_PUBLIC_BASE_URL
+
+    VECTOPLAN_LIBRARY_INTERNAL_URL = _norm_url(
+        _env_str_first(
+            (
+                "VECTOPLAN_LIBRARY_INTERNAL_URL",
+                "LIBRARY_INTERNAL_URL",
+            ),
+            _DEFAULT_LIBRARY_INTERNAL_URL,
+        ),
+        _DEFAULT_LIBRARY_INTERNAL_URL,
+    )
+
+    LIBRARY_INTERNAL_URL = VECTOPLAN_LIBRARY_INTERNAL_URL
+
     # ───────── Frame / CSP integration ─────────
     # These values are consumed later by app.py and service-specific security code.
     VECTOPLAN_ALLOWED_FRAME_PARENTS_LIST = _cached_origin_list(
@@ -689,6 +962,36 @@ class Config:
     CSP_FRAME_ANCESTORS = _origins_to_csp_value(VECTOPLAN_ALLOWED_FRAME_PARENTS_LIST, include_self=False)
     SECURITY_CSP_FRAME_ANCESTORS = CSP_FRAME_ANCESTORS
 
+    # connect-src can be used by app.py/security helpers later. This includes
+    # public service origins for browser-side status/diagnostic fetches. Server-
+    # side provisioning still uses INTERNAL_URL and does not depend on CSP.
+    VECTOPLAN_APP_ALLOWED_CONNECT_SRC_LIST = _cached_origin_list(
+        _env_str_first(
+            (
+                "VECTOPLAN_APP_ALLOWED_CONNECT_SRC",
+                "APP_ALLOWED_CONNECT_SRC",
+                "CSP_CONNECT_SRC",
+            ),
+            _space_join(_DEFAULT_APP_ALLOWED_CONNECT_SRC),
+        ),
+        _space_join(_DEFAULT_APP_ALLOWED_CONNECT_SRC),
+    )
+
+    VECTOPLAN_APP_ALLOWED_CONNECT_SRC_LIST = _dedupe_texts(
+        [
+            *VECTOPLAN_APP_ALLOWED_CONNECT_SRC_LIST,
+            VECTOPLAN_APP_PUBLIC_URL,
+            VECTOPLAN_EDITOR_PUBLIC_URL,
+            OPENLAYER_PUBLIC_URL,
+            VECTOPLAN_CHUNK_PUBLIC_URL,
+            VECTOPLAN_LIBRARY_PUBLIC_URL,
+        ]
+    )
+
+    VECTOPLAN_APP_ALLOWED_CONNECT_SRC = _space_join(VECTOPLAN_APP_ALLOWED_CONNECT_SRC_LIST)
+    CSP_CONNECT_SRC = _origins_to_csp_value(VECTOPLAN_APP_ALLOWED_CONNECT_SRC_LIST, include_self=False)
+    SECURITY_CSP_CONNECT_SRC = CSP_CONNECT_SRC
+
     # ───────── Legacy 3D backend removal guardrails ─────────
     # Explicitly disabled during the Speckle removal phase.
     # 3D files may still be uploaded as files/blobs where existing routes allow it,
@@ -701,59 +1004,6 @@ class Config:
     VECTOPLAN_TOKEN = ""
     VECTOPLAN_EMBED_TOKEN = ""
     SPECKLE_UPLOAD_TIMEOUT = 0
-
-    # ───────── Chunk / Library service references ─────────
-    # Available for later phases, but the current editor iframe route does not
-    # create project/world structure and does not write chunk data.
-    VECTOPLAN_CHUNK_PUBLIC_URL = _norm_url(
-        _env_str_first(
-            (
-                "VECTOPLAN_CHUNK_PUBLIC_URL",
-                "VECTOPLAN_CHUNK_PUBLIC_BASE_URL",
-                "CHUNK_PUBLIC_URL",
-            ),
-            "http://localhost:5102",
-        ),
-        "http://localhost:5102",
-    )
-
-    VECTOPLAN_CHUNK_PUBLIC_BASE_URL = VECTOPLAN_CHUNK_PUBLIC_URL
-
-    VECTOPLAN_CHUNK_INTERNAL_URL = _norm_url(
-        _env_str_first(
-            (
-                "VECTOPLAN_CHUNK_INTERNAL_URL",
-                "CHUNK_INTERNAL_URL",
-            ),
-            "http://vectoplan-chunk:5000",
-        ),
-        "http://vectoplan-chunk:5000",
-    )
-
-    VECTOPLAN_LIBRARY_PUBLIC_URL = _norm_url(
-        _env_str_first(
-            (
-                "VECTOPLAN_LIBRARY_PUBLIC_URL",
-                "VECTOPLAN_LIBRARY_PUBLIC_BASE_URL",
-                "LIBRARY_PUBLIC_URL",
-            ),
-            "http://localhost:5101",
-        ),
-        "http://localhost:5101",
-    )
-
-    VECTOPLAN_LIBRARY_PUBLIC_BASE_URL = VECTOPLAN_LIBRARY_PUBLIC_URL
-
-    VECTOPLAN_LIBRARY_INTERNAL_URL = _norm_url(
-        _env_str_first(
-            (
-                "VECTOPLAN_LIBRARY_INTERNAL_URL",
-                "LIBRARY_INTERNAL_URL",
-            ),
-            "http://vectoplan-library:5000",
-        ),
-        "http://vectoplan-library:5000",
-    )
 
     # ───────── Geo services ─────────
     GEOSERVER_ORCHESTRATOR_PUBLIC_URL = _norm_url(

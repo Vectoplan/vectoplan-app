@@ -1,25 +1,18 @@
 // services/vectoplan-app/static/js/chat/main.js
-// Orchestrator for the VECTOPLAN app shell.
+// Orchestrator for the VECTOPLAN project/workspace shell.
 // Responsibilities:
-// - initialize layout, transcript, composer and templates
-// - switch workspace iframe between Editor, Map, 2D, LV and Admin
+// - initialize the project sidebar
+// - switch workspace iframe between Project, Map, Editor, 2D, LV and Admin
+// - start project-first, not editor-first
+// - keep Map/3D/2D/LV gated until the project is configured
 // - keep version dropdown usable as a neutral list
 // - avoid any legacy 3D backend calls
 // - never use Docker-internal URLs as browser iframe targets
-// - isolate each boot step with try/catch so one failing module does not stop the shell
-
-import { initChatLayout } from "./layout.js";
+// - no visible chat UI, no composer, no transcript, no chat drawer
 
 import { $, uiState } from "./core.js";
 import { getConfig } from "./api.js";
 import { loadVersions } from "./versions.js";
-import {
-  loadTranscript,
-  refreshTranscriptIncremental,
-  wireTranscriptRefresh,
-} from "./transcript.js";
-import { wireComposer } from "./composer.js";
-import { loadTemplatesIndex } from "./cards.js";
 
 
 /* ───────────────────────── Constants ───────────────────────── */
@@ -27,22 +20,22 @@ import { loadTemplatesIndex } from "./cards.js";
 const WORKSPACE_IFRAME_ALLOW = "fullscreen; pointer-lock; clipboard-read; clipboard-write";
 const WORKSPACE_IFRAME_REFERRER_POLICY = "no-referrer";
 
-const DEFAULT_EDITOR_ROUTE_TEMPLATE = "/ui/chat/{{chat_id}}/editor";
-const DEFAULT_MAP_ROUTE_TEMPLATE = "/ui/chat/{{chat_id}}/map";
-const DEFAULT_2D_ROUTE_TEMPLATE = "/ui/chat/{{chat_id}}/cad2d";
-const DEFAULT_ADMIN_ROUTE_TEMPLATE = "/ui/chat/{{chat_id}}/admin";
-const DEFAULT_LV_ROUTE_TEMPLATE = "/ui/chat/{{chat_id}}/lv";
+const DEFAULT_PROJECT_ROUTE = "/ui/project/new";
+
+const PROJECT_SIDEBAR_ROOT_SELECTOR = "[data-vp-project-sidebar]";
 
 const LEGACY_OR_INTERNAL_BROWSER_TARGETS = [
   "http://localhost:8090",
   "http://127.0.0.1:8090",
   "http://openlayer:8090",
   "http://vectoplan-openlayer:8090",
-  "http://localhost:5100/",
-  "http://127.0.0.1:5100/",
+  "http://server-openlayer:8090",
+  "http://vectoplan-editor:5000",
+  "http://editor:5000",
 ];
 
 const MODE_TO_BUTTON_ID = {
+  project: "modeProjectBtn",
   map: "modeMapBtn",
   "3d": "mode3dBtn",
   "2d": "mode2dBtn",
@@ -51,6 +44,7 @@ const MODE_TO_BUTTON_ID = {
 };
 
 const MODE_TITLE = {
+  project: "Projekt",
   "3d": "VECTOPLAN Editor",
   editor: "VECTOPLAN Editor",
   map: "Karte",
@@ -59,6 +53,8 @@ const MODE_TITLE = {
   lv: "Leistungsverzeichnis",
   admin: "Admin",
 };
+
+const MODES_REQUIRING_CONFIGURED_PROJECT = new Set(["map", "3d", "2d", "lv"]);
 
 
 /* ───────────────────────── Boot safety ───────────────────────── */
@@ -121,6 +117,28 @@ function cfg() {
   }
 }
 
+function appRoot() {
+  try {
+    return document.querySelector(".app-wrap") || document.body || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function dataValue(key, fallback = "") {
+  try {
+    const root = appRoot();
+    if (!root || !root.dataset) return String(fallback || "").trim();
+
+    const value = root.dataset[key];
+    if (value == null || value === "") return String(fallback || "").trim();
+
+    return String(value).trim();
+  } catch (_) {
+    return String(fallback || "").trim();
+  }
+}
+
 function cfgValue(key, fallback = "") {
   try {
     const c = cfg();
@@ -135,14 +153,58 @@ function cfgObject(key, fallback = {}) {
   try {
     const c = cfg();
     const value = c && c[key] != null ? c[key] : fallback;
-    return value && typeof value === "object" ? value : fallback;
+    return value && typeof value === "object" && !Array.isArray(value) ? value : fallback;
   } catch (_) {
     return fallback;
   }
 }
 
-function chatId() {
-  return cfgValue("chatId", "");
+function boolFromValue(value, fallback = false) {
+  try {
+    if (value === true || value === false) return value;
+    if (value === 1 || value === "1") return true;
+    if (value === 0 || value === "0") return false;
+
+    const text = String(value == null ? "" : value).trim().toLowerCase();
+
+    if (["true", "yes", "y", "on", "ja", "enabled"].includes(text)) return true;
+    if (["false", "no", "n", "off", "nein", "disabled"].includes(text)) return false;
+
+    return !!fallback;
+  } catch (_) {
+    return !!fallback;
+  }
+}
+
+function cfgBool(key, fallback = false) {
+  try {
+    const c = cfg();
+
+    if (c && Object.prototype.hasOwnProperty.call(c, key)) {
+      return boolFromValue(c[key], fallback);
+    }
+
+    const datasetValue = dataValue(key, "");
+    if (datasetValue !== "") {
+      return boolFromValue(datasetValue, fallback);
+    }
+
+    return !!fallback;
+  } catch (_) {
+    return !!fallback;
+  }
+}
+
+function conversationId() {
+  try {
+    return (
+      cfgValue("conversationId", "") ||
+      cfgValue("chatId", dataValue("chatId", "")) ||
+      dataValue("conversationId", "")
+    );
+  } catch (_) {
+    return "";
+  }
 }
 
 function encodePathPart(value) {
@@ -153,33 +215,12 @@ function encodePathPart(value) {
   }
 }
 
-function withChatPath(templatePath) {
-  try {
-    const id = chatId();
-    const p = String(templatePath || "");
-    return p.replaceAll("{{chat_id}}", encodePathPart(id));
-  } catch (_) {
-    return templatePath;
-  }
-}
-
-function pathFromConfig(keys, fallbackTemplate) {
-  try {
-    for (const key of keys) {
-      const value = cfgValue(key, "");
-      if (value) return withChatPath(value);
-    }
-
-    return withChatPath(fallbackTemplate);
-  } catch (_) {
-    return withChatPath(fallbackTemplate);
-  }
-}
-
 function appPaths() {
   try {
-    const paths = cfgObject("paths", {});
-    return paths && typeof paths === "object" ? paths : {};
+    return {
+      ...(cfgObject("paths", {}) || {}),
+      ...(cfgObject("workspacePaths", {}) || {}),
+    };
   } catch (_) {
     return {};
   }
@@ -188,28 +229,75 @@ function appPaths() {
 function pathValue(key, fallback = "") {
   try {
     const paths = appPaths();
-    const value = paths && paths[key] != null ? paths[key] : cfgValue(key, fallback);
-    return String(value == null ? "" : value).trim();
+
+    if (paths && paths[key] != null && String(paths[key]).trim()) {
+      return String(paths[key]).trim();
+    }
+
+    const direct = cfgValue(key, "");
+    if (direct) return direct;
+
+    const dataset = dataValue(key, "");
+    if (dataset) return dataset;
+
+    return String(fallback || "").trim();
   } catch (_) {
     return cfgValue(key, fallback);
   }
 }
 
-function isAbsoluteUrl(input) {
+function projectPublicId() {
   try {
-    const raw = String(input || "").trim();
-    return /^https?:\/\//i.test(raw);
+    const p = currentProject();
+
+    return String(
+      p.public_id ||
+        p.publicId ||
+        p.project_public_id ||
+        p.projectPublicId ||
+        cfgValue("projectPublicId", dataValue("projectPublicId", "new")) ||
+        "new"
+    ).trim();
   } catch (_) {
-    return false;
+    return "new";
   }
 }
 
-function isLocalAppRoute(input) {
+function projectId() {
   try {
-    const raw = String(input || "").trim();
-    return raw.startsWith("/");
+    const p = currentProject();
+
+    return String(
+      p.id ||
+        p.project_id ||
+        cfgValue("projectId", dataValue("projectId", "")) ||
+        ""
+    ).trim();
   } catch (_) {
-    return false;
+    return "";
+  }
+}
+
+function routeForProject(pathSuffix = "project") {
+  try {
+    const publicId = projectPublicId();
+    if (!publicId || publicId === "new") {
+      return pathSuffix === "project" ? DEFAULT_PROJECT_ROUTE : "";
+    }
+
+    if (pathSuffix === "project") return `/ui/project/${encodePathPart(publicId)}/project`;
+    if (pathSuffix === "editor") return `/ui/project/${encodePathPart(publicId)}/editor`;
+    if (pathSuffix === "map") return `/ui/project/${encodePathPart(publicId)}/map`;
+    if (pathSuffix === "cad2d") return `/ui/project/${encodePathPart(publicId)}/cad2d`;
+    if (pathSuffix === "lv") return `/ui/project/${encodePathPart(publicId)}/lv`;
+    if (pathSuffix === "admin") return `/ui/project/${encodePathPart(publicId)}/admin`;
+    if (pathSuffix === "plan2d") return `/ui/project/${encodePathPart(publicId)}/plan2d.json`;
+    if (pathSuffix === "cad-embed") return `/ui/project/${encodePathPart(publicId)}/cad-embed.json`;
+    if (pathSuffix === "map-json") return `/ui/project/${encodePathPart(publicId)}/map.json`;
+
+    return `/ui/project/${encodePathPart(publicId)}/project`;
+  } catch (_) {
+    return pathSuffix === "project" ? DEFAULT_PROJECT_ROUTE : "";
   }
 }
 
@@ -235,8 +323,6 @@ function cacheBustLocalUrl(input) {
     const raw = String(input || "").trim();
     if (!raw) return raw;
 
-    // Only cache-bust relative same-origin URLs.
-    // This keeps external Editor/OpenLayer public URLs stable if they ever appear.
     if (!raw.startsWith("/")) return raw;
 
     const url = new URL(raw, location.origin);
@@ -271,21 +357,27 @@ function isUnsafeLegacyTarget(input) {
 
     if (!raw) return false;
 
-    const normalized = raw.endsWith("/") && !raw.includes("?", raw.length - 1)
-      ? raw
-      : raw.replace(/[?#].*$/, "");
+    const normalized = raw.replace(/[?#].*$/, "");
 
     for (const bad of LEGACY_OR_INTERNAL_BROWSER_TARGETS) {
-      if (normalized === bad || raw.startsWith(bad + "?") || raw.startsWith(bad + "#")) {
+      if (normalized === bad || normalized.startsWith(bad + "/")) {
         return true;
       }
     }
 
-    // Explicitly block Docker-internal host names in browser iframe targets.
     try {
       const url = new URL(raw, location.origin);
       const host = String(url.hostname || "").toLowerCase();
-      if (["openlayer", "vectoplan-openlayer", "server-openlayer", "vectoplan-editor", "editor"].includes(host)) {
+
+      if (
+        [
+          "openlayer",
+          "vectoplan-openlayer",
+          "server-openlayer",
+          "vectoplan-editor",
+          "editor",
+        ].includes(host)
+      ) {
         return true;
       }
     } catch (_) {}
@@ -311,71 +403,407 @@ function sanitizeWorkspaceUrl(input, fallback) {
 }
 
 
+/* ───────────────────────── Project state helpers ───────────────────────── */
+
+function currentProject() {
+  try {
+    const c = cfg();
+    const project =
+      c.currentProject ||
+      c.project ||
+      window.__VECTOPLAN_CURRENT_PROJECT__ ||
+      {};
+
+    if (project && typeof project === "object" && !Array.isArray(project)) {
+      return project;
+    }
+
+    return {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function projectExists() {
+  try {
+    if (cfgBool("projectExists", false)) return true;
+
+    const publicId = projectPublicId();
+    const isNew = cfgBool("projectIsNew", dataValue("projectIsNew", "true") === "true");
+
+    return !!publicId && publicId !== "new" && !isNew;
+  } catch (_) {
+    return false;
+  }
+}
+
+function projectConfigured() {
+  try {
+    if (cfgBool("projectConfigured", false)) return true;
+
+    const p = currentProject();
+    const status = String(
+      p.setup_status ||
+        p.setupStatus ||
+        cfgValue("projectSetupStatus", dataValue("projectSetupStatus", "draft")) ||
+        "draft"
+    ).trim().toLowerCase();
+
+    return (
+      boolFromValue(p.is_configured || p.isConfigured, false) ||
+      status === "configured" ||
+      dataValue("projectConfigured", "false") === "true"
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+function projectToolsEnabled() {
+  try {
+    return projectExists() && projectConfigured();
+  } catch (_) {
+    return false;
+  }
+}
+
+function setProjectDataset(project, detail = {}) {
+  try {
+    const root = appRoot();
+    if (!root || !root.dataset) return;
+
+    const p = project && typeof project === "object" ? project : {};
+    const publicId =
+      p.public_id ||
+      p.publicId ||
+      p.project_public_id ||
+      p.projectPublicId ||
+      detail.projectPublicId ||
+      detail.public_id ||
+      detail.publicId ||
+      projectPublicId();
+
+    const id = p.id || p.project_id || detail.projectId || detail.id || "";
+
+    const configured = boolFromValue(
+      detail.isConfigured ??
+        detail.is_configured ??
+        p.is_configured ??
+        p.isConfigured,
+      projectConfigured()
+    );
+
+    const setupStatus = String(
+      p.setup_status ||
+        p.setupStatus ||
+        detail.setup_status ||
+        (configured ? "configured" : "draft")
+    ).trim();
+
+    root.dataset.projectId = String(id || "");
+    root.dataset.projectPublicId = String(publicId || "new");
+    root.dataset.projectIsNew = publicId && publicId !== "new" ? "false" : "true";
+    root.dataset.projectConfigured = configured ? "true" : "false";
+    root.dataset.projectToolsEnabled = configured && publicId && publicId !== "new" ? "true" : "false";
+    root.dataset.projectSetupStatus = setupStatus || "draft";
+
+    const paths = p.paths && typeof p.paths === "object" ? p.paths : {};
+
+    if (paths.projectPagePath || paths.projectUrl) {
+      root.dataset.projectPagePath = String(paths.projectPagePath || paths.projectUrl);
+    }
+
+    if (paths.editorPagePath) {
+      root.dataset.editorPagePath = String(paths.editorPagePath);
+    }
+
+    if (paths.mapPagePath) {
+      root.dataset.mapPagePath = String(paths.mapPagePath);
+    }
+  } catch (_) {}
+}
+
+function updateAppConfigProject(project, detail = {}) {
+  try {
+    if (!window.APP_CONFIG || typeof window.APP_CONFIG !== "object") {
+      window.APP_CONFIG = {};
+    }
+
+    const p = project && typeof project === "object" ? project : {};
+    const paths = p.paths && typeof p.paths === "object" ? p.paths : {};
+    const publicId =
+      p.public_id ||
+      p.publicId ||
+      p.project_public_id ||
+      p.projectPublicId ||
+      detail.public_id ||
+      detail.publicId ||
+      detail.projectPublicId ||
+      window.APP_CONFIG.projectPublicId ||
+      "new";
+
+    window.APP_CONFIG.project = p;
+    window.APP_CONFIG.currentProject = p;
+    window.APP_CONFIG.projectId = p.id || p.project_id || window.APP_CONFIG.projectId || "";
+    window.APP_CONFIG.projectPublicId = publicId;
+    window.APP_CONFIG.currentProjectId = publicId;
+    window.APP_CONFIG.projectName = p.name || p.display_name || p.displayName || window.APP_CONFIG.projectName || "";
+    window.APP_CONFIG.projectIsNew = publicId === "new";
+
+    const configured = boolFromValue(
+      detail.isConfigured ??
+        detail.is_configured ??
+        p.is_configured ??
+        p.isConfigured,
+      false
+    );
+
+    window.APP_CONFIG.projectExists = publicId !== "new";
+    window.APP_CONFIG.projectConfigured = configured;
+    window.APP_CONFIG.projectToolsEnabled = window.APP_CONFIG.projectExists && configured;
+    window.APP_CONFIG.projectSetupStatus = p.setup_status || p.setupStatus || (configured ? "configured" : "draft");
+
+    if (!window.APP_CONFIG.workspacePaths || typeof window.APP_CONFIG.workspacePaths !== "object") {
+      window.APP_CONFIG.workspacePaths = {};
+    }
+
+    const workspacePaths = window.APP_CONFIG.workspacePaths;
+
+    if (paths.projectPagePath || paths.projectUrl) {
+      window.APP_CONFIG.projectPagePath = paths.projectPagePath || paths.projectUrl;
+      window.APP_CONFIG.projectUrl = paths.projectPagePath || paths.projectUrl;
+      workspacePaths.projectPagePath = paths.projectPagePath || paths.projectUrl;
+      workspacePaths.projectUrl = paths.projectPagePath || paths.projectUrl;
+    } else if (publicId && publicId !== "new") {
+      workspacePaths.projectPagePath = routeForProject("project");
+      workspacePaths.projectUrl = routeForProject("project");
+      window.APP_CONFIG.projectPagePath = workspacePaths.projectPagePath;
+      window.APP_CONFIG.projectUrl = workspacePaths.projectUrl;
+    }
+
+    if (paths.projectPublicUrl) {
+      window.APP_CONFIG.projectPublicUrl = paths.projectPublicUrl;
+      workspacePaths.projectPublicUrl = paths.projectPublicUrl;
+    } else if (publicId && publicId !== "new") {
+      workspacePaths.projectPublicUrl = `/project=${encodePathPart(publicId)}`;
+      window.APP_CONFIG.projectPublicUrl = workspacePaths.projectPublicUrl;
+    }
+
+    if (paths.editorPagePath) {
+      window.APP_CONFIG.editorPagePath = paths.editorPagePath;
+      workspacePaths.editorPagePath = paths.editorPagePath;
+    } else if (publicId && publicId !== "new") {
+      workspacePaths.editorPagePath = routeForProject("editor");
+      window.APP_CONFIG.editorPagePath = workspacePaths.editorPagePath;
+    }
+
+    if (paths.initialEditorUrl) {
+      window.APP_CONFIG.initialEditorUrl = paths.initialEditorUrl;
+      workspacePaths.initialEditorUrl = paths.initialEditorUrl;
+    } else if (workspacePaths.editorPagePath) {
+      window.APP_CONFIG.initialEditorUrl = workspacePaths.editorPagePath;
+      workspacePaths.initialEditorUrl = workspacePaths.editorPagePath;
+    }
+
+    if (paths.mapPagePath) {
+      window.APP_CONFIG.mapPagePath = paths.mapPagePath;
+      workspacePaths.mapPagePath = paths.mapPagePath;
+    } else if (publicId && publicId !== "new") {
+      workspacePaths.mapPagePath = routeForProject("map");
+      window.APP_CONFIG.mapPagePath = workspacePaths.mapPagePath;
+    }
+
+    if (paths.cad2dPagePath) {
+      window.APP_CONFIG.cad2dPagePath = paths.cad2dPagePath;
+      workspacePaths.cad2dPagePath = paths.cad2dPagePath;
+    } else if (publicId && publicId !== "new") {
+      workspacePaths.cad2dPagePath = routeForProject("cad2d");
+      window.APP_CONFIG.cad2dPagePath = workspacePaths.cad2dPagePath;
+    }
+
+    if (paths.lvPagePath) {
+      window.APP_CONFIG.lvPagePath = paths.lvPagePath;
+      workspacePaths.lvPagePath = paths.lvPagePath;
+    } else if (publicId && publicId !== "new") {
+      workspacePaths.lvPagePath = routeForProject("lv");
+      window.APP_CONFIG.lvPagePath = workspacePaths.lvPagePath;
+    }
+
+    if (paths.adminPagePath) {
+      window.APP_CONFIG.adminPagePath = paths.adminPagePath;
+      workspacePaths.adminPagePath = paths.adminPagePath;
+    } else if (publicId && publicId !== "new") {
+      workspacePaths.adminPagePath = routeForProject("admin");
+      window.APP_CONFIG.adminPagePath = workspacePaths.adminPagePath;
+    }
+
+    if (window.APP_CONFIG.projectSidebar && typeof window.APP_CONFIG.projectSidebar === "object") {
+      window.APP_CONFIG.projectSidebar.currentProjectId = publicId;
+      window.APP_CONFIG.projectSidebar.current_project_id = publicId;
+      window.APP_CONFIG.projectSidebar.currentTitle = window.APP_CONFIG.projectName || "Aktuelles Projekt";
+      window.APP_CONFIG.projectSidebar.currentSubtitle = configured ? "Projekt aktiv" : "Projekt definieren";
+    }
+
+    window.__VECTOPLAN_CURRENT_PROJECT__ = p;
+  } catch (_) {}
+}
+
+function extractProjectFromDetail(detail) {
+  try {
+    if (!detail || typeof detail !== "object") return null;
+
+    if (detail.project && typeof detail.project === "object") return detail.project;
+    if (detail.payload && detail.payload.project && typeof detail.payload.project === "object") return detail.payload.project;
+    if (detail.item && typeof detail.item === "object") return detail.item;
+
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function handleProjectSaved(detail = {}, eventType = "vectoplan:project:saved") {
+  try {
+    const project = extractProjectFromDetail(detail);
+
+    if (project) {
+      updateAppConfigProject(project, detail);
+      setProjectDataset(project, detail);
+    }
+
+    syncWorkspaceGating({ fallbackToProject: false });
+
+    try {
+      refreshProjectSidebar();
+    } catch (_) {}
+
+    try {
+      void refreshVersionsUI();
+    } catch (_) {}
+
+    try {
+      uiState.lastProjectEvent = {
+        type: eventType,
+        detail,
+        project,
+        at: Date.now(),
+      };
+    } catch (_) {}
+
+    showStatus("");
+  } catch (error) {
+    try {
+      console.warn("[project] saved event handling failed", error);
+    } catch (_) {}
+  }
+}
+
+
 /* ───────────────────────── Workspace URL resolution ───────────────────────── */
+
+function projectUrl() {
+  try {
+    const candidate =
+      pathValue("projectPagePath") ||
+      pathValue("projectUrl") ||
+      cfgValue("projectPagePath") ||
+      cfgValue("projectUrl") ||
+      dataValue("projectPagePath") ||
+      routeForProject("project") ||
+      DEFAULT_PROJECT_ROUTE;
+
+    return sanitizeWorkspaceUrl(candidate, DEFAULT_PROJECT_ROUTE);
+  } catch (_) {
+    return DEFAULT_PROJECT_ROUTE;
+  }
+}
 
 function editorUrl() {
   try {
-    const fallback = `/ui/chat/${encodePathPart(chatId())}/editor`;
+    const fallback = routeForProject("editor") || projectUrl();
 
-    // Editor must always be reached through the local app route.
-    // Do not use viewer_url/raw external URL as primary 3D source.
     const candidate =
       pathValue("editorPagePath") ||
       pathValue("initialEditorUrl") ||
       cfgValue("editorPagePath") ||
       cfgValue("initialEditorUrl") ||
-      withChatPath(DEFAULT_EDITOR_ROUTE_TEMPLATE);
+      dataValue("editorPagePath") ||
+      fallback;
 
     return sanitizeWorkspaceUrl(candidate, fallback);
   } catch (_) {
-    return `/ui/chat/${encodePathPart(chatId())}/editor`;
+    return routeForProject("editor") || projectUrl();
   }
 }
 
 function mapUrl() {
   try {
-    const fallback = `/ui/chat/${encodePathPart(chatId())}/map`;
+    const fallback = routeForProject("map") || projectUrl();
 
-    // Map must always be reached through the local app route.
-    // The app route redirects to the browser-facing OpenLayer public URL.
     const candidate =
       pathValue("mapPagePath") ||
       cfgValue("mapPagePath") ||
-      withChatPath(DEFAULT_MAP_ROUTE_TEMPLATE);
+      dataValue("mapPagePath") ||
+      fallback;
 
     return sanitizeWorkspaceUrl(candidate, fallback);
   } catch (_) {
-    return `/ui/chat/${encodePathPart(chatId())}/map`;
+    return routeForProject("map") || projectUrl();
   }
 }
 
 function twoDPageUrl() {
   try {
-    return pathFromConfig(["cad2dPagePath"], DEFAULT_2D_ROUTE_TEMPLATE);
+    const fallback = routeForProject("cad2d") || projectUrl();
+
+    const candidate =
+      pathValue("cad2dPagePath") ||
+      cfgValue("cad2dPagePath") ||
+      fallback;
+
+    return sanitizeWorkspaceUrl(candidate, fallback);
   } catch (_) {
-    return `/ui/chat/${encodePathPart(chatId())}/cad2d`;
+    return routeForProject("cad2d") || projectUrl();
   }
 }
 
 function adminUrl() {
   try {
-    return pathFromConfig(["adminPagePath"], DEFAULT_ADMIN_ROUTE_TEMPLATE);
+    const fallback = routeForProject("admin") || projectUrl();
+
+    const candidate =
+      pathValue("adminPagePath") ||
+      cfgValue("adminPagePath") ||
+      fallback;
+
+    return sanitizeWorkspaceUrl(candidate, fallback);
   } catch (_) {
-    return `/ui/chat/${encodePathPart(chatId())}/admin`;
+    return routeForProject("admin") || projectUrl();
   }
 }
 
 function lvUrl() {
   try {
-    return pathFromConfig(["lvPagePath"], DEFAULT_LV_ROUTE_TEMPLATE);
+    const fallback = routeForProject("lv") || projectUrl();
+
+    const candidate =
+      pathValue("lvPagePath") ||
+      cfgValue("lvPagePath") ||
+      fallback;
+
+    return sanitizeWorkspaceUrl(candidate, fallback);
   } catch (_) {
-    return `/ui/chat/${encodePathPart(chatId())}/lv`;
+    return routeForProject("lv") || projectUrl();
   }
 }
 
 async function resolve2dUrl() {
   try {
-    const jsonPath = pathValue("cadEmbedJsonPath") || cfgValue("cadEmbedJsonPath");
+    const jsonPath =
+      pathValue("cadEmbedJsonPath") ||
+      cfgValue("cadEmbedJsonPath") ||
+      routeForProject("cad-embed");
+
     if (!jsonPath) return twoDPageUrl();
 
     const data = await fetch(jsonPath, {
@@ -500,8 +928,6 @@ function applyIframeCapabilities(frame) {
     frame.setAttribute("loading", "eager");
     frame.setAttribute("frameborder", "0");
 
-    // Do not set sandbox here. A sandbox without all needed flags can break
-    // Editor pointer lock, module loading, storage and OpenLayer behavior.
     try {
       frame.removeAttribute("sandbox");
     } catch (_) {}
@@ -511,6 +937,8 @@ function applyIframeCapabilities(frame) {
 function makeIframeLoadHandlers(frame, rawSrc, mode) {
   let loaded = false;
   let timeoutId = null;
+
+  const normalizedMode = normalizeMode(mode);
 
   const clear = () => {
     try {
@@ -527,7 +955,7 @@ function makeIframeLoadHandlers(frame, rawSrc, mode) {
 
       try {
         uiState.lastWorkspaceLoad = {
-          mode,
+          mode: normalizedMode,
           src: rawSrc,
           loadedAt: Date.now(),
         };
@@ -539,11 +967,10 @@ function makeIframeLoadHandlers(frame, rawSrc, mode) {
     try {
       loaded = false;
       clear();
-      showWorkspaceFallback("Arbeitsbereich konnte nicht geladen werden. Prüfe, ob der Zielservice läuft und iframe-Header erlaubt sind.");
 
       try {
         uiState.lastWorkspaceError = {
-          mode,
+          mode: normalizedMode,
           src: rawSrc,
           errorAt: Date.now(),
         };
@@ -560,7 +987,7 @@ function makeIframeLoadHandlers(frame, rawSrc, mode) {
         showWorkspaceFallback("Arbeitsbereich lädt noch oder wurde vom Browser blockiert. Prüfe Console, CSP und X-Frame-Options.");
       }
     } catch (_) {}
-  }, mode === "map" ? 6000 : 8000);
+  }, normalizedMode === "map" ? 6000 : 8000);
 
   return { onLoad, onError, clear };
 }
@@ -573,14 +1000,21 @@ function hardSwapIframe(nextSrc, options = {}) {
     if (!oldFrame || !rawSrc) return false;
 
     const mode = String(options.mode || "").trim();
-    const normalizedMode = normalizeMode(mode || "3d");
+    const normalizedMode = normalizeMode(mode || "project");
     const title = String(options.title || MODE_TITLE[normalizedMode] || oldFrame.getAttribute("title") || "Arbeitsbereich");
 
     if (isUnsafeLegacyTarget(rawSrc)) {
-      const fallback = normalizedMode === "map" ? mapUrl() : editorUrl();
+      const fallback =
+        normalizedMode === "map"
+          ? mapUrl()
+          : normalizedMode === "project"
+            ? projectUrl()
+            : editorUrl();
+
       try {
         console.warn("[workspace] blocked unsafe iframe target", rawSrc, "fallback", fallback);
       } catch (_) {}
+
       return hardSwapIframe(cacheBustLocalUrl(fallback), { ...options, mode: normalizedMode });
     }
 
@@ -613,7 +1047,6 @@ function hardSwapIframe(nextSrc, options = {}) {
 
     setRawOpenUrl(rawSrc);
 
-    // Best-effort retry for browsers/extensions that occasionally leave iframes blank.
     setTimeout(() => {
       try {
         if (!fresh.src || fresh.src === "about:blank") {
@@ -636,22 +1069,14 @@ function hardSwapIframe(nextSrc, options = {}) {
   }
 }
 
-function setModePressed(activeMode) {
-  try {
-    const mode = normalizeMode(activeMode);
-
-    for (const [m, id] of Object.entries(MODE_TO_BUTTON_ID)) {
-      const btn = $(id);
-      if (!btn) continue;
-
-      btn.setAttribute("aria-pressed", String(m === mode));
-    }
-  } catch (_) {}
-}
-
 function normalizeMode(mode) {
   try {
     const value = String(mode || "").trim().toLowerCase();
+
+    if (value === "project") return "project";
+    if (value === "projekt") return "project";
+    if (value === "meta") return "project";
+    if (value === "metadata") return "project";
 
     if (value === "editor") return "3d";
     if (value === "cad") return "2d";
@@ -663,10 +1088,118 @@ function normalizeMode(mode) {
 
     if (["3d", "2d", "map", "lv", "admin"].includes(value)) return value;
 
-    return "3d";
+    return "project";
   } catch (_) {
-    return "3d";
+    return "project";
   }
+}
+
+function setModePressed(activeMode) {
+  try {
+    const mode = normalizeMode(activeMode);
+
+    for (const [m, id] of Object.entries(MODE_TO_BUTTON_ID)) {
+      const btn = $(id);
+      if (!btn) continue;
+
+      btn.setAttribute("aria-pressed", String(m === mode));
+      btn.classList.toggle("is-active", m === mode);
+    }
+  } catch (_) {}
+}
+
+function isWorkspaceModeAllowed(mode) {
+  try {
+    const normalized = normalizeMode(mode);
+
+    if (normalized === "project") return true;
+    if (normalized === "admin") return projectExists();
+
+    if (MODES_REQUIRING_CONFIGURED_PROJECT.has(normalized)) {
+      return projectToolsEnabled();
+    }
+
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+function workspaceModeDisabledMessage(mode) {
+  try {
+    const normalized = normalizeMode(mode);
+
+    if (normalized === "admin" && !projectExists()) {
+      return "Projekt zuerst erstellen. Danach ist Admin verfügbar.";
+    }
+
+    if (MODES_REQUIRING_CONFIGURED_PROJECT.has(normalized) && !projectToolsEnabled()) {
+      return "Projekt zuerst speichern und konfigurieren. Danach sind Map, 3D, 2D und LV verfügbar.";
+    }
+
+    return "Dieser Arbeitsbereich ist aktuell nicht verfügbar.";
+  } catch (_) {
+    return "Dieser Arbeitsbereich ist aktuell nicht verfügbar.";
+  }
+}
+
+function syncWorkspaceGating(options = {}) {
+  try {
+    const fallbackToProject = options.fallbackToProject !== false;
+    const root = appRoot();
+    const configured = projectConfigured();
+    const exists = projectExists();
+    const toolsEnabled = projectToolsEnabled();
+
+    if (root && root.dataset) {
+      root.dataset.projectConfigured = configured ? "true" : "false";
+      root.dataset.projectToolsEnabled = toolsEnabled ? "true" : "false";
+      root.dataset.projectIsNew = exists ? "false" : "true";
+    }
+
+    for (const [mode, id] of Object.entries(MODE_TO_BUTTON_ID)) {
+      const btn = $(id);
+      if (!btn) continue;
+
+      const allowed = isWorkspaceModeAllowed(mode);
+
+      btn.disabled = !allowed;
+      btn.setAttribute("aria-disabled", allowed ? "false" : "true");
+      btn.classList.toggle("is-disabled", !allowed);
+
+      if (!allowed) {
+        btn.title = workspaceModeDisabledMessage(mode);
+      } else if (mode === "project") {
+        btn.title = "Projekt";
+      } else {
+        btn.title = MODE_TITLE[mode] || "Arbeitsbereich";
+      }
+    }
+
+    const versionsToggle = $("versionsToggleBtn");
+    if (versionsToggle) {
+      versionsToggle.disabled = !exists;
+      versionsToggle.setAttribute("aria-disabled", exists ? "false" : "true");
+      versionsToggle.classList.toggle("is-disabled", !exists);
+      if (!exists) {
+        versionsToggle.title = "Projekt zuerst erstellen. Danach sind Versionen verfügbar.";
+      }
+    }
+
+    const openBtn = $("viewerOpenRawBtn");
+    if (openBtn) {
+      openBtn.setAttribute("aria-disabled", "false");
+      openBtn.classList.remove("is-disabled");
+    }
+
+    const currentMode = normalizeMode(uiState.workspaceMode || dataValue("workspaceMode", "project"));
+    if (fallbackToProject && !isWorkspaceModeAllowed(currentMode)) {
+      void setWorkspaceMode("project", {
+        persist: false,
+        reason: "gating-fallback",
+      });
+    }
+  } catch (_) {}
 }
 
 function setUiMode(mode) {
@@ -676,7 +1209,7 @@ function setUiMode(mode) {
     uiState.viewerMode = normalized;
     uiState.workspaceMode = normalized;
 
-    const root = document.querySelector(".app-wrap");
+    const root = appRoot();
     if (root) {
       root.dataset.workspaceMode = normalized;
       root.dataset.viewerMode = normalized;
@@ -714,59 +1247,37 @@ async function persistWorkspaceMode(mode) {
   } catch (_) {}
 }
 
-async function fetchWorkspaceState() {
-  try {
-    const statePath = pathValue("stateGetPath") || cfgValue("stateGetPath");
-    if (!statePath || statePath === "__DISABLED__") return null;
-
-    return await fetch(statePath, {
-      credentials: "same-origin",
-      cache: "no-store",
-    })
-      .then((response) => response.json())
-      .catch(() => null);
-  } catch (_) {
-    return null;
-  }
-}
-
-function extractModeFromState(state) {
-  try {
-    if (!state || typeof state !== "object") return "";
-
-    const candidates = [
-      state.workspace_mode,
-      state.viewer_mode,
-      state.mode,
-      state?.viewer_selection?.workspace_mode,
-      state?.viewer_selection?.mode,
-      state?.selection?.workspace_mode,
-      state?.selection?.mode,
-      state?.payload?.workspace_mode,
-      state?.payload?.mode,
-    ];
-
-    for (const candidate of candidates) {
-      const value = String(candidate || "").trim();
-      if (value) return normalizeMode(value);
-    }
-
-    return "";
-  } catch (_) {
-    return "";
-  }
-}
-
 async function setWorkspaceMode(mode, options = {}) {
-  const normalized = setUiMode(mode);
+  const requested = normalizeMode(mode);
   const shouldPersist = options.persist !== false;
 
   try {
+    if (!isWorkspaceModeAllowed(requested)) {
+      showStatus(workspaceModeDisabledMessage(requested));
+
+      if (requested !== "project" && options.fallback !== false) {
+        await setWorkspaceMode("project", {
+          persist: false,
+          reason: "mode-blocked",
+          fallback: false,
+        });
+      }
+
+      return false;
+    }
+
+    const normalized = setUiMode(requested);
     let target = "";
 
-    if (normalized === "3d") {
+    if (normalized === "project") {
+      target = projectUrl();
+      hardSwapIframe(cacheBustLocalUrl(target), {
+        mode: "project",
+        title: "Projekt",
+      });
+    } else if (normalized === "3d") {
       target = editorUrl();
-      hardSwapIframe(target, {
+      hardSwapIframe(cacheBustLocalUrl(target), {
         mode: "3d",
         title: "VECTOPLAN Editor",
       });
@@ -804,10 +1315,12 @@ async function setWorkspaceMode(mode, options = {}) {
       versionsClose();
     } catch (_) {}
 
+    showStatus("");
+
     return true;
   } catch (error) {
     try {
-      console.warn("[workspace] setWorkspaceMode failed", normalized, error);
+      console.warn("[workspace] setWorkspaceMode failed", requested, error);
     } catch (_) {}
     showWorkspaceFallback("Arbeitsbereich konnte nicht gewechselt werden.");
     return false;
@@ -819,34 +1332,33 @@ async function applyInitialWorkspaceMode() {
     const currentFrame = viewerFrame();
     if (currentFrame) {
       applyIframeCapabilities(currentFrame);
-      makeIframeLoadHandlers(currentFrame, currentFrame.getAttribute("src") || currentFrame.src || "", "3d");
+      makeIframeLoadHandlers(
+        currentFrame,
+        currentFrame.getAttribute("src") || currentFrame.src || "",
+        normalizeMode(cfgValue("defaultMode", dataValue("defaultMode", "project")))
+      );
     }
   } catch (_) {}
 
   try {
+    syncWorkspaceGating({ fallbackToProject: false });
+
     const queryMode = new URLSearchParams(location.search).get("mode");
     if (queryMode) {
       await setWorkspaceMode(queryMode, { persist: false });
       return;
     }
 
-    const saved = await fetchWorkspaceState();
-    const savedMode = extractModeFromState(saved);
-
-    if (savedMode) {
-      await setWorkspaceMode(savedMode, { persist: false });
-      return;
-    }
-
-    const configured = cfgValue("defaultMode", "3d");
-    await setWorkspaceMode(configured || "3d", { persist: false });
+    const initialMode = cfgValue("defaultMode", dataValue("defaultMode", "project")) || "project";
+    await setWorkspaceMode(initialMode || "project", { persist: false });
   } catch (_) {
-    await setWorkspaceMode("3d", { persist: false });
+    await setWorkspaceMode("project", { persist: false });
   }
 }
 
 function wireWorkspaceToolbar() {
   const bindings = [
+    ["modeProjectBtn", "project"],
     ["modeMapBtn", "map"],
     ["mode3dBtn", "3d"],
     ["mode2dBtn", "2d"],
@@ -865,8 +1377,285 @@ function wireWorkspaceToolbar() {
         event.preventDefault();
       } catch (_) {}
 
+      if (!isWorkspaceModeAllowed(mode)) {
+        showStatus(workspaceModeDisabledMessage(mode));
+        return;
+      }
+
       void setWorkspaceMode(mode);
     });
+  }
+
+  syncWorkspaceGating({ fallbackToProject: false });
+}
+
+
+/* ───────────────────────── Project event bridge ───────────────────────── */
+
+function wireProjectEventBridge() {
+  try {
+    if (window.__VECTOPLAN_PROJECT_BRIDGE_WIRED__) return;
+    window.__VECTOPLAN_PROJECT_BRIDGE_WIRED__ = true;
+
+    const eventNames = [
+      "vectoplan:project:saved",
+      "vectoplan:project:created",
+      "vectoplan:project:updated",
+      "vectoplan:project:configured",
+    ];
+
+    for (const eventName of eventNames) {
+      safeOn(window, eventName, (event) => {
+        try {
+          handleProjectSaved(event?.detail || {}, eventName);
+        } catch (_) {}
+      });
+    }
+
+    safeOn(window, "message", (event) => {
+      try {
+        const data = event?.data;
+        if (!data || typeof data !== "object") return;
+
+        const type = String(data.type || data.kind || "").trim();
+
+        if (!type.startsWith("vectoplan:project:")) return;
+
+        handleProjectSaved(data.detail || data, type);
+      } catch (_) {}
+    });
+  } catch (_) {}
+}
+
+
+/* ───────────────────────── Project sidebar bridge ───────────────────────── */
+
+function projectSidebarRoot() {
+  try {
+    return document.querySelector(PROJECT_SIDEBAR_ROOT_SELECTOR);
+  } catch (_) {
+    return null;
+  }
+}
+
+function projectSidebarApi() {
+  try {
+    return window.VectoplanProjectSidebar || window.__VECTOPLAN_PROJECT_SIDEBAR__ || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function projectSidebarDataApi() {
+  try {
+    return window.VectoplanProjectSidebarData || window.__VECTOPLAN_PROJECT_SIDEBAR_DATA__ || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function projectSidebarResizeApi() {
+  try {
+    return window.VectoplanProjectSidebarResize || window.__VECTOPLAN_PROJECT_SIDEBAR_RESIZE__ || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function notifyShellLayoutChanged(reason = "project-sidebar") {
+  try {
+    uiState.lastLayoutChange = {
+      reason,
+      changedAt: Date.now(),
+    };
+  } catch (_) {}
+
+  try {
+    requestAnimationFrame(() => {
+      try {
+        window.dispatchEvent(new Event("resize"));
+      } catch (_) {}
+    });
+  } catch (_) {
+    try {
+      window.dispatchEvent(new Event("resize"));
+    } catch (__) {}
+  }
+}
+
+function getProjectSidebarController() {
+  try {
+    const root = projectSidebarRoot();
+    const api = projectSidebarApi();
+
+    if (!root || !api || typeof api.getController !== "function") return null;
+
+    return api.getController(root);
+  } catch (_) {
+    return null;
+  }
+}
+
+function projectSidebarSnapshot() {
+  try {
+    const controller = getProjectSidebarController();
+    if (controller && typeof controller.getSnapshot === "function") {
+      return controller.getSnapshot();
+    }
+
+    const api = projectSidebarApi();
+    if (api && typeof api.createDebugSnapshot === "function") {
+      return api.createDebugSnapshot();
+    }
+
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function wireProjectSidebarEvents(root) {
+  try {
+    if (!root || root._vectoplanProjectSidebarEventsWired) return;
+    root._vectoplanProjectSidebarEventsWired = true;
+
+    safeOn(root, "vectoplan:project-sidebar:ready", (event) => {
+      try {
+        uiState.projectSidebarReady = true;
+        uiState.projectSidebarSnapshot = event?.detail?.snapshot || projectSidebarSnapshot();
+        notifyShellLayoutChanged("project-sidebar-ready");
+      } catch (_) {}
+    });
+
+    safeOn(root, "vectoplan:project-sidebar:items-loaded", (event) => {
+      try {
+        uiState.projectSidebarItems = event?.detail?.items || [];
+        uiState.projectSidebarCount = event?.detail?.count || 0;
+        uiState.projectSidebarSource = event?.detail?.source || "";
+      } catch (_) {}
+    });
+
+    safeOn(root, "vectoplan:project-sidebar:item-selected", (event) => {
+      try {
+        uiState.lastProjectSidebarSelection = {
+          item: event?.detail?.item || null,
+          href: event?.detail?.href || "",
+          selectedAt: Date.now(),
+        };
+      } catch (_) {}
+    });
+
+    safeOn(root, "vectoplan:project-sidebar:collapsed-change", (event) => {
+      try {
+        uiState.projectSidebarCollapsed = !!event?.detail?.collapsed;
+        uiState.projectSidebarSnapshot = projectSidebarSnapshot();
+        notifyShellLayoutChanged("project-sidebar-collapsed-change");
+      } catch (_) {
+        notifyShellLayoutChanged("project-sidebar-collapsed-change");
+      }
+    });
+
+    safeOn(root, "vectoplan:project-sidebar:resize", (event) => {
+      try {
+        uiState.projectSidebarWidth = event?.detail?.width || null;
+        uiState.projectSidebarSnapshot = projectSidebarSnapshot();
+        notifyShellLayoutChanged("project-sidebar-resize");
+      } catch (_) {
+        notifyShellLayoutChanged("project-sidebar-resize");
+      }
+    });
+
+    safeOn(root, "vectoplan:project-sidebar:resize-end", (event) => {
+      try {
+        uiState.projectSidebarWidth = event?.detail?.width || null;
+        uiState.projectSidebarSnapshot = projectSidebarSnapshot();
+        notifyShellLayoutChanged("project-sidebar-resize-end");
+      } catch (_) {
+        notifyShellLayoutChanged("project-sidebar-resize-end");
+      }
+    });
+
+    safeOn(root, "vectoplan:project-sidebar:error", (event) => {
+      try {
+        uiState.projectSidebarError = event?.detail?.error || true;
+      } catch (_) {}
+    });
+  } catch (_) {}
+}
+
+function initProjectSidebar() {
+  try {
+    const root = projectSidebarRoot();
+    if (!root) return null;
+
+    const sidebarConfig = cfgObject("projectSidebar", {});
+    const enabled = sidebarConfig && sidebarConfig.enabled !== false && sidebarConfig.enabled !== "false";
+
+    if (!enabled) {
+      try {
+        root.classList.add("is-disabled");
+        root.setAttribute("hidden", "");
+        root.setAttribute("aria-hidden", "true");
+      } catch (_) {}
+
+      return null;
+    }
+
+    wireProjectSidebarEvents(root);
+
+    const resizeApi = projectSidebarResizeApi();
+    if (resizeApi && typeof resizeApi.init === "function") {
+      safeCall("projectSidebarResize.init", () => resizeApi.init({ root }));
+    }
+
+    const api = projectSidebarApi();
+    let controller = null;
+
+    if (api && typeof api.init === "function") {
+      controller = api.init({
+        root,
+        currentChatId: conversationId(),
+        currentProjectId: projectPublicId(),
+        items: Array.isArray(sidebarConfig.items) ? sidebarConfig.items : undefined,
+      });
+    }
+
+    if (controller && typeof controller.rememberCurrent === "function") {
+      safeCall("projectSidebar.rememberCurrent", () => controller.rememberCurrent());
+    }
+
+    try {
+      uiState.projectSidebarReady = !!controller;
+      uiState.projectSidebarSnapshot = projectSidebarSnapshot();
+    } catch (_) {}
+
+    notifyShellLayoutChanged("project-sidebar-init");
+
+    return controller;
+  } catch (error) {
+    try {
+      console.warn("[project-sidebar] init failed", error);
+    } catch (_) {}
+    return null;
+  }
+}
+
+function refreshProjectSidebar() {
+  try {
+    const controller = getProjectSidebarController();
+
+    if (controller && typeof controller.refresh === "function") {
+      return controller.refresh({ source: "main-refresh" });
+    }
+
+    const api = projectSidebarApi();
+    if (api && typeof api.refreshAll === "function") {
+      return api.refreshAll();
+    }
+
+    return null;
+  } catch (_) {
+    return null;
   }
 }
 
@@ -907,6 +1696,19 @@ function themeApply(theme = "light") {
         ? "Auf helles Theme umschalten"
         : "Auf dunkles Theme umschalten";
     }
+
+    try {
+      const frame = viewerFrame();
+      if (frame && frame.contentWindow) {
+        frame.contentWindow.postMessage(
+          {
+            type: "vectoplan:theme:update",
+            theme: next,
+          },
+          "*"
+        );
+      }
+    } catch (_) {}
   } catch (_) {}
 }
 
@@ -956,7 +1758,7 @@ function versionsOpen() {
     const toggle = $("versionsToggleBtn");
     const box = versionsContainer();
 
-    if (!toggle || !box) return false;
+    if (!toggle || !box || toggle.disabled) return false;
 
     box.classList.remove("hidden");
     box.setAttribute("aria-hidden", "false");
@@ -1011,7 +1813,7 @@ function versionsToggle() {
 async function fetchVersionsRaw() {
   try {
     const path = pathValue("versionsPath") || cfgValue("versionsPath");
-    if (!path) return [];
+    if (!path || !projectExists()) return [];
 
     const data = await fetch(path, {
       credentials: "same-origin",
@@ -1021,6 +1823,7 @@ async function fetchVersionsRaw() {
       .catch(() => null);
 
     if (Array.isArray(data?.items)) return data.items;
+    if (Array.isArray(data?.versions)) return data.versions;
 
     return [];
   } catch (_) {
@@ -1266,7 +2069,14 @@ function wireEditorEventBridge() {
 function showStatus(message) {
   try {
     const box = $("systemAlert");
-    if (!box) return;
+    if (!box) {
+      if (message) {
+        try {
+          console.info("[vectoplan]", message);
+        } catch (_) {}
+      }
+      return;
+    }
 
     const text = String(message || "");
     box.textContent = text;
@@ -1276,9 +2086,6 @@ function showStatus(message) {
 
 function wireGlobalStatus() {
   try {
-    const alertBox = $("systemAlert");
-    if (!alertBox) return;
-
     safeOn(window, "offline", () => {
       showStatus("Offline erkannt. Vorgänge werden eventuell verzögert.");
     });
@@ -1296,27 +2103,34 @@ function wireHotkeys() {
 
     safeOn(document, "keydown", (event) => {
       try {
-        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-          const send = $("sendBtn");
-          if (send) {
-            event.preventDefault();
-            send.click();
-          }
+        if (event.altKey && event.key.toLowerCase() === "p") {
+          event.preventDefault();
+          void setWorkspaceMode("project");
         }
 
         if (event.altKey && event.key === "1") {
           event.preventDefault();
-          void setWorkspaceMode("3d");
+          void setWorkspaceMode("project");
         }
 
         if (event.altKey && event.key === "2") {
           event.preventDefault();
-          void setWorkspaceMode("2d");
+          void setWorkspaceMode("map");
         }
 
         if (event.altKey && event.key === "3") {
           event.preventDefault();
-          void setWorkspaceMode("map");
+          void setWorkspaceMode("3d");
+        }
+
+        if (event.altKey && event.key === "4") {
+          event.preventDefault();
+          void setWorkspaceMode("2d");
+        }
+
+        if (event.altKey && event.key === "5") {
+          event.preventDefault();
+          void setWorkspaceMode("lv");
         }
 
         if (event.key === "Escape") {
@@ -1328,29 +2142,29 @@ function wireHotkeys() {
 }
 
 
-/* ───────────────────────── Upload / refresh glue ───────────────────────── */
+/* ───────────────────────── Refresh glue ───────────────────────── */
 
-function wirePostUploadRefresh() {
+function wireRefreshEvents() {
   try {
-    if (window.__VECTOPLAN_POST_UPLOAD_REFRESH_WIRED__) return;
-    window.__VECTOPLAN_POST_UPLOAD_REFRESH_WIRED__ = true;
-
-    window.addEventListener("chat:uploaded", () => {
-      try {
-        void refreshVersionsUI();
-        void refreshTranscriptIncremental();
-      } catch (_) {}
-    });
-
-    window.addEventListener("chat:refresh", () => {
-      try {
-        void refreshTranscriptIncremental();
-      } catch (_) {}
-    });
+    if (window.__VECTOPLAN_REFRESH_EVENTS_WIRED__) return;
+    window.__VECTOPLAN_REFRESH_EVENTS_WIRED__ = true;
 
     window.addEventListener("versions:refresh", () => {
       try {
         void refreshVersionsUI();
+      } catch (_) {}
+    });
+
+    window.addEventListener("project-sidebar:refresh", () => {
+      try {
+        refreshProjectSidebar();
+      } catch (_) {}
+    });
+
+    window.addEventListener("vectoplan:workspace:refresh", () => {
+      try {
+        const mode = normalizeMode(uiState.workspaceMode || dataValue("workspaceMode", "project"));
+        void setWorkspaceMode(mode, { persist: false });
       } catch (_) {}
     });
   } catch (_) {}
@@ -1365,13 +2179,39 @@ function exposeWorkspaceDebugApi() {
 
     window.__VECTOPLAN_WORKSPACE_DEBUG__ = {
       cfg,
+      appRoot,
+      conversationId,
+      project: {
+        current: currentProject,
+        id: projectId,
+        publicId: projectPublicId,
+        exists: projectExists,
+        configured: projectConfigured,
+        toolsEnabled: projectToolsEnabled,
+        url: projectUrl,
+        syncGating: syncWorkspaceGating,
+        updateConfig: updateAppConfigProject,
+      },
+      projectUrl,
       editorUrl,
       mapUrl,
+      twoDPageUrl,
+      lvUrl,
+      adminUrl,
       setWorkspaceMode,
       viewerFrame,
       isUnsafeLegacyTarget,
       stableLocalUrl,
       cacheBustLocalUrl,
+      projectSidebar: {
+        root: projectSidebarRoot,
+        api: projectSidebarApi,
+        dataApi: projectSidebarDataApi,
+        resizeApi: projectSidebarResizeApi,
+        controller: getProjectSidebarController,
+        snapshot: projectSidebarSnapshot,
+        refresh: refreshProjectSidebar,
+      },
     };
   } catch (_) {}
 }
@@ -1385,23 +2225,19 @@ async function boot() {
 
   safeCall("exposeWorkspaceDebugApi", exposeWorkspaceDebugApi);
 
-  safeCall("initChatLayout", () => initChatLayout({ breakpointPx: 900 }));
+  safeCall("initProjectSidebar", initProjectSidebar);
 
   safeCall("wireThemeToggle", wireThemeToggle);
   safeCall("wireGlobalStatus", wireGlobalStatus);
   safeCall("wireHotkeys", wireHotkeys);
 
+  safeCall("wireProjectEventBridge", wireProjectEventBridge);
   safeCall("wireWorkspaceToolbar", wireWorkspaceToolbar);
   safeCall("wireVersionsDropdown", wireVersionsDropdown);
 
-  safeCall("wireComposer", wireComposer);
-  safeCall("wireTranscriptRefresh", wireTranscriptRefresh);
   safeCall("wire2dEventBridge", wire2dEventBridge);
   safeCall("wireEditorEventBridge", wireEditorEventBridge);
-  safeCall("wirePostUploadRefresh", wirePostUploadRefresh);
-
-  await safeAwait("loadTemplatesIndex", loadTemplatesIndex);
-  await safeAwait("loadTranscript", loadTranscript);
+  safeCall("wireRefreshEvents", wireRefreshEvents);
 
   await safeAwait("applyInitialWorkspaceMode", applyInitialWorkspaceMode);
 
@@ -1410,6 +2246,7 @@ async function boot() {
       const items = await fetchVersionsRaw();
       setVersionCount(items.length);
       neutralizeVersionViewerActions();
+      syncWorkspaceGating({ fallbackToProject: false });
     })();
   });
 }

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from flask import Blueprint, Flask, current_app, jsonify, request
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -11,15 +11,17 @@ from config import Config
 from extensions import db, init_logging
 
 
-# ───────────────────────── Blueprint imports ─────────────────────────
+# ─────────────────────────────────────────────────────────────
+# Blueprint imports
+# ─────────────────────────────────────────────────────────────
 
 def _import_blueprint(import_path: str, attr_name: str = "bp") -> Optional[Blueprint]:
     """
     Defensive Blueprint importer.
 
-    This prevents one broken route module from making `from app import create_app`
-    fail completely. That matters during the current refactor because files are
-    being replaced one by one.
+    Prevents one broken route module from making `from app import create_app`
+    fail completely. This matters during the current refactor because files are
+    replaced one by one.
     """
     try:
         module_path, _, object_name = import_path.partition(":")
@@ -44,6 +46,11 @@ def _load_core_blueprints() -> Dict[str, Optional[Blueprint]]:
     No legacy Speckle/old-viewer blueprints are loaded here.
     """
     return {
+        # New project-first app shell.
+        "projects_api_bp": _import_blueprint("routes.projects_api:bp"),
+        "ui_projects_bp": _import_blueprint("routes.ui.projects:bp"),
+
+        # Existing shell/workspace/chat routes.
         "ui_chat_bp": _import_blueprint("routes.ui.chat:bp"),
         "ui_editor_bp": _import_blueprint("routes.ui.editor:ui_editor_bp"),
         "ui_2dviewer_bp": _import_blueprint("routes.ui.viewer2d:bp"),
@@ -65,14 +72,43 @@ def _load_optional_blueprints() -> Dict[str, Optional[Blueprint]]:
     }
 
 
-# ───────────────────────── Config / startup helpers ─────────────────────────
+# ─────────────────────────────────────────────────────────────
+# Config / startup helpers
+# ─────────────────────────────────────────────────────────────
+
+def _config_bool(app: Flask, key: str, default: bool = False) -> bool:
+    try:
+        value = app.config.get(key, default)
+
+        if isinstance(value, bool):
+            return value
+
+        text = str(value if value is not None else "").strip().lower()
+
+        if text in {"1", "true", "yes", "y", "on", "ja"}:
+            return True
+
+        if text in {"0", "false", "no", "n", "off", "nein"}:
+            return False
+
+        return default
+
+    except Exception:
+        return default
+
 
 def _apply_default_config(app: Flask) -> None:
     """
-    Apply safe defaults for the Speckle-free app shell.
+    Apply safe defaults for the Speckle-free app shell and new project layer.
     """
     app.config.setdefault("KEEP_VERSIONS_PER_PROJECT", 10)
     app.config.setdefault("MAX_CONTENT_LENGTH", 512 * 1024 * 1024)
+
+    # Project-management phase defaults.
+    app.config.setdefault("VECTOPLAN_DEFAULT_USER_ID", 1)
+    app.config.setdefault("VECTOPLAN_APP_AUTO_CREATE_ALL", True)
+    app.config.setdefault("VECTOPLAN_APP_ENSURE_DEFAULT_USER", True)
+    app.config.setdefault("VECTOPLAN_ALLOW_USER_HEADER_OVERRIDE", False)
 
     # Hard disable legacy 3D backend behavior.
     app.config["LEGACY_SPECKLE_ENABLED"] = False
@@ -94,6 +130,13 @@ def _apply_default_config(app: Flask) -> None:
     app.config.setdefault("VECTOPLAN_EDITOR_PUBLIC_URL", "http://localhost:5100")
     app.config.setdefault("VECTOPLAN_EDITOR_INTERNAL_URL", "http://vectoplan-editor:5000")
     app.config.setdefault("VECTOPLAN_EDITOR_ROUTE", "/editor")
+    app.config.setdefault("VECTOPLAN_EDITOR_EMBED_ENABLED", True)
+
+    # OpenLayer / Map iframe integration.
+    app.config.setdefault("OPENLAYER_PUBLIC_URL", "http://localhost:5190")
+    app.config.setdefault("OPENLAYER_INTERNAL_URL", "http://openlayer:8090")
+    app.config.setdefault("OPENLAYER_ROUTE", "/map")
+    app.config.setdefault("OPENLAYER_EMBED_ENABLED", True)
 
     # UI integrations.
     app.config.setdefault("CRAWLAB_PUBLIC_URL", "http://localhost:8080")
@@ -183,6 +226,13 @@ def _register_bp(app: Flask, blueprint: Optional[Blueprint], name: str) -> bool:
         return False
 
     try:
+        if blueprint.name in app.blueprints:
+            try:
+                app.logger.info("blueprint %s already registered; skipped duplicate", name)
+            except Exception:
+                pass
+            return True
+
         app.register_blueprint(blueprint)
         return True
 
@@ -192,6 +242,177 @@ def _register_bp(app: Flask, blueprint: Optional[Blueprint], name: str) -> bool:
         except Exception:
             pass
         return False
+
+
+def _import_all_models(app: Flask) -> Dict[str, Any]:
+    """
+    Import all SQLAlchemy models.
+
+    This is required before db.create_all() and useful for diagnostics.
+    """
+    status: Dict[str, Any] = {
+        "ok": False,
+        "model_count": 0,
+        "tables": [],
+        "error": None,
+    }
+
+    try:
+        import models
+
+        try:
+            if hasattr(models, "register_all_models"):
+                classes = models.register_all_models()
+            elif hasattr(models, "get_core_model_classes"):
+                classes = models.get_core_model_classes()
+            else:
+                classes = ()
+        except Exception:
+            classes = ()
+
+        try:
+            if hasattr(models, "get_model_import_status"):
+                model_status = models.get_model_import_status()
+                status.update(
+                    {
+                        "ok": bool(model_status.get("core_loaded", True)),
+                        "model_count": int(model_status.get("model_count") or 0),
+                        "tables": list(model_status.get("tables") or []),
+                        "optional_errors": dict(model_status.get("optional_errors") or {}),
+                    }
+                )
+            else:
+                status.update(
+                    {
+                        "ok": True,
+                        "model_count": len(tuple(classes or ())),
+                        "tables": [],
+                        "optional_errors": {},
+                    }
+                )
+        except Exception:
+            status.update(
+                {
+                    "ok": True,
+                    "model_count": len(tuple(classes or ())),
+                    "tables": [],
+                    "optional_errors": {},
+                }
+            )
+
+        return status
+
+    except Exception as ex:
+        try:
+            app.logger.exception("model import failed: %s", ex)
+        except Exception:
+            pass
+
+        status["error"] = f"{ex.__class__.__name__}: {ex}"
+        return status
+
+
+def _create_database_schema_if_configured(app: Flask) -> Dict[str, Any]:
+    """
+    Best-effort schema creation for local alpha development.
+
+    Important:
+    - db.create_all() creates missing tables only.
+    - It does not add missing columns to existing tables.
+    - If an old local DB already has the previous `projects` table, a reset or
+      migration is still required for the new Project columns.
+    """
+    result: Dict[str, Any] = {
+        "enabled": _config_bool(app, "VECTOPLAN_APP_AUTO_CREATE_ALL", True),
+        "ok": False,
+        "created": False,
+        "error": None,
+    }
+
+    if not result["enabled"]:
+        result["ok"] = True
+        return result
+
+    try:
+        with app.app_context():
+            _import_all_models(app)
+            db.create_all()
+
+        result["ok"] = True
+        result["created"] = True
+        return result
+
+    except Exception as ex:
+        try:
+            app.logger.exception("db.create_all failed: %s", ex)
+        except Exception:
+            pass
+
+        result["error"] = f"{ex.__class__.__name__}: {ex}"
+        return result
+
+
+def _ensure_default_user_if_configured(app: Flask) -> Dict[str, Any]:
+    """
+    Ensure placeholder AppUser(id=1) exists.
+
+    This is best-effort during startup. Project APIs also ensure it per request.
+    """
+    result: Dict[str, Any] = {
+        "enabled": _config_bool(app, "VECTOPLAN_APP_ENSURE_DEFAULT_USER", True),
+        "ok": False,
+        "user_id": None,
+        "error": None,
+    }
+
+    if not result["enabled"]:
+        result["ok"] = True
+        return result
+
+    try:
+        with app.app_context():
+            from services.current_user import ensure_default_user
+
+            user = ensure_default_user()
+            result["user_id"] = getattr(user, "id", None)
+            result["ok"] = user is not None
+
+        return result
+
+    except Exception as ex:
+        try:
+            app.logger.warning("ensure_default_user failed: %s", ex)
+        except Exception:
+            pass
+
+        result["error"] = f"{ex.__class__.__name__}: {ex}"
+        return result
+
+
+def _run_startup_database_tasks(app: Flask) -> None:
+    """
+    Run model import, optional create_all and default-user bootstrap.
+
+    Failure must not prevent the app from starting during refactor; routes will
+    report JSON errors if the DB is not ready.
+    """
+    try:
+        model_status = _import_all_models(app)
+        app.extensions["vectoplan_model_status"] = model_status
+    except Exception:
+        pass
+
+    try:
+        schema_status = _create_database_schema_if_configured(app)
+        app.extensions["vectoplan_schema_status"] = schema_status
+    except Exception:
+        pass
+
+    try:
+        user_status = _ensure_default_user_if_configured(app)
+        app.extensions["vectoplan_default_user_status"] = user_status
+    except Exception:
+        pass
 
 
 def _create_system_blueprint() -> Blueprint:
@@ -205,23 +426,42 @@ def _create_system_blueprint() -> Blueprint:
                 "service": "vectoplan-app",
                 "legacy_speckle_enabled": False,
                 "editor_integration": "iframe",
+                "project_management": True,
             }
         )
 
     @sys_bp.get("/ready")
     def ready():
-        return jsonify(
-            {
-                "status": "ready",
-                "service": "vectoplan-app",
-                "legacy_speckle_enabled": False,
-            }
-        )
+        payload: Dict[str, Any] = {
+            "status": "ready",
+            "service": "vectoplan-app",
+            "legacy_speckle_enabled": False,
+            "project_management": True,
+        }
+
+        try:
+            payload["models"] = dict(current_app.extensions.get("vectoplan_model_status") or {})
+        except Exception:
+            payload["models"] = {}
+
+        try:
+            payload["schema"] = dict(current_app.extensions.get("vectoplan_schema_status") or {})
+        except Exception:
+            payload["schema"] = {}
+
+        try:
+            payload["default_user"] = dict(current_app.extensions.get("vectoplan_default_user_status") or {})
+        except Exception:
+            payload["default_user"] = {}
+
+        return jsonify(payload)
 
     return sys_bp
 
 
-# ───────────────────────── App factory ─────────────────────────
+# ─────────────────────────────────────────────────────────────
+# App factory
+# ─────────────────────────────────────────────────────────────
 
 def create_app() -> Flask:
     app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -245,6 +485,15 @@ def create_app() -> Flask:
         except Exception:
             pass
 
+    # Import models / create missing tables / ensure placeholder user.
+    try:
+        _run_startup_database_tasks(app)
+    except Exception as ex:
+        try:
+            app.logger.warning("startup database tasks failed: %s", ex)
+        except Exception:
+            pass
+
     # Media directory.
     try:
         media_root = app.config.get("MEDIA_ROOT")
@@ -262,6 +511,11 @@ def create_app() -> Flask:
     # Core routes.
     core = _load_core_blueprints()
 
+    # New project-first routes should be available before legacy UI routes.
+    _register_bp(app, core.get("projects_api_bp"), "projects_api_bp")
+    _register_bp(app, core.get("ui_projects_bp"), "ui_projects_bp")
+
+    # Existing app shell / chat / workspace routes.
     _register_bp(app, core.get("ui_chat_bp"), "ui_chat_bp")
     _register_bp(app, core.get("ui_editor_bp"), "ui_editor_bp")
     _register_bp(app, core.get("chat_api_bp"), "chat_api_bp")
@@ -315,7 +569,12 @@ def create_app() -> Flask:
 
             try:
                 path = str(request.path or "")
+
                 if path == "/ui/editor":
+                    allow_embed = True
+                elif path == "/ui/project/new":
+                    allow_embed = True
+                elif path.startswith("/ui/project/") and path.endswith("/project"):
                     allow_embed = True
                 elif path.startswith("/ui/chat/") and path.endswith("/editor"):
                     allow_embed = True
@@ -340,6 +599,11 @@ def create_app() -> Flask:
 
             if not allow_embed and not csp_has_frame_ancestors:
                 resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+            elif allow_embed:
+                try:
+                    resp.headers.pop("X-Frame-Options", None)
+                except Exception:
+                    pass
 
         except Exception:
             try:
@@ -357,11 +621,18 @@ def create_app() -> Flask:
     @app.errorhandler(404)
     def not_found(error):
         try:
-            if request.path.startswith("/v1/") or request.path.startswith("/ui/"):
-                return jsonify({"error": "not found"}), 404
+            path = str(request.path or "")
+
+            if (
+                path.startswith("/v1/")
+                or path.startswith("/ui/")
+                or path.startswith("/project")
+            ):
+                return jsonify({"ok": False, "error": "not found", "code": "not_found"}), 404
+
             return error
         except Exception:
-            return jsonify({"error": "not found"}), 404
+            return jsonify({"ok": False, "error": "not found", "code": "not_found"}), 404
 
     @app.errorhandler(Exception)
     def internal_error(error: Exception):
@@ -371,11 +642,18 @@ def create_app() -> Flask:
             pass
 
         try:
-            if request.path.startswith("/v1/") or request.path.startswith("/ui/"):
-                return jsonify({"error": str(error)}), 500
-            return jsonify({"error": "internal error"}), 500
+            path = str(request.path or "")
+
+            if (
+                path.startswith("/v1/")
+                or path.startswith("/ui/")
+                or path.startswith("/project")
+            ):
+                return jsonify({"ok": False, "error": str(error), "code": "internal_error"}), 500
+
+            return jsonify({"ok": False, "error": "internal error", "code": "internal_error"}), 500
         except Exception:
-            return jsonify({"error": "internal error"}), 500
+            return jsonify({"ok": False, "error": "internal error", "code": "internal_error"}), 500
 
     return app
 

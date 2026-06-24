@@ -34,10 +34,6 @@ bp = Blueprint("ui_chat", __name__)
 # Constants
 # ─────────────────────────────────────────────────────────────
 
-# Speckle-free upload policy:
-# - DXF remains available for the 2D/CAD flow.
-# - 3D files are only stored as Blob + neutral local version.
-# - No automatic publish/import into any legacy backend.
 ALLOWED_EXTS = {
     ".dxf",
     ".ifc",
@@ -48,29 +44,22 @@ ALLOWED_EXTS = {
 }
 
 ALLOWED_MIMES = {
-    # Generic / fallback
     "application/octet-stream",
     "text/plain",
-    # IFC
     "model/ifc",
     "application/ifc",
     "application/x-ifc",
-    # OBJ
     "model/obj",
     "application/x-tgif",
-    # STL
     "model/stl",
     "application/sla",
     "model/x.stl-binary",
     "model/x.stl-ascii",
     "application/vnd.ms-pki.stl",
-    # GLTF / GLB
     "model/gltf+json",
     "model/gltf-binary",
     "application/gltf+json",
     "application/gltf-buffer",
-    "application/octet-stream",
-    # DXF
     "application/dxf",
     "application/x-dxf",
     "image/vnd.dxf",
@@ -250,9 +239,9 @@ def _cfg_text_list(keys: Sequence[str], default: Iterable[str]) -> List[str]:
 # Logging helpers
 # ─────────────────────────────────────────────────────────────
 
-def _log_warning(message: str, *args: Any) -> None:
+def _log_warning(message: str, *args: Any, **kwargs: Any) -> None:
     try:
-        current_app.logger.warning(message, *args)
+        current_app.logger.warning(message, *args, **kwargs)
     except Exception:
         pass
 
@@ -308,15 +297,6 @@ def _csp_join(values: Sequence[str]) -> str:
 
 
 def _app_frame_src_values() -> List[str]:
-    """
-    Browser destinations allowed inside the app workspace iframe.
-
-    This is the parent-side CSP frame-src/child-src contract.
-    It must include:
-    - self for LV/Admin/2D/local routes
-    - Editor public origin
-    - OpenLayer public origin
-    """
     try:
         configured = _cfg_text_list(
             (
@@ -373,12 +353,6 @@ def _app_frame_src_values() -> List[str]:
 
 
 def _frame_ancestors_values() -> List[str]:
-    """
-    Origins allowed to frame this app.
-
-    Normal use is top-level, but keeping this explicit avoids wildcard framing
-    and prepares controlled embedding during local diagnostics.
-    """
     try:
         return _cfg_text_list(
             (
@@ -438,14 +412,6 @@ def _apply_cache_headers(resp: Response, *, no_store: bool = False) -> None:
 
 
 def _apply_frame_headers(resp: Response, *, allow_embed: Optional[bool] = None, workspace_shell: bool = False) -> None:
-    """
-    Route-level frame policy.
-
-    Important:
-    - Never emits frame-ancestors *.
-    - The app shell receives frame-src/child-src for Editor/OpenLayer.
-    - Same-origin local pages keep X-Frame-Options:SAMEORIGIN unless embed is explicit.
-    """
     try:
         if allow_embed is None:
             allow_embed = request.args.get("allow_embed") == "1" or request.args.get("embed") == "1"
@@ -549,10 +515,42 @@ def _safe_quote(value: Any) -> str:
         return ""
 
 
+def _safe_str(value: Any, default: str = "", max_len: int = 240) -> str:
+    try:
+        text = str(value if value is not None else default).strip()
+
+        if not text:
+            text = default
+
+        if max_len > 0 and len(text) > max_len:
+            return text[:max_len]
+
+        return text
+
+    except Exception:
+        return default
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    try:
+        if isinstance(value, bool):
+            return value
+
+        text = str(value if value is not None else "").strip().lower()
+
+        if text in {"1", "true", "yes", "y", "on", "ja"}:
+            return True
+
+        if text in {"0", "false", "no", "n", "off", "nein"}:
+            return False
+
+        return default
+
+    except Exception:
+        return default
+
+
 def _validate_filetype(filename: str, mimetype: Optional[str]) -> Tuple[bool, str]:
-    """
-    Validate file type by extension first, then MIME fallback.
-    """
     try:
         ext = _ext_of(filename)
 
@@ -582,9 +580,6 @@ def _validate_filetype(filename: str, mimetype: Optional[str]) -> Tuple[bool, st
 
 
 def _file_urls(file_id: str) -> Dict[str, str]:
-    """
-    Relative URLs for frontend compatibility.
-    """
     try:
         file_id_safe = quote(str(file_id), safe="")
         return {
@@ -603,24 +598,327 @@ def _url_for_safe(endpoint: str, fallback: str, **values: Any) -> str:
         return fallback
 
 
-def _editor_url_for_chat(chat_id: str) -> str:
-    """
-    Local app route used as iframe target for the 3D workspace.
+# ─────────────────────────────────────────────────────────────
+# Project-shell compatibility helpers
+# ─────────────────────────────────────────────────────────────
 
-    This does not build project/world structures. It only points the iframe to
-    the editor integration route created in routes/ui/editor.py.
+def _project_root_url() -> str:
+    try:
+        return _url_for_safe("ui_projects.project_root", "/", _external=False)
+    except Exception:
+        return "/"
+
+
+def _project_public_url(project_identifier: Any = None) -> str:
+    try:
+        value = _safe_str(project_identifier, "", 160)
+
+        if not value or value == "new":
+            return "/project=new"
+
+        return f"/project={_safe_quote(value)}"
+
+    except Exception:
+        return "/project=new"
+
+
+def _project_identifier_from_request() -> str:
+    try:
+        candidates = (
+            request.args.get("project"),
+            request.args.get("project_id"),
+            request.args.get("projectPublicId"),
+            request.args.get("project_public_id"),
+            request.args.get("p"),
+        )
+
+        for candidate in candidates:
+            value = _safe_str(candidate, "", 160)
+            if value:
+                return value
+
+        return ""
+
+    except Exception:
+        return ""
+
+
+def _legacy_shell_enabled() -> bool:
     """
+    Diagnostic escape hatch.
+
+    Default behavior of /ui/chat-3d is redirect to the new project shell.
+    If needed during local debugging, set:
+    - ?legacy_shell=1
+    or config:
+    - VECTOPLAN_ALLOW_LEGACY_CHAT_3D_SHELL=true
+    """
+    try:
+        if request.args.get("legacy_shell") == "1" or request.args.get("legacy") == "1":
+            return True
+
+        return _cfg_bool("VECTOPLAN_ALLOW_LEGACY_CHAT_3D_SHELL", False)
+
+    except Exception:
+        return False
+
+
+def _get_current_user_id_safe() -> int:
+    try:
+        from services.current_user import get_current_user_id
+
+        return int(get_current_user_id())
+    except Exception:
+        return 1
+
+
+def _current_user_context_safe() -> Dict[str, Any]:
+    try:
+        from services.current_user import get_current_user_context
+
+        ctx = get_current_user_context(ensure=True)
+        if hasattr(ctx, "to_dict"):
+            return ctx.to_dict()
+
+        return dict(ctx)
+    except Exception:
+        return {
+            "id": 1,
+            "user_id": 1,
+            "public_id": "u_demo_1",
+            "display_name": "Demo User",
+            "is_placeholder": True,
+            "source": "fallback",
+        }
+
+
+def _project_for_conversation(chat_id: str) -> Any:
+    try:
+        from services.project_service import get_project_by_conversation_id
+
+        project = get_project_by_conversation_id(chat_id)
+        if project is not None:
+            return project
+    except Exception:
+        pass
+
+    try:
+        from models import Project
+
+        return Project.query.filter_by(conversation_id=chat_id).one_or_none()
+    except Exception:
+        return None
+
+
+def _project_public_id_for_project(project: Any) -> str:
+    try:
+        if project is None:
+            return ""
+
+        return (
+            _safe_str(getattr(project, "public_id", None), "", 160)
+            or _safe_str(getattr(project, "id", None), "", 160)
+        )
+    except Exception:
+        return ""
+
+
+def _project_redirect_target_for_chat(chat_id: Optional[str]) -> str:
+    try:
+        explicit_project = _project_identifier_from_request()
+        if explicit_project:
+            return _project_public_url(explicit_project)
+
+        if chat_id:
+            project = _project_for_conversation(chat_id)
+            project_public_id = _project_public_id_for_project(project)
+
+            if project_public_id:
+                return _project_public_url(project_public_id)
+
+        return _project_root_url()
+
+    except Exception:
+        return "/"
+
+
+def _project_payload_for_chat(chat_id: str) -> Dict[str, Any]:
+    try:
+        project = _project_for_conversation(chat_id)
+        user_id = _get_current_user_id_safe()
+
+        if project is not None:
+            try:
+                from services.project_service import serialize_project
+
+                return serialize_project(
+                    project,
+                    user_id=user_id,
+                    include_permissions=True,
+                    include_service_links=True,
+                    include_versions=False,
+                    include_embed_policy=False,
+                )
+            except Exception:
+                pass
+
+            public_id = _project_public_id_for_project(project)
+
+            return {
+                "id": getattr(project, "id", None),
+                "project_id": getattr(project, "id", None),
+                "public_id": public_id,
+                "name": getattr(project, "name", None) or "Projekt",
+                "description": getattr(project, "description", None) or "",
+                "address_text": getattr(project, "address_text", None) or "",
+                "conversation_id": getattr(project, "conversation_id", chat_id),
+                "setup_status": getattr(project, "setup_status", "draft"),
+                "is_configured": bool(getattr(project, "is_configured", False)),
+                "url": _project_public_url(public_id),
+                "href": _project_public_url(public_id),
+                "paths": {
+                    "projectPagePath": f"/ui/project/{_safe_quote(public_id)}/project" if public_id else "/ui/project/new",
+                    "projectUrl": f"/ui/project/{_safe_quote(public_id)}/project" if public_id else "/ui/project/new",
+                    "projectPublicUrl": _project_public_url(public_id),
+                },
+            }
+
+        return {
+            "isNew": True,
+            "is_new": True,
+            "id": None,
+            "project_id": None,
+            "public_id": "new",
+            "name": "",
+            "display_name": "Neues Projekt",
+            "description": "",
+            "conversation_id": chat_id,
+            "setup_status": "draft",
+            "is_configured": False,
+            "url": "/project=new",
+            "href": "/project=new",
+            "paths": {
+                "projectPagePath": "/ui/project/new",
+                "projectUrl": "/ui/project/new",
+                "projectPublicUrl": "/project=new",
+            },
+            "access": {
+                "role": "owner",
+                "permissions": {
+                    "view": True,
+                    "edit": True,
+                    "manage": True,
+                    "delete": True,
+                    "transfer": True,
+                    "embed": True,
+                },
+                "can_view": True,
+                "can_edit": True,
+                "can_manage": True,
+                "can_delete": True,
+                "can_transfer": True,
+                "can_embed": True,
+                "is_owner": True,
+                "source": "legacy_chat_shell",
+            },
+        }
+
+    except Exception:
+        return {
+            "isNew": True,
+            "is_new": True,
+            "public_id": "new",
+            "name": "",
+            "display_name": "Neues Projekt",
+            "conversation_id": chat_id,
+            "setup_status": "draft",
+            "is_configured": False,
+            "url": "/project=new",
+            "href": "/project=new",
+            "paths": {
+                "projectPagePath": "/ui/project/new",
+                "projectUrl": "/ui/project/new",
+                "projectPublicUrl": "/project=new",
+            },
+        }
+
+
+def _project_sidebar_context_for_chat(chat_id: str, project_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    try:
+        payload = project_payload if isinstance(project_payload, dict) else {}
+        user_id = _get_current_user_id_safe()
+        items: List[Dict[str, Any]] = []
+
+        try:
+            from services.project_service import list_project_sidebar_items
+
+            items = list_project_sidebar_items(user_id=user_id, include_public=True, limit=200)
+        except Exception:
+            items = []
+
+        project_public_id = _safe_str(
+            payload.get("public_id") or payload.get("publicId") or payload.get("project_public_id"),
+            "new",
+            160,
+        )
+
+        project_name = _safe_str(
+            payload.get("name") or payload.get("display_name") or payload.get("displayName"),
+            "Neues Projekt",
+            200,
+        )
+
+        project_subtitle = _safe_str(
+            payload.get("address_text") or payload.get("setup_status"),
+            "Projekt definieren",
+            240,
+        )
+
+        return {
+            "enabled": True,
+            "currentChatId": chat_id,
+            "currentProjectId": project_public_id,
+            "current_project_id": project_public_id,
+            "currentTitle": project_name,
+            "currentSubtitle": project_subtitle,
+            "defaultCollapsed": False,
+            "defaultWidth": 280,
+            "minWidth": 220,
+            "maxWidth": 420,
+            "collapsedWidth": 64,
+            "storageKey": "vectoplan.projectSidebar.v1",
+            "routeBase": "/",
+            "apiPath": "/v1/projects/sidebar",
+            "createProjectUrl": "/project=new",
+            "items": items,
+        }
+
+    except Exception:
+        return {
+            "enabled": True,
+            "currentChatId": chat_id,
+            "currentProjectId": "new",
+            "currentTitle": "Neues Projekt",
+            "currentSubtitle": "Projekt definieren",
+            "storageKey": "vectoplan.projectSidebar.v1",
+            "routeBase": "/",
+            "apiPath": "/v1/projects/sidebar",
+            "createProjectUrl": "/project=new",
+            "items": [],
+        }
+
+
+# ─────────────────────────────────────────────────────────────
+# Workspace URL helpers
+# ─────────────────────────────────────────────────────────────
+
+def _editor_url_for_chat(chat_id: str) -> str:
     chat_id_safe = _safe_quote(chat_id)
     fallback = f"/ui/chat/{chat_id_safe}/editor"
     return _url_for_safe("ui_editor.editor_iframe", fallback, chat_id=chat_id)
 
 
 def _map_url_for_chat(chat_id: str) -> str:
-    """
-    Local app route used as iframe target for the Map workspace.
-
-    The route itself redirects to the browser-facing OpenLayer public URL.
-    """
     chat_id_safe = _safe_quote(chat_id)
     fallback = f"/ui/chat/{chat_id_safe}/map"
     return _url_for_safe("ui_map.map_page", fallback, chat_id=chat_id)
@@ -669,24 +967,30 @@ def _state_selection_url_for_chat(chat_id: str) -> str:
 
 
 def _workspace_context_for_chat(chat_id: str) -> Dict[str, Any]:
-    """
-    Single source of truth for app-shell workspace URLs.
-
-    The template may use only some of these values now, but providing the full
-    shape makes the next chat_viewer.html/main.js step safer.
-    """
     try:
         editor_url = _editor_url_for_chat(chat_id)
         map_url = _map_url_for_chat(chat_id)
+        project_payload = _project_payload_for_chat(chat_id)
+
+        project_public_id = _safe_str(project_payload.get("public_id"), "new", 160)
+        project_page_path = "/ui/project/new" if project_public_id == "new" else f"/ui/project/{_safe_quote(project_public_id)}/project"
+        project_public_url = _project_public_url(project_public_id)
 
         return {
             "chat_id": str(chat_id),
-            "default_mode": "3d",
-            "workspace_mode": "editor",
+            "project_public_id": project_public_id,
+            "default_mode": "project",
+            "workspace_mode": "project",
+            "project_url": project_page_path,
+            "project_public_url": project_public_url,
+            "project_configured": _safe_bool(project_payload.get("is_configured"), False),
             "editor_url": editor_url,
             "viewer_url": editor_url,
             "map_url": map_url,
             "paths": {
+                "projectPagePath": project_page_path,
+                "projectUrl": project_page_path,
+                "projectPublicUrl": project_public_url,
                 "editorPagePath": editor_url,
                 "initialEditorUrl": editor_url,
                 "viewerJsonPath": _viewer_json_url_for_chat(chat_id),
@@ -715,14 +1019,22 @@ def _workspace_context_for_chat(chat_id: str) -> Dict[str, Any]:
         chat_id_safe = _safe_quote(chat_id)
         editor_url = f"/ui/chat/{chat_id_safe}/editor"
         map_url = f"/ui/chat/{chat_id_safe}/map"
+
         return {
             "chat_id": str(chat_id),
-            "default_mode": "3d",
-            "workspace_mode": "editor",
+            "project_public_id": "new",
+            "default_mode": "project",
+            "workspace_mode": "project",
+            "project_url": "/ui/project/new",
+            "project_public_url": "/project=new",
+            "project_configured": False,
             "editor_url": editor_url,
             "viewer_url": editor_url,
             "map_url": map_url,
             "paths": {
+                "projectPagePath": "/ui/project/new",
+                "projectUrl": "/ui/project/new",
+                "projectPublicUrl": "/project=new",
                 "editorPagePath": editor_url,
                 "initialEditorUrl": editor_url,
                 "viewerJsonPath": f"/ui/chat/{chat_id_safe}/viewer.json",
@@ -740,6 +1052,10 @@ def _workspace_context_for_chat(chat_id: str) -> Dict[str, Any]:
         }
 
 
+# ─────────────────────────────────────────────────────────────
+# Version / upload helpers
+# ─────────────────────────────────────────────────────────────
+
 def _record_file_version_safe(
     *,
     conv: Conversation,
@@ -748,13 +1064,6 @@ def _record_file_version_safe(
     blob: Optional[Blob],
     meta: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """
-    Store a local version entry without Speckle metadata.
-
-    This is deliberately defensive because versioning.py is transitional.
-    If an older signature is still present, compatibility kwargs are passed as
-    None only, never as real Speckle data.
-    """
     try:
         from versioning import prune, record_version
 
@@ -891,11 +1200,6 @@ def _post_start_card_if_missing(conv: Conversation) -> None:
 
 
 def _uploads_disabled() -> bool:
-    """
-    UI upload switch.
-
-    VIEW_ONLY_MODE or DISABLE_UI_UPLOADS disables UI uploads completely.
-    """
     try:
         return bool(current_app.config.get("VIEW_ONLY_MODE")) or bool(
             current_app.config.get("DISABLE_UI_UPLOADS")
@@ -984,7 +1288,7 @@ def _get_or_create_conversation(chat_id: Optional[str]) -> Optional[Conversation
 
 @bp.get("/ui")
 def ui_root():
-    return redirect(url_for("ui_chat.chat_page"))
+    return redirect(_project_root_url(), code=302)
 
 
 @bp.get("/ui/chat")
@@ -1012,50 +1316,56 @@ def chat_page():
 @bp.get("/ui/chat-3d")
 def chat_viewer_page():
     """
-    Central chat + workspace shell.
+    Legacy entry for the old chat/workspace shell.
 
-    Speckle-free behavior:
-    - create/load Conversation
-    - post start card if missing
-    - render chat_viewer.html
-    - provide the local editor iframe route as viewer_url compatibility value
-    - provide the local map iframe route as map_url
-
-    No ensure_and_refresh.
-    No old viewer_url.
-    No old external viewer.
-    No placeholder model.
+    New behavior:
+    - default redirects to the project-first shell:
+        /project=<project_public_id> if chat_id is linked to a project
+        / otherwise
+    - diagnostic legacy rendering is still available with ?legacy_shell=1.
     """
     chat_id = request.args.get("chat_id")
+
+    if not _legacy_shell_enabled():
+        return redirect(_project_redirect_target_for_chat(chat_id), code=302)
+
     conv = Conversation.query.get(chat_id) if chat_id else None
 
     if conv is None:
         conv = _get_or_create_conversation(chat_id)
 
         if conv is None:
-            return redirect(url_for("ui_chat.chat_viewer_page"), code=302)
+            return redirect(_project_root_url(), code=302)
 
         _post_start_card_if_missing(conv)
-        return redirect(url_for("ui_chat.chat_viewer_page", chat_id=conv.id), code=302)
+        return redirect(url_for("ui_chat.chat_viewer_page", chat_id=conv.id, legacy_shell=1), code=302)
 
     try:
         workspace = _workspace_context_for_chat(conv.id)
+        project_payload = _project_payload_for_chat(conv.id)
+        project_sidebar = _project_sidebar_context_for_chat(conv.id, project_payload)
+
         editor_url = workspace["editor_url"]
         map_url = workspace["map_url"]
+        project_url = workspace.get("project_url") or workspace.get("paths", {}).get("projectPagePath") or "/ui/project/new"
 
         resp = make_response(
             render_template(
                 "chat_viewer.html",
                 chat_id=conv.id,
-                viewer_url=editor_url,
+                viewer_url=project_url,
                 editor_url=editor_url,
                 initial_editor_url=editor_url,
                 map_url=map_url,
                 initial_map_url=map_url,
-                default_mode=workspace.get("default_mode", "3d"),
-                workspace_mode=workspace.get("workspace_mode", "editor"),
+                default_mode="project",
+                workspace_mode="project",
                 workspace=workspace,
                 workspace_paths=workspace.get("paths", {}),
+                project=project_payload,
+                current_project=project_payload,
+                current_user=_current_user_context_safe(),
+                project_sidebar=project_sidebar,
             )
         )
 
@@ -1068,9 +1378,6 @@ def chat_viewer_page():
 
 @bp.get("/ui/chat/<chat_id>/lv")
 def lv_page(chat_id: str):
-    """
-    LV iframe target.
-    """
     try:
         conv = Conversation.query.get(chat_id)
 
@@ -1087,9 +1394,6 @@ def lv_page(chat_id: str):
 
 @bp.get("/ui/chat/<chat_id>/admin")
 def admin_page(chat_id: str):
-    """
-    Admin iframe target.
-    """
     try:
         conv = Conversation.query.get(chat_id)
 
@@ -1110,12 +1414,6 @@ def admin_page(chat_id: str):
 
 @bp.get("/ui/chat/<chat_id>/viewer.json")
 def viewer_json(chat_id: str):
-    """
-    Backwards-compatible JSON endpoint for the existing frontend.
-
-    It no longer returns Speckle or old viewer information.
-    The 3D target is the local editor iframe route.
-    """
     conv = Conversation.query.get(chat_id)
 
     if not conv:
@@ -1123,25 +1421,31 @@ def viewer_json(chat_id: str):
 
     try:
         workspace = _workspace_context_for_chat(conv.id)
+        project_payload = _project_payload_for_chat(conv.id)
+
         editor_url = workspace["editor_url"]
         map_url = workspace["map_url"]
+        project_url = workspace.get("project_url") or workspace.get("paths", {}).get("projectPagePath") or "/ui/project/new"
 
         payload = {
             "ok": True,
             "chat_id": conv.id,
-            "mode": "editor",
-            "workspace_mode": "editor",
-            "default_mode": "3d",
-            "viewer_url": editor_url,
-            "raw_viewer_url": editor_url,
+            "project": project_payload,
+            "mode": "project",
+            "workspace_mode": "project",
+            "default_mode": "project",
+            "project_url": project_url,
+            "project_public_url": workspace.get("project_public_url") or "/project=new",
+            "viewer_url": project_url,
+            "raw_viewer_url": project_url,
             "editor_url": editor_url,
             "map_url": map_url,
             "initial_editor_url": editor_url,
             "initial_map_url": map_url,
             "paths": workspace.get("paths", {}),
             "viewer_selection": {
-                "mode": "editor",
-                "workspace_mode": "3d",
+                "mode": "project",
+                "workspace_mode": "project",
                 "legacy_3d_backend": False,
             },
             "services": {
@@ -1160,6 +1464,7 @@ def viewer_json(chat_id: str):
             },
             "legacy_speckle": False,
             "legacy_3d_backend": False,
+            "project_first": True,
         }
 
         resp = jsonify(payload)
@@ -1207,9 +1512,6 @@ def versions_json(chat_id: str):
 
 @bp.get("/ui/templates.json")
 def templates_json():
-    """
-    Lightweight template list for the frontend.
-    """
     try:
         items = msg.list_templates() or []
         slim = []
@@ -1218,7 +1520,6 @@ def templates_json():
             try:
                 key = item.get("key")
 
-                # Do not expose old Speckle cards to the UI.
                 if str(key or "") == "speckle_viewer":
                     continue
 
@@ -1253,20 +1554,6 @@ def templates_json():
 
 @bp.post("/ui/chat/<chat_id>/upload")
 def ui_upload(chat_id: str):
-    """
-    Multipart UI upload.
-
-    Speckle-free behavior:
-    - validate extension/MIME
-    - persist file as Blob
-    - record local neutral version when versioning.py is available
-    - for DXF, expose the existing 2D route
-    - for 3D, return stored_only=True and editor_url
-
-    No upload to Speckle.
-    No old Vectoplan server publish.
-    No viewer_selection with project/model/version IDs.
-    """
     if _uploads_disabled():
         payload = {
             "ok": False,
@@ -1400,3 +1687,6 @@ def ui_upload(chat_id: str):
     resp = jsonify(body)
     _finalize_json_response(resp, no_store=True)
     return resp, status
+
+
+__all__ = ["bp"]

@@ -25,9 +25,14 @@ bp = Blueprint("ui_map", __name__)
 
 _STYLE_RE = re.compile(r"^[a-z0-9\-]+/[a-z0-9\-\.]+$", re.IGNORECASE)
 _SPLIT_RE = re.compile(r"[\s,;]+")
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,179}$")
+_SAFE_QUERY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,511}$")
 
 _TRUE_VALUES = frozenset({"1", "true", "t", "yes", "y", "on", "ja"})
 _FALSE_VALUES = frozenset({"0", "false", "f", "no", "n", "off", "nein"})
+
+MAX_ID_LENGTH = 180
+MAX_QUERY_VALUE_LENGTH = 512
 
 # Browser-facing default. This must be the published host port.
 DEFAULT_OPENLAYER_PUBLIC_URL = "http://localhost:5190"
@@ -35,13 +40,22 @@ DEFAULT_OPENLAYER_PUBLIC_URL = "http://localhost:5190"
 # Docker-internal default. This must not be sent to the browser as iframe URL.
 DEFAULT_OPENLAYER_INTERNAL_URL = "http://openlayer:8090"
 
-# Known legacy/wrong browser targets that appeared during the iframe integration.
 LEGACY_OPENLAYER_BROWSER_URLS = frozenset(
     {
         "http://localhost:8090",
         "http://127.0.0.1:8090",
         "http://openlayer:8090",
         "http://vectoplan-openlayer:8090",
+        "http://server-openlayer:8090",
+    }
+)
+
+DOCKER_INTERNAL_OPENLAYER_HOSTS = frozenset(
+    {
+        "openlayer",
+        "vectoplan-openlayer",
+        "server-openlayer",
+        "vectoplan_openlayer",
     }
 )
 
@@ -96,7 +110,27 @@ MAP_FORWARD_QUERY_KEYS = {
     "dataset",
     "layer",
     "mode",
+    "view",
+    "tool",
     "r",
+    "debug",
+
+    # Explicit app/project refs accepted from URL, but authoritative project
+    # context below overwrites these when it is resolved from the app DB.
+    "project",
+    "project_id",
+    "project_public_id",
+    "app_project_id",
+    "app_project_public_id",
+    "app_project_db_id",
+    "conversation_id",
+
+    # Explicit microservice refs.
+    "chunk_project_id",
+    "chunk_world_id",
+    "world_id",
+    "plan2d_id",
+    "lv_id",
 }
 
 
@@ -252,13 +286,6 @@ def _cache_headers(resp: Response, *, strong: bool = False) -> Response:
 
 
 def _frame_ancestors_value() -> str:
-    """
-    CSP frame-ancestors for app-side iframe entry routes.
-
-    This route is same-origin to the app first and then redirects to OpenLayer.
-    It still receives explicit frame headers to avoid global SAMEORIGIN headers
-    interfering with the app shell.
-    """
     try:
         raw = _cfg_first(
             [
@@ -287,12 +314,6 @@ def _frame_ancestors_value() -> str:
 
 
 def _apply_frame_headers(resp: Response, *, allow_embed: bool = True) -> Response:
-    """
-    Apply conservative frame headers.
-
-    Never uses frame-ancestors '*'. The actual OpenLayer page must also allow
-    framing in its own service when /map?embed=1 is requested.
-    """
     try:
         if allow_embed:
             resp.headers["Content-Security-Policy"] = f"frame-ancestors {_frame_ancestors_value()}"
@@ -431,9 +452,9 @@ def _cfg_list(key: str, default: Sequence[str]) -> List[str]:
 # Generic helpers
 # ─────────────────────────────────────────────────────────────
 
-def _log_warning(message: str, *args: Any) -> None:
+def _log_warning(message: str, *args: Any, **kwargs: Any) -> None:
     try:
-        current_app.logger.warning(message, *args)
+        current_app.logger.warning(message, *args, **kwargs)
     except Exception:
         pass
 
@@ -459,6 +480,25 @@ def _clean_text(value: Any, default: str = "", max_len: int = 500) -> str:
             return text[:max_len]
 
         return text
+
+    except Exception:
+        return default
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    try:
+        if isinstance(value, bool):
+            return value
+
+        text = str(value if value is not None else "").strip().lower()
+
+        if text in _TRUE_VALUES:
+            return True
+
+        if text in _FALSE_VALUES:
+            return False
+
+        return default
 
     except Exception:
         return default
@@ -514,25 +554,60 @@ def _is_docker_internal_url(value: str) -> bool:
     try:
         parsed = urlsplit(value)
         host = str(parsed.hostname or "").strip().lower()
-
-        return host in {
-            "openlayer",
-            "vectoplan-openlayer",
-            "server-openlayer",
-        }
-
+        return host in DOCKER_INTERNAL_OPENLAYER_HOSTS
     except Exception:
         return False
 
 
-def _safe_openlayer_public_url() -> str:
-    """
-    Return the browser-facing OpenLayer URL.
+def _sanitize_id(value: Any, *, label: str = "id") -> str:
+    text = str(value or "").strip()
 
-    This intentionally repairs stale config values such as http://localhost:8090.
-    Port 8090 is the container port, not the browser-facing mapped port in the
-    local VECTOPLAN stack.
-    """
+    if not text:
+        raise ValueError(f"{label} fehlt.")
+
+    if len(text) > MAX_ID_LENGTH:
+        raise ValueError(f"{label} ist zu lang.")
+
+    if not _SAFE_ID_RE.match(text):
+        raise ValueError(f"{label} enthält ungültige Zeichen.")
+
+    return text
+
+
+def _safe_optional_id(value: Any) -> str:
+    try:
+        text = str(value if value is not None else "").strip()
+
+        if not text:
+            return ""
+
+        return _sanitize_id(text, label="id")
+
+    except Exception:
+        return ""
+
+
+def _sanitize_query_value(key: str, value: Any) -> str:
+    text = str(value or "").strip()
+
+    if not text:
+        return ""
+
+    if len(text) > MAX_QUERY_VALUE_LENGTH:
+        return text[:MAX_QUERY_VALUE_LENGTH]
+
+    if key in {"debug", "readonly", "embed"}:
+        return "1" if text.lower() in _TRUE_VALUES else "0"
+
+    if key in MAP_FORWARD_QUERY_KEYS:
+        if not _SAFE_QUERY_RE.match(text):
+            return ""
+        return text
+
+    return text
+
+
+def _safe_openlayer_public_url() -> str:
     configured = _cfg_first(
         [
             "OPENLAYER_PUBLIC_URL",
@@ -607,13 +682,6 @@ def _safe_openlayer_route() -> str:
 
 
 def _join_public_url(base: str, route: str) -> str:
-    """
-    Join public base URL and route.
-
-    Supports both:
-    - base=http://localhost:5190, route=/map
-    - base=http://localhost:5190/map, route=/map
-    """
     try:
         normalized_base = _normalize_url_base(base, DEFAULT_OPENLAYER_PUBLIC_URL)
         normalized_route = _normalize_path(route, DEFAULT_OPENLAYER_ROUTE)
@@ -631,11 +699,6 @@ def _join_public_url(base: str, route: str) -> str:
 
 
 def _ensure_conversation(chat_id: Optional[str]) -> Conversation:
-    """
-    Return an existing conversation or create one.
-
-    Kept for compatibility with existing UI iframe routes.
-    """
     try:
         if chat_id:
             conv = Conversation.query.get(str(chat_id))
@@ -658,8 +721,217 @@ def _ensure_conversation(chat_id: Optional[str]) -> Conversation:
         abort(404, description="conversation not available")
 
 
-def _get_default_center() -> List[float]:
+# ─────────────────────────────────────────────────────────────
+# Project context helpers
+# ─────────────────────────────────────────────────────────────
+
+def _project_identifier_from_request() -> str:
     try:
+        candidates = (
+            request.args.get("app_project_id"),
+            request.args.get("app_project_public_id"),
+            request.args.get("project_public_id"),
+            request.args.get("project"),
+            request.args.get("project_id"),
+            request.args.get("p"),
+        )
+
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if not value:
+                continue
+            return _sanitize_id(value, label="project_identifier")
+
+        return ""
+
+    except Exception:
+        return ""
+
+
+def _resolve_project_context(
+    *,
+    chat_id: Optional[str],
+    project_identifier: Optional[str],
+) -> Dict[str, Any]:
+    """
+    Resolve app Project references best-effort.
+
+    The returned context separates:
+    - app project IDs: app_project_id / app_project_public_id
+    - chunk references: chunk_project_id / chunk_world_id
+    - later service references: plan2d_id / lv_id
+
+    Empty dict is valid if project services are not available.
+    """
+    context: Dict[str, Any] = {}
+
+    try:
+        project = None
+        identifier = _safe_optional_id(project_identifier)
+
+        if identifier:
+            try:
+                from services.project_service import resolve_project
+
+                project = resolve_project(identifier)
+            except Exception:
+                project = None
+
+            if project is None:
+                try:
+                    from models import Project
+
+                    project = Project.query.filter_by(public_id=identifier).one_or_none()
+                    if project is None:
+                        project = Project.query.filter_by(id=identifier).one_or_none()
+                except Exception:
+                    project = None
+
+        if project is None and chat_id:
+            try:
+                from services.project_service import get_project_by_conversation_id
+
+                project = get_project_by_conversation_id(chat_id)
+            except Exception:
+                project = None
+
+            if project is None:
+                try:
+                    from models import Project
+
+                    project = Project.query.filter_by(conversation_id=chat_id).one_or_none()
+                except Exception:
+                    project = None
+
+        if project is None:
+            if chat_id:
+                context["conversation_id"] = _safe_optional_id(chat_id)
+            if identifier:
+                context["app_project_id"] = identifier
+                context["app_project_public_id"] = identifier
+                context["project_public_id"] = identifier
+            return context
+
+        app_project_db_id = _safe_optional_id(getattr(project, "id", None))
+        app_project_public_id = _safe_optional_id(getattr(project, "public_id", None)) or app_project_db_id
+        conversation_id = _safe_optional_id(getattr(project, "conversation_id", None)) or _safe_optional_id(chat_id)
+
+        latitude = _safe_float_or_none(getattr(project, "latitude", None))
+        longitude = _safe_float_or_none(getattr(project, "longitude", None))
+
+        context.update(
+            {
+                "app_project_db_id": app_project_db_id,
+                "app_project_id": app_project_public_id,
+                "app_project_public_id": app_project_public_id,
+                "project_public_id": app_project_public_id,
+                "public_id": app_project_public_id,
+                "project_id": app_project_public_id,
+                "conversation_id": conversation_id,
+                "chunk_project_id": _safe_optional_id(getattr(project, "chunk_project_id", None)),
+                "chunk_world_id": _safe_optional_id(getattr(project, "chunk_world_id", None)),
+                "plan2d_id": _safe_optional_id(getattr(project, "plan2d_id", None)),
+                "lv_id": _safe_optional_id(getattr(project, "lv_id", None)),
+                "name": _clean_text(getattr(project, "name", ""), "", 240),
+                "address_text": _clean_text(getattr(project, "address_text", ""), "", 500),
+                "is_configured": bool(getattr(project, "is_configured", False)),
+            }
+        )
+
+        if latitude is not None:
+            context["latitude"] = latitude
+
+        if longitude is not None:
+            context["longitude"] = longitude
+
+        try:
+            from services.current_user import get_current_user_id
+            from services.project_permissions import can_edit_project
+
+            user_id = get_current_user_id()
+            context["readonly"] = not bool(can_edit_project(project, user_id=user_id))
+        except Exception:
+            context["readonly"] = False
+
+        return context
+
+    except Exception as exc:
+        _log_warning("Project context resolution failed: %s", exc.__class__.__name__)
+        if chat_id:
+            context["conversation_id"] = _safe_optional_id(chat_id)
+        return context
+
+
+def _safe_float_or_none(value: Any) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+
+        parsed = float(value)
+
+        if not (-10_000_000.0 <= parsed <= 10_000_000.0):
+            return None
+
+        return parsed
+
+    except Exception:
+        return None
+
+
+def _project_center_from_context(project_context: Optional[Dict[str, Any]]) -> Optional[List[float]]:
+    try:
+        ctx = project_context if isinstance(project_context, dict) else {}
+
+        lat = _safe_float_or_none(ctx.get("latitude"))
+        lon = _safe_float_or_none(ctx.get("longitude"))
+
+        if lat is None or lon is None:
+            return None
+
+        lon = _clamp_float(lon, -180.0, 180.0)
+        lat = _clamp_float(lat, -90.0, 90.0)
+
+        return [lon, lat]
+
+    except Exception:
+        return None
+
+
+def _project_context_payload(project_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    try:
+        ctx = project_context if isinstance(project_context, dict) else {}
+
+        return {
+            "app_project_id": ctx.get("app_project_id") or ctx.get("app_project_public_id") or "",
+            "app_project_db_id": ctx.get("app_project_db_id") or "",
+            "project_public_id": ctx.get("project_public_id") or "",
+            "conversation_id": ctx.get("conversation_id") or "",
+            "chunk_project_id": ctx.get("chunk_project_id") or "",
+            "chunk_world_id": ctx.get("chunk_world_id") or "",
+            "plan2d_id": ctx.get("plan2d_id") or "",
+            "lv_id": ctx.get("lv_id") or "",
+            "name": ctx.get("name") or "",
+            "address_text": ctx.get("address_text") or "",
+            "latitude": ctx.get("latitude"),
+            "longitude": ctx.get("longitude"),
+            "is_configured": bool(ctx.get("is_configured")),
+            "readonly": bool(ctx.get("readonly")),
+        }
+
+    except Exception:
+        return {}
+
+
+# ─────────────────────────────────────────────────────────────
+# Map defaults / OpenLayer target helpers
+# ─────────────────────────────────────────────────────────────
+
+def _get_default_center(project_context: Optional[Dict[str, Any]] = None) -> List[float]:
+    try:
+        project_center = _project_center_from_context(project_context)
+        if project_center:
+            return project_center
+
         center = current_app.config.get("MAP_DEFAULT_CENTER", DEFAULT_MAP_CENTER)
 
         if isinstance(center, (list, tuple)) and len(center) >= 2:
@@ -707,8 +979,8 @@ def _map_max_zoom() -> int:
     )
 
 
-def _parse_lon_lat_zoom() -> Tuple[float, float, int]:
-    center = _get_default_center()
+def _parse_lon_lat_zoom(project_context: Optional[Dict[str, Any]] = None) -> Tuple[float, float, int]:
+    center = _get_default_center(project_context)
     default_lon = center[0]
     default_lat = center[1]
     min_zoom = _map_min_zoom()
@@ -778,7 +1050,7 @@ def _forward_safe_query_value(key: str, max_len: int = 160) -> Optional[str]:
         if value is None:
             return None
 
-        text = str(value).strip()
+        text = _sanitize_query_value(key, value)
         if not text:
             return None
 
@@ -791,17 +1063,22 @@ def _forward_safe_query_value(key: str, max_len: int = 160) -> Optional[str]:
         return None
 
 
-def _build_openlayer_query(chat_id: str) -> Dict[str, Any]:
+def _build_openlayer_query(
+    chat_id: Optional[str],
+    project_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Build the browser-facing OpenLayer query.
 
     Rules:
     - embed=1 is always sent when OpenLayer embedding is enabled.
-    - chat_id is sent so OpenLayer can later adapt behavior to app context.
-    - style is forwarded only when explicitly provided or configured.
-    - scroll defaults to enabled for iframe usability.
+    - conversation/chat id is sent if available.
+    - app project refs and chunk refs are separate.
+    - project DB context overwrites ambiguous URL query refs.
+    - project coordinates become default map center unless lon/lat are explicit.
     """
-    lon, lat, zoom = _parse_lon_lat_zoom()
+    ctx = project_context if isinstance(project_context, dict) else {}
+    lon, lat, zoom = _parse_lon_lat_zoom(ctx)
 
     explicit_style = _sanitize_style(request.args.get("style"))
     configured_style = _sanitize_style(_cfg_str("MAP_STYLE_ID", ""))
@@ -817,30 +1094,78 @@ def _build_openlayer_query(chat_id: str) -> Dict[str, Any]:
         "lat": lat,
         "zoom": zoom,
         "scroll": scroll_value,
-        "chat_id": str(chat_id),
+        "source": "vectoplan-app",
     }
 
     if _cfg_bool("OPENLAYER_EMBED_ENABLED", True):
         query["embed"] = "1"
+
+    conversation_id = _safe_optional_id(ctx.get("conversation_id")) or _safe_optional_id(chat_id)
+    if conversation_id:
+        query["chat_id"] = conversation_id
+        query["conversation_id"] = conversation_id
 
     if explicit_style:
         query["style"] = explicit_style
     elif _cfg_bool("MAP_FORWARD_STYLE_TO_IFRAME", False) and configured_style:
         query["style"] = configured_style
 
+    # Forward non-authoritative safe query values first.
     for key in MAP_FORWARD_QUERY_KEYS:
         value = _forward_safe_query_value(key)
         if value is not None:
             query[key] = value
 
+    # Authoritative app project context.
+    app_project_public_id = _safe_optional_id(
+        ctx.get("app_project_public_id")
+        or ctx.get("app_project_id")
+        or ctx.get("project_public_id")
+        or ctx.get("public_id")
+    )
+    app_project_db_id = _safe_optional_id(ctx.get("app_project_db_id"))
+
+    chunk_project_id = _safe_optional_id(ctx.get("chunk_project_id"))
+    chunk_world_id = _safe_optional_id(ctx.get("chunk_world_id"))
+    plan2d_id = _safe_optional_id(ctx.get("plan2d_id"))
+    lv_id = _safe_optional_id(ctx.get("lv_id"))
+
+    if app_project_public_id:
+        query["project_id"] = app_project_public_id
+        query["project_public_id"] = app_project_public_id
+        query["app_project_id"] = app_project_public_id
+        query["app_project_public_id"] = app_project_public_id
+
+    if app_project_db_id:
+        query["app_project_db_id"] = app_project_db_id
+
+    if chunk_project_id:
+        query["chunk_project_id"] = chunk_project_id
+
+    if chunk_world_id:
+        query["chunk_world_id"] = chunk_world_id
+        query["world_id"] = chunk_world_id
+
+    if plan2d_id:
+        query["plan2d_id"] = plan2d_id
+
+    if lv_id:
+        query["lv_id"] = lv_id
+
+    if "readonly" not in query and "readonly" in ctx:
+        query["readonly"] = "1" if _as_bool(ctx.get("readonly"), False) else "0"
+
     return query
 
 
-def _build_openlayer_target(chat_id: str) -> str:
+def _build_openlayer_target(
+    chat_id: Optional[str],
+    project_context: Optional[Dict[str, Any]] = None,
+) -> str:
     base = _safe_openlayer_public_url()
     route = _safe_openlayer_route()
     page_url = _join_public_url(base, route)
-    query = _build_openlayer_query(chat_id)
+    query = _build_openlayer_query(chat_id, project_context)
 
     separator = "&" if "?" in page_url else "?"
     return f"{page_url}{separator}{urlencode(query)}"
@@ -851,16 +1176,6 @@ def _build_openlayer_target(chat_id: str) -> str:
 # ─────────────────────────────────────────────────────────────
 
 def _wfs_base() -> str:
-    """
-    GeoServer base URL without /wfs.
-
-    Supported config/env keys, in order:
-    - GEOSERVER_WFS_BASE
-    - GEOSERVER_INTERNAL_BASE_URL
-    - GEOSERVER_PUBLIC_BASE_URL
-
-    The WFS proxy is server-side, so internal URL is preferred where available.
-    """
     base = _cfg_first(
         [
             "GEOSERVER_WFS_BASE",
@@ -874,11 +1189,6 @@ def _wfs_base() -> str:
 
 
 def _wfs_auth_header() -> Dict[str, str]:
-    """
-    Build server-side Basic Auth header.
-
-    Credentials never go to the browser.
-    """
     try:
         user = _cfg_first(
             [
@@ -946,9 +1256,6 @@ def _sanitize_typenames(raw: str, allow: Sequence[str]) -> str:
 
 
 def _sanitize_wfs_params() -> Tuple[Optional[Dict[str, str]], Optional[str]]:
-    """
-    Return (safe_params, error_message).
-    """
     try:
         safe: Dict[str, str] = {}
 
@@ -983,7 +1290,6 @@ def _sanitize_wfs_params() -> Tuple[Optional[Dict[str, str]], Optional[str]]:
 
         safe.setdefault("srsName", _cfg_str("WFS_DEFAULT_SRS", DEFAULT_WFS_SRS))
 
-        # Conservative bounds for paging-like params.
         if "count" in safe:
             safe["count"] = str(_clamp_int(safe.get("count"), 1, 10000))
 
@@ -1011,12 +1317,6 @@ def _build_wfs_url(base: str, params: Dict[str, str]) -> str:
 
 
 def _fetch_wfs(url: str) -> Tuple[bytes, int, str]:
-    """
-    Fetch WFS data server-side.
-
-    Returns:
-      (content, status_code, content_type)
-    """
     headers = {
         "Accept": "application/json",
     }
@@ -1064,13 +1364,20 @@ def map_page(chat_id: str) -> Response:
 
     Important:
     - Uses OPENLAYER_PUBLIC_URL, never OPENLAYER_INTERNAL_URL.
-    - Adds embed=1 and chat_id for app-shell integration.
+    - Adds embed=1 and chat_id/conversation_id.
+    - Adds app project refs and chunk refs when the conversation is linked to a project.
     - Repairs stale localhost:8090 config to localhost:5190 by default.
     """
     conv = _ensure_conversation(chat_id)
 
     try:
-        target = _build_openlayer_target(str(conv.id))
+        project_identifier = _project_identifier_from_request()
+        project_context = _resolve_project_context(
+            chat_id=str(conv.id),
+            project_identifier=project_identifier,
+        )
+
+        target = _build_openlayer_target(str(conv.id), project_context)
         return _redirect_response(target)
 
     except Exception as exc:
@@ -1092,6 +1399,70 @@ def map_page(chat_id: str) -> Response:
         )
 
 
+@bp.get("/ui/project/<project_id>/map")
+def project_map_page(project_id: str) -> Response:
+    """
+    Project-first iframe target for the map workspace.
+
+    Redirects to OpenLayer with app project refs and chunk refs.
+    """
+    try:
+        safe_project_id = _sanitize_id(project_id, label="project_id")
+        project_context = _resolve_project_context(
+            chat_id=None,
+            project_identifier=safe_project_id,
+        )
+
+        conversation_id = _safe_optional_id(project_context.get("conversation_id"))
+        target = _build_openlayer_target(conversation_id or None, project_context)
+
+        return _redirect_response(target)
+
+    except ValueError as exc:
+        return _json_error(
+            message=str(exc),
+            status=400,
+            code="invalid_project_id",
+            chat_id=None,
+        )
+
+    except Exception as exc:
+        _log_exception("project_map_page redirect failed", exc)
+        return _json_error(
+            message=str(exc),
+            status=500,
+            code="project_map_redirect_failed",
+            chat_id=None,
+        )
+
+
+@bp.get("/ui/map")
+def map_page_without_chat() -> Response:
+    """
+    Generic map iframe route for diagnostics and early project-shell states.
+    """
+    try:
+        project_identifier = _project_identifier_from_request()
+        project_context = _resolve_project_context(
+            chat_id=None,
+            project_identifier=project_identifier,
+        )
+
+        conversation_id = _safe_optional_id(project_context.get("conversation_id"))
+        target = _build_openlayer_target(conversation_id or None, project_context)
+
+        return _redirect_response(target)
+
+    except Exception as exc:
+        _log_exception("map_page_without_chat redirect failed", exc)
+        return _json_error(
+            message=str(exc),
+            status=500,
+            code="map_redirect_failed",
+            chat_id=None,
+        )
+
+
 @bp.get("/ui/chat/<chat_id>/map.json")
 def map_json(chat_id: str) -> Response:
     """
@@ -1103,71 +1474,16 @@ def map_json(chat_id: str) -> Response:
     conv = _ensure_conversation(chat_id)
 
     try:
-        min_zoom = _map_min_zoom()
-        max_zoom = _map_max_zoom()
-
-        zoom = _clamp_int(
-            _cfg_int("MAP_DEFAULT_ZOOM", DEFAULT_MAP_ZOOM),
-            min_zoom,
-            max_zoom,
+        project_identifier = _project_identifier_from_request()
+        project_context = _resolve_project_context(
+            chat_id=str(conv.id),
+            project_identifier=project_identifier,
         )
 
-        center = _get_default_center()
-        allowed_typenames = _cfg_list("WFS_ALLOWED_TYPENAMES", DEFAULT_ALLOWED_TYPENAMES)
-
-        public_url = _safe_openlayer_public_url()
-        route = _safe_openlayer_route()
-        iframe_url = _build_openlayer_target(str(conv.id))
-
-        payload = {
-            "ok": True,
-            "chat_id": str(conv.id),
-            "mode": "map",
-            "workspace_mode": "map",
-            "view": {
-                "center": center,
-                "lon": center[0],
-                "lat": center[1],
-                "zoom": zoom,
-                "min_zoom": min_zoom,
-                "max_zoom": max_zoom,
-            },
-            "iframe_defaults": {
-                "embed": True,
-                "mouse_wheel_zoom_enabled": _cfg_bool("MAP_MOUSE_WHEEL_ZOOM", True),
-                "scroll": _cfg_str("MAP_IFRAME_SCROLL_DEFAULT", "1"),
-                "style_delegated_to_openlayer_service": True,
-            },
-            "openlayer": {
-                "public_url": public_url,
-                "route": route,
-                "map_path": route,
-                "iframe_url": iframe_url,
-                "embed_enabled": _cfg_bool("OPENLAYER_EMBED_ENABLED", True),
-                "expected_public_url": DEFAULT_OPENLAYER_PUBLIC_URL,
-                "legacy_public_url_repaired": _is_known_legacy_openlayer_public_url(
-                    _cfg_str("OPENLAYER_PUBLIC_URL", "")
-                ),
-            },
-            "wfs": {
-                "proxy_url": f"/ui/chat/{conv.id}/wfs",
-                "allowed_typeNames": allowed_typenames,
-                "srsName": _cfg_str("WFS_DEFAULT_SRS", DEFAULT_WFS_SRS),
-                "featureProjection": "EPSG:3857",
-                "outputFormat": DEFAULT_WFS_OUTPUT_FORMAT,
-            },
-            "security": {
-                "frame_ancestors": _frame_ancestors_value(),
-                "wildcard_frame_ancestors": False,
-            },
-            "legacy_3d_backend": False,
-        }
-
-        resp = make_response(jsonify(payload), 200)
-        _cache_headers(resp, strong=False)
-        _apply_frame_headers(resp, allow_embed=True)
-
-        return resp
+        return _map_json_response(
+            chat_id=str(conv.id),
+            project_context=project_context,
+        )
 
     except Exception as exc:
         _log_exception("map_json failed", exc)
@@ -1177,6 +1493,125 @@ def map_json(chat_id: str) -> Response:
             code="map_json_failed",
             chat_id=str(conv.id),
         )
+
+
+@bp.get("/ui/project/<project_id>/map.json")
+def project_map_json(project_id: str) -> Response:
+    """
+    Project-first map configuration endpoint.
+    """
+    try:
+        safe_project_id = _sanitize_id(project_id, label="project_id")
+        project_context = _resolve_project_context(
+            chat_id=None,
+            project_identifier=safe_project_id,
+        )
+
+        chat_id = _safe_optional_id(project_context.get("conversation_id"))
+
+        return _map_json_response(
+            chat_id=chat_id,
+            project_context=project_context,
+        )
+
+    except ValueError as exc:
+        return _json_error(
+            message=str(exc),
+            status=400,
+            code="invalid_project_id",
+            chat_id=None,
+        )
+
+    except Exception as exc:
+        _log_exception("project_map_json failed", exc)
+        return _json_error(
+            message=str(exc),
+            status=500,
+            code="project_map_json_failed",
+            chat_id=None,
+        )
+
+
+def _map_json_response(
+    *,
+    chat_id: Optional[str],
+    project_context: Optional[Dict[str, Any]],
+) -> Response:
+    min_zoom = _map_min_zoom()
+    max_zoom = _map_max_zoom()
+
+    zoom = _clamp_int(
+        _cfg_int("MAP_DEFAULT_ZOOM", DEFAULT_MAP_ZOOM),
+        min_zoom,
+        max_zoom,
+    )
+
+    center = _get_default_center(project_context)
+    allowed_typenames = _cfg_list("WFS_ALLOWED_TYPENAMES", DEFAULT_ALLOWED_TYPENAMES)
+
+    public_url = _safe_openlayer_public_url()
+    route = _safe_openlayer_route()
+    iframe_url = _build_openlayer_target(chat_id, project_context)
+
+    project_payload = _project_context_payload(project_context)
+
+    wfs_proxy_url = f"/ui/chat/{chat_id}/wfs" if chat_id else ""
+
+    payload = {
+        "ok": True,
+        "chat_id": chat_id,
+        "conversation_id": chat_id,
+        "project": project_payload,
+        "mode": "map",
+        "workspace_mode": "map",
+        "view": {
+            "center": center,
+            "lon": center[0],
+            "lat": center[1],
+            "zoom": zoom,
+            "min_zoom": min_zoom,
+            "max_zoom": max_zoom,
+            "project_center_used": bool(_project_center_from_context(project_context)),
+        },
+        "iframe_defaults": {
+            "embed": True,
+            "mouse_wheel_zoom_enabled": _cfg_bool("MAP_MOUSE_WHEEL_ZOOM", True),
+            "scroll": _cfg_str("MAP_IFRAME_SCROLL_DEFAULT", "1"),
+            "style_delegated_to_openlayer_service": True,
+        },
+        "openlayer": {
+            "public_url": public_url,
+            "route": route,
+            "map_path": route,
+            "iframe_url": iframe_url,
+            "embed_enabled": _cfg_bool("OPENLAYER_EMBED_ENABLED", True),
+            "expected_public_url": DEFAULT_OPENLAYER_PUBLIC_URL,
+            "legacy_public_url_repaired": _is_known_legacy_openlayer_public_url(
+                _cfg_str("OPENLAYER_PUBLIC_URL", "")
+            ),
+            "passes_app_project_refs": True,
+            "passes_chunk_refs": True,
+        },
+        "wfs": {
+            "proxy_url": wfs_proxy_url,
+            "allowed_typeNames": allowed_typenames,
+            "srsName": _cfg_str("WFS_DEFAULT_SRS", DEFAULT_WFS_SRS),
+            "featureProjection": "EPSG:3857",
+            "outputFormat": DEFAULT_WFS_OUTPUT_FORMAT,
+        },
+        "security": {
+            "frame_ancestors": _frame_ancestors_value(),
+            "wildcard_frame_ancestors": False,
+        },
+        "legacy_3d_backend": False,
+        "project_first": True,
+    }
+
+    resp = make_response(jsonify(payload), 200)
+    _cache_headers(resp, strong=False)
+    _apply_frame_headers(resp, allow_embed=True)
+
+    return resp
 
 
 @bp.get("/ui/chat/<chat_id>/wfs")
@@ -1231,3 +1666,6 @@ def wfs_proxy(chat_id: str) -> Response:
             code="wfs_proxy_failed",
             chat_id=str(conv.id),
         )
+
+
+__all__ = ["bp"]

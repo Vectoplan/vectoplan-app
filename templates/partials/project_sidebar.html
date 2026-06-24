@@ -1,0 +1,563 @@
+{# services/vectoplan-app/templates/partials/project_sidebar.html #}
+{#
+  VECTOPLAN Project Sidebar Partial
+
+  Zweck:
+  - Linke Projekt-/Workspace-Navigation für die neue projektgeführte App-Shell.
+  - Primäre Datenquelle im Frontend: /v1/projects/sidebar.
+  - Serverseitig gerenderte Items bleiben als sofort sichtbarer Fallback erhalten.
+  - JavaScript kann die Liste vollständig über project_sidebar.js ersetzen.
+  - Erstellen-Button ist sichtbar und führt zu /project=new.
+  - Projektwechsel navigiert zu /project=<public_id>.
+  - Keine Chunk-, Editor-, 2D- oder LV-Daten werden hier direkt verwaltet.
+
+  Wichtige Jinja-Robustheit:
+  - Bei Dicts KEIN ".items" verwenden.
+  - ".items" wird von Jinja/Python sonst als dict.items-Methode aufgelöst.
+  - Deshalb überall .get("items", []) und .get("...") verwenden.
+#}
+
+{% set _project_sidebar_raw = project_sidebar|default({}, true) %}
+{% set _project_sidebar = _project_sidebar_raw if _project_sidebar_raw is mapping else {} %}
+
+{% set _project_raw = project|default(current_project|default({}, true), true) %}
+{% set _project = _project_raw if _project_raw is mapping else {} %}
+
+{% set _raw_enabled = _project_sidebar.get('enabled', true) %}
+{% set _sidebar_enabled = false if _raw_enabled in [false, 'false', 'False', 'FALSE', '0', 0, 'off', 'OFF', 'no', 'NO'] else true %}
+
+{% set _raw_default_collapsed = _project_sidebar.get('defaultCollapsed', _project_sidebar.get('default_collapsed', false)) %}
+{% set _is_default_collapsed = true if _raw_default_collapsed in [true, 'true', 'True', 'TRUE', '1', 1, 'on', 'ON', 'yes', 'YES'] else false %}
+
+{% set _current_chat_id = _project_sidebar.get('currentChatId', _project_sidebar.get('current_chat_id', chat_id|default('', true))) %}
+
+{% set _project_public_id = _project.get('public_id', _project.get('publicId', _project.get('project_public_id', _project.get('projectPublicId', 'new')))) %}
+{% set _project_id = _project.get('id', _project.get('project_id', '')) %}
+
+{% set _current_project_id = _project_sidebar.get(
+  'currentProjectId',
+  _project_sidebar.get(
+    'current_project_id',
+    _project_sidebar.get(
+      'projectPublicId',
+      _project_sidebar.get('project_public_id', _project_public_id)
+    )
+  )
+) %}
+
+{% if not _current_project_id %}
+  {% set _current_project_id = _project_public_id %}
+{% endif %}
+
+{% set _project_is_new_raw = _project.get('is_new', _project.get('isNew', true if _current_project_id in ['', none, 'new'] else false)) %}
+{% set _project_is_new = true if _project_is_new_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'on', 'ON', 'yes', 'YES'] else false %}
+
+{% set _project_is_configured_raw = _project.get('is_configured', _project.get('isConfigured', false)) %}
+{% set _project_is_configured = true if _project_is_configured_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'on', 'ON', 'yes', 'YES'] else false %}
+
+{% set _project_setup_status = _project.get('setup_status', _project.get('setupStatus', 'draft')) %}
+
+{% set _project_name = _project.get('name', _project.get('display_name', _project.get('displayName', ''))) %}
+{% set _project_address = _project.get('address_text', '') %}
+
+{% set _current_title = _project_sidebar.get('currentTitle', _project_sidebar.get('current_title', _project_name if _project_name else 'Neues Projekt')) %}
+{% set _current_subtitle = _project_sidebar.get('currentSubtitle', _project_sidebar.get('current_subtitle', _project_address if _project_address else ('Projekt aktiv' if _project_is_configured else 'Projekt definieren'))) %}
+
+{% set _storage_key = _project_sidebar.get('storageKey', _project_sidebar.get('storage_key', 'vectoplan.projectSidebar.v1')) %}
+{% set _route_base = _project_sidebar.get('routeBase', _project_sidebar.get('route_base', '/')) %}
+{% set _api_path = _project_sidebar.get('apiPath', _project_sidebar.get('api_path', _project_sidebar.get('sidebarApiPath', _project_sidebar.get('sidebar_api_path', '/v1/projects/sidebar')))) %}
+{% set _create_project_url = _project_sidebar.get('createProjectUrl', _project_sidebar.get('create_project_url', '/project=new')) %}
+
+{% set _default_width = _project_sidebar.get('defaultWidth', _project_sidebar.get('default_width', 280))|int %}
+{% set _min_width = _project_sidebar.get('minWidth', _project_sidebar.get('min_width', 220))|int %}
+{% set _max_width = _project_sidebar.get('maxWidth', _project_sidebar.get('max_width', 420))|int %}
+{% set _collapsed_width = _project_sidebar.get('collapsedWidth', _project_sidebar.get('collapsed_width', 64))|int %}
+
+{% if _default_width < 180 %}
+  {% set _default_width = 280 %}
+{% endif %}
+
+{% if _min_width < 160 %}
+  {% set _min_width = 220 %}
+{% endif %}
+
+{% if _max_width < _min_width %}
+  {% set _max_width = 420 %}
+{% endif %}
+
+{% if _collapsed_width < 48 %}
+  {% set _collapsed_width = 64 %}
+{% endif %}
+
+{% set _project_items_raw = _project_sidebar.get('items', []) %}
+{% if _project_items_raw is sequence and _project_items_raw is not string %}
+  {% set _project_items = _project_items_raw %}
+{% else %}
+  {% set _project_items = [] %}
+{% endif %}
+
+{% set _project_items_count = _project_items|length %}
+{% set _has_project_items = true if _project_items_count > 0 else false %}
+
+{% if _current_project_id and _current_project_id != 'new' %}
+  {% set _current_href = '/project=' ~ _current_project_id %}
+{% else %}
+  {% set _current_href = '/project=new' %}
+{% endif %}
+
+{% if _sidebar_enabled %}
+<aside
+  id="vp-project-sidebar"
+  class="vp-project-sidebar{% if _is_default_collapsed %} is-collapsed{% else %} is-expanded{% endif %}"
+  data-vp-project-sidebar
+  data-project-sidebar-version="2"
+  data-project-sidebar-storage-key="{{ _storage_key|e }}"
+  data-project-sidebar-route-base="{{ _route_base|e }}"
+  data-project-sidebar-api-path="{{ _api_path|e }}"
+  data-project-sidebar-create-project-url="{{ _create_project_url|e }}"
+  data-project-sidebar-collapsed="{{ 'true' if _is_default_collapsed else 'false' }}"
+  data-project-sidebar-current-chat-id="{{ _current_chat_id|e }}"
+  data-project-sidebar-current-project-id="{{ _current_project_id|e }}"
+  data-project-sidebar-current-title="{{ _current_title|e }}"
+  data-project-sidebar-current-subtitle="{{ _current_subtitle|e }}"
+  data-project-sidebar-default-width="{{ _default_width }}"
+  data-project-sidebar-min-width="{{ _min_width }}"
+  data-project-sidebar-max-width="{{ _max_width }}"
+  data-project-sidebar-collapsed-width="{{ _collapsed_width }}"
+  data-project-id="{{ _project_id|e }}"
+  data-project-public-id="{{ _current_project_id|e }}"
+  data-project-is-new="{{ 'true' if _project_is_new else 'false' }}"
+  data-project-configured="{{ 'true' if _project_is_configured else 'false' }}"
+  data-project-setup-status="{{ _project_setup_status|e }}"
+  aria-label="Projekt-Navigation"
+  style="
+    --vp-project-sidebar-width: {{ _default_width }}px;
+    --vp-project-sidebar-min-width: {{ _min_width }}px;
+    --vp-project-sidebar-max-width: {{ _max_width }}px;
+    --vp-project-sidebar-collapsed-width: {{ _collapsed_width }}px;
+  "
+>
+  <div
+    id="vp-project-sidebar-panel"
+    class="vp-project-sidebar__panel"
+    data-project-sidebar-panel
+  >
+    <header class="vp-project-sidebar__header" data-project-sidebar-header>
+      <a
+        class="vp-project-sidebar__brand"
+        href="/"
+        data-project-sidebar-home
+        title="VECTOPLAN Start"
+        aria-label="VECTOPLAN Projektübersicht öffnen"
+      >
+        <span class="vp-project-sidebar__brand-mark" aria-hidden="true">VP</span>
+        <span class="vp-project-sidebar__brand-text" data-project-sidebar-expanded-only>
+          VECTOPLAN
+        </span>
+      </a>
+
+      <button
+        type="button"
+        class="vp-project-sidebar__toggle"
+        data-project-sidebar-toggle
+        aria-controls="vp-project-sidebar-panel"
+        aria-expanded="{{ 'false' if _is_default_collapsed else 'true' }}"
+        aria-label="{{ 'Projektleiste ausklappen' if _is_default_collapsed else 'Projektleiste einklappen' }}"
+        title="{{ 'Projektleiste ausklappen' if _is_default_collapsed else 'Projektleiste einklappen' }}"
+        data-label-expanded="Projektleiste einklappen"
+        data-label-collapsed="Projektleiste ausklappen"
+      >
+        <span class="vp-project-sidebar__toggle-icon" aria-hidden="true">
+          <span class="vp-project-sidebar__toggle-line"></span>
+          <span class="vp-project-sidebar__toggle-line"></span>
+          <span class="vp-project-sidebar__toggle-line"></span>
+        </span>
+      </button>
+    </header>
+
+    <section
+      class="vp-project-sidebar__current"
+      data-project-sidebar-current
+      data-project-sidebar-expanded-only
+      aria-label="Aktuelles Projekt"
+    >
+      <a
+        class="vp-project-sidebar__current-link"
+        href="{{ _current_href|e }}"
+        data-project-sidebar-current-link
+        title="{{ _current_title|e }}"
+      >
+        <span
+          class="vp-project-sidebar__current-avatar"
+          aria-hidden="true"
+          data-project-sidebar-current-initial
+        >
+          {{ (_current_title|string)[:1]|upper if _current_title else 'P' }}
+        </span>
+
+        <span class="vp-project-sidebar__current-body">
+          <span
+            class="vp-project-sidebar__current-kicker"
+            data-project-sidebar-current-kicker
+          >
+            Aktuell
+          </span>
+          <span
+            class="vp-project-sidebar__current-title"
+            data-project-sidebar-current-title
+          >
+            {{ _current_title }}
+          </span>
+          <span
+            class="vp-project-sidebar__current-subtitle"
+            data-project-sidebar-current-subtitle
+          >
+            {{ _current_subtitle }}
+          </span>
+        </span>
+      </a>
+    </section>
+
+    <section
+      class="vp-project-sidebar__actions"
+      data-project-sidebar-expanded-only
+      aria-label="Projektaktionen"
+    >
+      <a
+        class="vp-project-sidebar__create"
+        href="{{ _create_project_url|e }}"
+        data-project-sidebar-create
+        data-project-sidebar-create-url="{{ _create_project_url|e }}"
+        title="Neues Projekt erstellen"
+        aria-label="Neues Projekt erstellen"
+      >
+        <span class="vp-project-sidebar__create-icon" aria-hidden="true">+</span>
+        <span class="vp-project-sidebar__create-text">Neues Projekt</span>
+      </a>
+
+      <div class="vp-project-sidebar__search-wrap" data-project-sidebar-search-wrap>
+        <label
+          class="vp-project-sidebar__label"
+          for="vp-project-sidebar-search"
+        >
+          Projekte suchen
+        </label>
+
+        <input
+          id="vp-project-sidebar-search"
+          class="vp-project-sidebar__search"
+          type="search"
+          name="project-sidebar-search"
+          value=""
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+          placeholder="Projekt suchen"
+          data-project-sidebar-search
+        >
+      </div>
+    </section>
+
+    <div
+      class="vp-project-sidebar__status"
+      data-project-sidebar-status
+      aria-live="polite"
+      aria-atomic="true"
+    ></div>
+
+    <div
+      class="vp-project-sidebar__error"
+      data-project-sidebar-error
+      role="alert"
+      hidden
+    >
+      <span class="vp-project-sidebar__error-title">
+        Projektliste konnte nicht geladen werden.
+      </span>
+      <span class="vp-project-sidebar__error-message" data-project-sidebar-error-message>
+        Die Navigation bleibt mit dem aktuellen Projekt nutzbar.
+      </span>
+    </div>
+
+    <nav
+      class="vp-project-sidebar__nav"
+      data-project-sidebar-nav
+      aria-label="Projekte"
+    >
+      <div
+        class="vp-project-sidebar__list"
+        role="list"
+        data-project-sidebar-list
+        data-project-sidebar-list-empty="{{ 'false' if _has_project_items or _current_project_id or _current_chat_id else 'true' }}"
+      >
+        {% if _has_project_items %}
+          {% for item_raw in _project_items %}
+            {% if item_raw is mapping %}
+              {% set item = item_raw %}
+              {% set _item_project_id = item.get('projectId', item.get('project_id', item.get('public_id', item.get('publicId', item.get('id', ''))))) %}
+              {% set _item_id = item.get('id', _item_project_id) %}
+              {% set _item_chat_id = item.get('chatId', item.get('chat_id', item.get('conversationId', item.get('conversation_id', '')))) %}
+              {% set _item_title = item.get('title', item.get('name', item.get('display_name', item.get('displayName', 'Unbenanntes Projekt')))) %}
+              {% set _item_subtitle = item.get('subtitle', item.get('address_text', item.get('description', item.get('setup_status', 'Projekt')))) %}
+              {% set _item_source = item.get('source', 'server') %}
+              {% set _item_initial = item.get('initial', (_item_title|string)[:1]|upper) %}
+              {% set _item_href = item.get('href', item.get('url', item.get('link', ''))) %}
+              {% set _item_is_active_raw = item.get('isActive', item.get('is_active', false)) %}
+              {% set _item_is_configured_raw = item.get('isConfigured', item.get('is_configured', true if item.get('setup_status', '') == 'configured' else false)) %}
+              {% set _item_setup_status = item.get('setup_status', item.get('setupStatus', 'configured' if _item_is_configured_raw else 'draft')) %}
+            {% else %}
+              {% set _item_project_id = 'item-' ~ loop.index %}
+              {% set _item_id = _item_project_id %}
+              {% set _item_chat_id = '' %}
+              {% set _item_title = item_raw|string %}
+              {% set _item_subtitle = 'Projekt' %}
+              {% set _item_source = 'server' %}
+              {% set _item_initial = (_item_title|string)[:1]|upper %}
+              {% set _item_href = '#' %}
+              {% set _item_is_active_raw = false %}
+              {% set _item_is_configured_raw = false %}
+              {% set _item_setup_status = 'draft' %}
+            {% endif %}
+
+            {% set _item_is_active = true if _item_is_active_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'on', 'ON', 'yes', 'YES'] else false %}
+            {% set _item_is_configured = true if _item_is_configured_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'on', 'ON', 'yes', 'YES'] else false %}
+
+            {% if _item_project_id and _current_project_id and _item_project_id == _current_project_id %}
+              {% set _item_is_active = true %}
+            {% endif %}
+
+            {% if _item_chat_id and _current_chat_id and _item_chat_id == _current_chat_id %}
+              {% set _item_is_active = true %}
+            {% endif %}
+
+            {% if not _item_href and _item_project_id %}
+              {% set _item_href = '/project=' ~ _item_project_id %}
+            {% endif %}
+
+            {% if not _item_href and _item_chat_id %}
+              {% set _item_href = '/?chat_id=' ~ _item_chat_id %}
+            {% endif %}
+
+            {% if not _item_href %}
+              {% set _item_href = '#' %}
+            {% endif %}
+
+            <a
+              class="vp-project-sidebar__item{% if _item_is_active %} is-active{% endif %}{% if _item_is_configured %} is-configured{% else %} is-draft{% endif %}"
+              role="listitem"
+              href="{{ _item_href|e }}"
+              title="{{ _item_title|e }}"
+              data-project-sidebar-item
+              data-project-id="{{ _item_project_id|e }}"
+              data-project-public-id="{{ _item_project_id|e }}"
+              data-project-chat-id="{{ _item_chat_id|e }}"
+              data-project-title="{{ _item_title|e }}"
+              data-project-subtitle="{{ _item_subtitle|e }}"
+              data-project-source="{{ _item_source|e }}"
+              data-project-configured="{{ 'true' if _item_is_configured else 'false' }}"
+              data-project-setup-status="{{ _item_setup_status|e }}"
+              {% if _item_is_active %}aria-current="page"{% endif %}
+            >
+              <span
+                class="vp-project-sidebar__item-avatar"
+                aria-hidden="true"
+                data-project-sidebar-item-initial
+              >
+                {{ _item_initial|default('P', true)|e }}
+              </span>
+
+              <span class="vp-project-sidebar__item-body" data-project-sidebar-expanded-only>
+                <span
+                  class="vp-project-sidebar__item-title"
+                  data-project-sidebar-item-title
+                >
+                  {{ _item_title }}
+                </span>
+                <span
+                  class="vp-project-sidebar__item-subtitle"
+                  data-project-sidebar-item-subtitle
+                >
+                  {{ _item_subtitle }}
+                </span>
+              </span>
+
+              <span
+                class="vp-project-sidebar__item-active-indicator"
+                aria-hidden="true"
+                data-project-sidebar-item-active-indicator
+                {% if not _item_is_active %}hidden{% endif %}
+              ></span>
+            </a>
+          {% endfor %}
+        {% else %}
+          <a
+            class="vp-project-sidebar__item is-active is-fallback{% if _project_is_configured %} is-configured{% else %} is-draft{% endif %}"
+            role="listitem"
+            href="{{ _current_href|e }}"
+            title="{{ _current_title|e }}"
+            data-project-sidebar-item
+            data-project-sidebar-current-fallback
+            data-project-id="{{ _current_project_id if _current_project_id else 'current' }}"
+            data-project-public-id="{{ _current_project_id|e }}"
+            data-project-chat-id="{{ _current_chat_id|e }}"
+            data-project-title="{{ _current_title|e }}"
+            data-project-subtitle="{{ _current_subtitle|e }}"
+            data-project-source="current"
+            data-project-configured="{{ 'true' if _project_is_configured else 'false' }}"
+            data-project-setup-status="{{ _project_setup_status|e }}"
+            aria-current="page"
+          >
+            <span
+              class="vp-project-sidebar__item-avatar"
+              aria-hidden="true"
+              data-project-sidebar-item-initial
+            >
+              {{ (_current_title|string)[:1]|upper if _current_title else 'P' }}
+            </span>
+
+            <span class="vp-project-sidebar__item-body" data-project-sidebar-expanded-only>
+              <span
+                class="vp-project-sidebar__item-title"
+                data-project-sidebar-item-title
+              >
+                {{ _current_title }}
+              </span>
+              <span
+                class="vp-project-sidebar__item-subtitle"
+                data-project-sidebar-item-subtitle
+              >
+                {{ _current_subtitle }}
+              </span>
+            </span>
+
+            <span
+              class="vp-project-sidebar__item-active-indicator"
+              aria-hidden="true"
+              data-project-sidebar-item-active-indicator
+            ></span>
+          </a>
+        {% endif %}
+      </div>
+
+      <div
+        class="vp-project-sidebar__empty"
+        data-project-sidebar-empty
+        {% if _has_project_items or _current_project_id or _current_chat_id %}hidden{% endif %}
+      >
+        <span class="vp-project-sidebar__empty-title">
+          Noch keine Projekte sichtbar.
+        </span>
+        <span class="vp-project-sidebar__empty-text">
+          Erstelle ein Projekt, um Map, 3D, 2D und LV zu aktivieren.
+        </span>
+      </div>
+
+      <div
+        class="vp-project-sidebar__no-results"
+        data-project-sidebar-no-results
+        hidden
+      >
+        <span class="vp-project-sidebar__no-results-title">
+          Keine Treffer.
+        </span>
+        <span class="vp-project-sidebar__no-results-text">
+          Suche anpassen oder Projektliste aktualisieren.
+        </span>
+      </div>
+    </nav>
+
+    <footer
+      class="vp-project-sidebar__footer"
+      data-project-sidebar-footer
+    >
+      <div
+        class="vp-project-sidebar__meta"
+        data-project-sidebar-expanded-only
+      >
+        <span class="vp-project-sidebar__meta-label">
+          Projekte
+        </span>
+        <span
+          class="vp-project-sidebar__meta-value"
+          data-project-sidebar-count
+        >
+          {{ _project_items_count if _has_project_items else 1 }}
+        </span>
+      </div>
+
+      <button
+        type="button"
+        class="vp-project-sidebar__refresh"
+        data-project-sidebar-refresh
+        title="Projektliste aktualisieren"
+        aria-label="Projektliste aktualisieren"
+      >
+        <span class="vp-project-sidebar__refresh-icon" aria-hidden="true">↻</span>
+        <span class="vp-project-sidebar__refresh-text" data-project-sidebar-expanded-only>
+          Aktualisieren
+        </span>
+      </button>
+    </footer>
+  </div>
+
+  <div
+    class="vp-project-sidebar__resize-handle"
+    data-project-sidebar-resize-handle
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Projektleiste vergrößern oder verkleinern"
+    tabindex="0"
+  ></div>
+
+  <template
+    id="vp-project-sidebar-item-template"
+    data-project-sidebar-item-template
+  >
+    <a
+      class="vp-project-sidebar__item"
+      role="listitem"
+      href="#"
+      title=""
+      data-project-sidebar-item
+      data-project-id=""
+      data-project-public-id=""
+      data-project-chat-id=""
+      data-project-title=""
+      data-project-subtitle=""
+      data-project-source="client"
+      data-project-configured="false"
+      data-project-setup-status="draft"
+    >
+      <span
+        class="vp-project-sidebar__item-avatar"
+        aria-hidden="true"
+        data-project-sidebar-item-initial
+      >
+        P
+      </span>
+
+      <span class="vp-project-sidebar__item-body" data-project-sidebar-expanded-only>
+        <span
+          class="vp-project-sidebar__item-title"
+          data-project-sidebar-item-title
+        >
+          Projekt
+        </span>
+        <span
+          class="vp-project-sidebar__item-subtitle"
+          data-project-sidebar-item-subtitle
+        >
+          Workspace
+        </span>
+      </span>
+
+      <span
+        class="vp-project-sidebar__item-active-indicator"
+        aria-hidden="true"
+        data-project-sidebar-item-active-indicator
+        hidden
+      ></span>
+    </a>
+  </template>
+</aside>
+{% endif %}
