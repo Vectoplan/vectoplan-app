@@ -13,8 +13,11 @@
 {% set project_raw = project|default(current_project|default({}, true), true) %}
 {% set project_obj = project_raw if project_raw is mapping else {} %}
 
-{% set current_user_raw = current_user|default({}, true) %}
+{% set current_user_raw = current_user|default(auth|default(auth_context|default({}, true), true), true) %}
 {% set current_user_obj = current_user_raw if current_user_raw is mapping else {} %}
+
+{% set auth_raw = current_user_obj.get('auth', current_user_obj) %}
+{% set auth_obj = auth_raw if auth_raw is mapping else current_user_obj %}
 
 {% set project_paths_raw = project_obj.get('paths', {}) %}
 {% set project_paths_obj = project_paths_raw if project_paths_raw is mapping else {} %}
@@ -22,10 +25,14 @@
 {% set project_sidebar_raw = project_sidebar|default({}, true) %}
 {% set project_sidebar_obj = project_sidebar_raw if project_sidebar_raw is mapping else {} %}
 
-{% set project_public_id = project_obj.get('public_id', project_obj.get('publicId', project_obj.get('project_public_id', project_obj.get('projectPublicId', 'new')))) %}
+{% set project_public_id_raw = project_obj.get('public_id', project_obj.get('publicId', project_obj.get('project_public_id', project_obj.get('projectPublicId', 'new')))) %}
+{% set project_public_id = project_public_id_raw if project_public_id_raw not in ['', none] else 'new' %}
+{% set project_public_id_q = project_public_id|string|urlencode %}
+
 {% set project_id = project_obj.get('id', project_obj.get('project_id', '')) %}
 {% set project_name = project_obj.get('name', project_obj.get('display_name', project_obj.get('displayName', 'Neues Projekt'))) %}
 {% set project_setup_status = project_obj.get('setup_status', project_obj.get('setupStatus', 'draft')) %}
+{% set project_visibility = project_obj.get('visibility', 'private') %}
 
 {% set project_is_new_raw = project_obj.get('is_new', project_obj.get('isNew', true if project_public_id in ['', 'new', none] else false)) %}
 {% set project_is_new = true if project_is_new_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
@@ -33,7 +40,6 @@
 {% set project_is_configured_raw = project_obj.get('is_configured', project_obj.get('isConfigured', false)) %}
 {% set project_is_configured = true if project_is_configured_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 
-{% set project_tools_enabled = true if project_is_configured else false %}
 {% set project_exists = false if project_is_new else true %}
 
 {% set access_raw = project_obj.get('access', {}) %}
@@ -41,48 +47,93 @@
 {% set permissions_raw = access_obj.get('permissions', {}) %}
 {% set permissions_obj = permissions_raw if permissions_raw is mapping else {} %}
 
-{% set can_manage_raw = access_obj.get('can_manage', permissions_obj.get('manage', false)) %}
+{% set can_view_raw = access_obj.get('can_view', permissions_obj.get('view', true if project_is_new else false)) %}
+{% set can_view_project = true if can_view_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set can_manage_raw = access_obj.get('can_manage', permissions_obj.get('manage', permissions_obj.get('manage_settings', false))) %}
 {% set can_manage_project = true if can_manage_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 
 {% set can_edit_raw = access_obj.get('can_edit', permissions_obj.get('edit', true if project_is_new else false)) %}
 {% set can_edit_project = true if can_edit_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 
+{% set authenticated_raw = auth_obj.get('authenticated', auth_obj.get('is_authenticated', auth_obj.get('isAuthenticated', false))) %}
+{% set is_authenticated = true if authenticated_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set demo_mode_raw = demo_mode|default(auth_obj.get('demo_mode', auth_obj.get('demoMode', auth_obj.get('is_demo', project_obj.get('demo_mode', project_obj.get('demoMode', false))))), true) %}
+{% set is_demo_mode = true if demo_mode_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set persistent_raw = auth_obj.get('persistent', auth_obj.get('can_persist_projects', auth_obj.get('canPersistProjects', true if is_authenticated and not is_demo_mode else false))) %}
+{% set is_persistent = true if persistent_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set public_viewer_raw = access_obj.get('is_public_viewer', access_obj.get('is_unlisted_viewer', false)) %}
+{% set public_viewer_by_access = true if public_viewer_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set is_public_viewer = true if public_viewer_by_access or not is_authenticated else false %}
+
+{% set publication_raw = project_obj.get('publication', {}) %}
+{% set publication_obj = publication_raw if publication_raw is mapping else {} %}
+{% set effective_raw = publication_obj.get('effective_published_workspaces', publication_obj.get('effectivePublishedWorkspaces', {})) %}
+{% set effective_obj = effective_raw if effective_raw is mapping else {} %}
+
+{% set map_published_raw = effective_obj.get('map', false) %}
+{% set editor3d_published_raw = effective_obj.get('editor3d', effective_obj.get('3d', false)) %}
+{% set cad2d_published_raw = effective_obj.get('cad2d', effective_obj.get('2d', false)) %}
+{% set lv_published_raw = effective_obj.get('lv', false) %}
+{% set versions_published_raw = effective_obj.get('versions', false) %}
+
+{% set map_published = true if map_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set editor3d_published = true if editor3d_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set cad2d_published = true if cad2d_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set lv_published = true if lv_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set versions_published = true if versions_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set member_workspace_access = true if can_view_project and not is_public_viewer else false %}
+{% set project_tools_enabled = true if project_exists and project_is_configured else false %}
+
+{% set map_workspace_enabled = true if project_tools_enabled and (member_workspace_access or map_published) else false %}
+{% set editor3d_workspace_enabled = true if project_tools_enabled and (member_workspace_access or editor3d_published) else false %}
+{% set cad2d_workspace_enabled = true if project_tools_enabled and (member_workspace_access or cad2d_published) else false %}
+{% set lv_workspace_enabled = true if project_tools_enabled and (member_workspace_access or lv_published) else false %}
+{% set versions_workspace_enabled = true if project_tools_enabled and (member_workspace_access or versions_published) else false %}
+{% set admin_workspace_enabled = true if project_exists and can_manage_project and not is_demo_mode else false %}
+
 {# Project-first defaults. No visible chat UI remains in this shell. #}
 {% if project_public_id and project_public_id != 'new' and not project_is_new %}
-  {% set default_project_url = '/ui/project/' ~ project_public_id ~ '/project' %}
-  {% set default_editor_url = '/ui/project/' ~ project_public_id ~ '/editor' %}
-  {% set default_map_url = '/ui/project/' ~ project_public_id ~ '/map' %}
-  {% set default_map_json_url = '/ui/project/' ~ project_public_id ~ '/map.json' %}
-  {% set default_versions_url = '/v1/projects/' ~ project_public_id ~ '/versions' %}
-  {% set default_plan2d_url = '/ui/project/' ~ project_public_id ~ '/plan2d.json' %}
-  {% set default_cad2d_url = '/ui/project/' ~ project_public_id ~ '/cad2d' %}
-  {% set default_cad_embed_url = '/ui/project/' ~ project_public_id ~ '/cad-embed.json' %}
-  {% set default_admin_url = '/ui/project/' ~ project_public_id ~ '/admin' %}
-  {% set default_lv_url = '/ui/project/' ~ project_public_id ~ '/lv' %}
+  {% set default_project_url = '/ui/project/' ~ project_public_id_q ~ '/project' %}
+  {% set default_editor_url = '/ui/project/' ~ project_public_id_q ~ '/editor3d' %}
+  {% set default_map_url = '/ui/project/' ~ project_public_id_q ~ '/map' %}
+  {% set default_versions_url = '/ui/project/' ~ project_public_id_q ~ '/versions' %}
+  {% set default_versions_api_url = '/v1/projects/' ~ project_public_id_q ~ '/versions' %}
+  {% set default_cad2d_url = '/ui/project/' ~ project_public_id_q ~ '/cad2d' %}
+  {% set default_admin_url = '/ui/project/' ~ project_public_id_q ~ '/admin' %}
+  {% set default_lv_url = '/ui/project/' ~ project_public_id_q ~ '/lv' %}
+  {% set default_context_url = '/ui/project/' ~ project_public_id_q ~ '/context.json' %}
 {% else %}
-  {% set default_project_url = '/ui/project/new' %}
+  {% set default_project_url = '/ui/project/new/project' %}
   {% set default_editor_url = '' %}
   {% set default_map_url = '' %}
-  {% set default_map_json_url = '' %}
   {% set default_versions_url = '' %}
-  {% set default_plan2d_url = '' %}
+  {% set default_versions_api_url = '' %}
   {% set default_cad2d_url = '' %}
-  {% set default_cad_embed_url = '' %}
   {% set default_admin_url = '' %}
   {% set default_lv_url = '' %}
+  {% set default_context_url = '/ui/project/new/context.json' %}
 {% endif %}
 
 {% set default_viewer_json_url = '' %}
 {% set default_upload_url = '' %}
 {% set default_selection_url = '' %}
+{% set default_map_json_url = '' %}
+{% set default_plan2d_url = '' %}
+{% set default_cad_embed_url = '' %}
 
 {% set resolved_project_url = workspace_paths_obj.get('projectPagePath', workspace_paths_obj.get('projectUrl', project_paths_obj.get('projectPagePath', project_paths_obj.get('projectUrl', default_project_url)))) %}
-{% set resolved_project_public_url = workspace_paths_obj.get('projectPublicUrl', project_paths_obj.get('projectPublicUrl', '/project=' ~ project_public_id if project_public_id else '/project=new')) %}
+{% set resolved_project_public_url = workspace_paths_obj.get('projectPublicUrl', project_paths_obj.get('projectPublicUrl', '/project=' ~ project_public_id_q if project_public_id else '/project=new')) %}
 
-{% set editor_page_path = workspace_paths_obj.get('editorPagePath', project_paths_obj.get('editorPagePath', default_editor_url)) %}
+{% set editor_page_path = workspace_paths_obj.get('editor3dPagePath', workspace_paths_obj.get('editorPagePath', project_paths_obj.get('editor3dPagePath', project_paths_obj.get('editorPagePath', default_editor_url)))) %}
 {% set initial_editor_path = workspace_paths_obj.get('initialEditorUrl', project_paths_obj.get('initialEditorUrl', editor_page_path)) %}
 {% set viewer_json_path = workspace_paths_obj.get('viewerJsonPath', project_paths_obj.get('viewerJsonPath', default_viewer_json_url)) %}
-{% set versions_path = workspace_paths_obj.get('versionsPath', project_paths_obj.get('versionsPath', default_versions_url)) %}
+{% set versions_path = workspace_paths_obj.get('versionsPath', project_paths_obj.get('versionsPath', default_versions_api_url)) %}
+{% set versions_page_path = workspace_paths_obj.get('versionsPagePath', project_paths_obj.get('versionsPagePath', default_versions_url)) %}
 {% set map_page_path = workspace_paths_obj.get('mapPagePath', project_paths_obj.get('mapPagePath', default_map_url)) %}
 {% set map_json_path = workspace_paths_obj.get('mapJsonPath', project_paths_obj.get('mapJsonPath', default_map_json_url)) %}
 {% set plan2d_json_path = workspace_paths_obj.get('plan2dJsonPath', project_paths_obj.get('plan2dJsonPath', default_plan2d_url)) %}
@@ -93,27 +144,38 @@
 {% set upload_path = workspace_paths_obj.get('uploadPath', project_paths_obj.get('uploadPath', default_upload_url)) %}
 {% set state_get_path = workspace_paths_obj.get('stateGetPath', project_paths_obj.get('stateGetPath', default_selection_url)) %}
 {% set state_put_path = workspace_paths_obj.get('statePutPath', project_paths_obj.get('statePutPath', default_selection_url)) %}
+{% set context_path = workspace_paths_obj.get('contextPath', project_paths_obj.get('contextPath', default_context_url)) %}
 
 {% set resolved_default_mode = default_mode|default(workspace_obj.get('default_mode', 'project'), true) %}
 {% set resolved_workspace_mode = workspace_mode|default(workspace_obj.get('workspace_mode', 'project'), true) %}
 
-{% if resolved_default_mode not in ['project', 'map', '3d', '2d', 'lv', 'admin'] %}
+{% if resolved_default_mode in ['editor', 'editor3d', 'viewer', 'viewer3d'] %}
+  {% set resolved_default_mode = '3d' %}
+{% endif %}
+
+{% if resolved_workspace_mode in ['editor', 'editor3d', 'viewer', 'viewer3d'] %}
+  {% set resolved_workspace_mode = '3d' %}
+{% endif %}
+
+{% if resolved_default_mode not in ['project', 'map', '3d', '2d', 'lv', 'versions', 'admin'] %}
   {% set resolved_default_mode = 'project' %}
 {% endif %}
 
-{% if resolved_workspace_mode not in ['project', 'map', '3d', '2d', 'lv', 'admin', 'editor'] %}
+{% if resolved_workspace_mode not in ['project', 'map', '3d', '2d', 'lv', 'versions', 'admin'] %}
   {% set resolved_workspace_mode = 'project' %}
 {% endif %}
 
-{% if resolved_default_mode == 'map' and project_tools_enabled and map_page_path %}
+{% if resolved_default_mode == 'map' and map_workspace_enabled and map_page_path %}
   {% set resolved_workspace_src = map_page_path %}
-{% elif resolved_default_mode == '3d' and project_tools_enabled and initial_editor_path %}
+{% elif resolved_default_mode == '3d' and editor3d_workspace_enabled and initial_editor_path %}
   {% set resolved_workspace_src = initial_editor_path %}
-{% elif resolved_default_mode == '2d' and project_tools_enabled and cad2d_page_path %}
+{% elif resolved_default_mode == '2d' and cad2d_workspace_enabled and cad2d_page_path %}
   {% set resolved_workspace_src = cad2d_page_path %}
-{% elif resolved_default_mode == 'lv' and project_tools_enabled and lv_page_path %}
+{% elif resolved_default_mode == 'lv' and lv_workspace_enabled and lv_page_path %}
   {% set resolved_workspace_src = lv_page_path %}
-{% elif resolved_default_mode == 'admin' and project_exists and admin_page_path %}
+{% elif resolved_default_mode == 'versions' and versions_workspace_enabled and versions_page_path %}
+  {% set resolved_workspace_src = versions_page_path %}
+{% elif resolved_default_mode == 'admin' and admin_workspace_enabled and admin_page_path %}
   {% set resolved_workspace_src = admin_page_path %}
 {% else %}
   {% set resolved_workspace_src = resolved_project_url %}
@@ -141,7 +203,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="referrer" content="no-referrer">
   <meta name="color-scheme" content="light dark">
-  <title>VECTOPLAN</title>
+  <title>{{ project_name if project_name else 'VECTOPLAN' }} · VECTOPLAN</title>
 
   <meta http-equiv="Cache-Control" content="no-store, max-age=0, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
@@ -177,6 +239,7 @@
 
   <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}?v={{ chat_id_s }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/project_sidebar.css') }}?v={{ chat_id_s }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ project_public_id|default('new', true) }}">
 
   <script>
     (function () {
@@ -203,11 +266,17 @@
         var editorPagePath = {{ editor_page_path|tojson }};
         var initialEditorUrl = {{ initial_editor_path|tojson }};
         var mapPagePath = {{ map_page_path|tojson }};
+        var cad2dPagePath = {{ cad2d_page_path|tojson }};
+        var lvPagePath = {{ lv_page_path|tojson }};
+        var versionsPagePath = {{ versions_page_path|tojson }};
+        var adminPagePath = {{ admin_page_path|tojson }};
         var initialWorkspaceUrl = {{ resolved_workspace_src|tojson }};
 
         var projectConfigured = {{ project_is_configured|tojson }};
         var projectExists = {{ project_exists|tojson }};
         var projectToolsEnabled = {{ project_tools_enabled|tojson }};
+        var demoMode = {{ is_demo_mode|tojson }};
+        var persistent = {{ is_persistent|tojson }};
 
         try {
           currentProject = {{ project_obj|tojson }};
@@ -232,20 +301,33 @@
             projectPagePath: projectPagePath,
             projectUrl: projectPagePath,
             projectPublicUrl: projectPublicUrl,
+            contextPath: {{ context_path|tojson }},
+
             editorPagePath: editorPagePath,
+            editor3dPagePath: editorPagePath,
             initialEditorUrl: initialEditorUrl,
+
             viewerJsonPath: {{ viewer_json_path|tojson }},
             versionsPath: {{ versions_path|tojson }},
+            versionsPagePath: versionsPagePath,
+
             mapPagePath: mapPagePath,
             mapJsonPath: {{ map_json_path|tojson }},
+
             plan2dJsonPath: {{ plan2d_json_path|tojson }},
-            cad2dPagePath: {{ cad2d_page_path|tojson }},
+            cad2dPagePath: cad2dPagePath,
             cadEmbedJsonPath: {{ cad_embed_json_path|tojson }},
-            adminPagePath: {{ admin_page_path|tojson }},
-            lvPagePath: {{ lv_page_path|tojson }},
+
+            adminPagePath: adminPagePath,
+            lvPagePath: lvPagePath,
+
             uploadPath: {{ upload_path|tojson }},
             stateGetPath: {{ state_get_path|tojson }},
-            statePutPath: {{ state_put_path|tojson }}
+            statePutPath: {{ state_put_path|tojson }},
+
+            publicationPath: {{ (('/v1/projects/' ~ project_public_id_q ~ '/publication') if project_public_id and project_public_id != 'new' else '')|tojson }},
+            membersPath: {{ (('/v1/projects/' ~ project_public_id_q ~ '/members') if project_public_id and project_public_id != 'new' else '')|tojson }},
+            invitationsPath: {{ (('/v1/projects/' ~ project_public_id_q ~ '/invitations') if project_public_id and project_public_id != 'new' else '')|tojson }}
           };
         } catch (e) {
           workspacePaths = {};
@@ -336,7 +418,7 @@
         }
 
         if (!projectPagePath) {
-          projectPagePath = "/ui/project/new";
+          projectPagePath = "/ui/project/new/project";
         }
 
         if (!initialWorkspaceUrl) {
@@ -351,17 +433,23 @@
           chatUiEnabled: false,
 
           currentUser: currentUser,
+          authenticated: {{ is_authenticated|tojson }},
+          demoMode: demoMode,
+          persistent: persistent,
+
           project: currentProject,
           currentProject: currentProject,
           projectId: {{ project_id|tojson }},
           projectPublicId: {{ project_public_id|tojson }},
           currentProjectId: {{ project_public_id|tojson }},
           projectName: {{ project_name|tojson }},
+          projectVisibility: {{ project_visibility|tojson }},
           projectIsNew: {{ project_is_new|tojson }},
           projectExists: projectExists,
           projectConfigured: projectConfigured,
           projectToolsEnabled: projectToolsEnabled,
           projectSetupStatus: {{ project_setup_status|tojson }},
+          canViewProject: {{ can_view_project|tojson }},
           canEditProject: {{ can_edit_project|tojson }},
           canManageProject: {{ can_manage_project|tojson }},
 
@@ -373,9 +461,10 @@
           projectPagePath: projectPagePath,
           projectUrl: projectPagePath,
           projectPublicUrl: projectPublicUrl,
-          projectApiPath: {{ (('/v1/projects/' ~ project_public_id) if project_public_id and project_public_id != 'new' else '/v1/projects')|tojson }},
+          projectApiPath: {{ (('/v1/projects/' ~ project_public_id_q) if project_public_id and project_public_id != 'new' else '/v1/projects')|tojson }},
 
           editorPagePath: editorPagePath,
+          editor3dPagePath: editorPagePath,
           initialEditorUrl: initialEditorUrl,
           viewerJsonPath: {{ viewer_json_path|tojson }},
           initialViewerUrl: initialEditorUrl,
@@ -383,58 +472,105 @@
           viewer_url: initialEditorUrl,
 
           versionsPath: {{ versions_path|tojson }},
+          versionsPagePath: versionsPagePath,
 
           stateGetPath: {{ state_get_path|tojson }},
           statePutPath: {{ state_put_path|tojson }},
 
           plan2dJsonPath: {{ plan2d_json_path|tojson }},
-          cad2dPagePath: {{ cad2d_page_path|tojson }},
+          cad2dPagePath: cad2dPagePath,
           cadEmbedJsonPath: {{ cad_embed_json_path|tojson }},
           cadEmbedBase: "http://localhost:8050",
 
           mapPagePath: mapPagePath,
           mapJsonPath: {{ map_json_path|tojson }},
 
-          adminPagePath: {{ admin_page_path|tojson }},
-          lvPagePath: {{ lv_page_path|tojson }},
+          adminPagePath: adminPagePath,
+          lvPagePath: lvPagePath,
 
           uploadPath: {{ upload_path|tojson }},
 
           workspaceTabs: {
             project: {
+              key: "project",
+              mode: "project",
+              aliases: ["project", "projekt", "info"],
               enabled: true,
               configuredRequired: false,
               path: projectPagePath,
               title: "Projekt"
             },
             map: {
-              enabled: projectToolsEnabled,
+              key: "map",
+              mode: "map",
+              aliases: ["map", "karte", "openlayer"],
+              enabled: {{ map_workspace_enabled|tojson }},
               configuredRequired: true,
               path: mapPagePath,
               title: "Map"
             },
             editor3d: {
-              enabled: projectToolsEnabled,
+              key: "editor3d",
+              mode: "3d",
+              aliases: ["3d", "editor", "editor3d", "viewer", "viewer3d"],
+              enabled: {{ editor3d_workspace_enabled|tojson }},
+              configuredRequired: true,
+              path: initialEditorUrl,
+              title: "3D"
+            },
+            "3d": {
+              key: "editor3d",
+              mode: "3d",
+              aliases: ["3d", "editor", "editor3d", "viewer", "viewer3d"],
+              enabled: {{ editor3d_workspace_enabled|tojson }},
               configuredRequired: true,
               path: initialEditorUrl,
               title: "3D"
             },
             cad2d: {
-              enabled: projectToolsEnabled,
+              key: "cad2d",
+              mode: "2d",
+              aliases: ["2d", "cad", "cad2d", "plan"],
+              enabled: {{ cad2d_workspace_enabled|tojson }},
               configuredRequired: true,
-              path: {{ cad2d_page_path|tojson }},
+              path: cad2dPagePath,
+              title: "2D"
+            },
+            "2d": {
+              key: "cad2d",
+              mode: "2d",
+              aliases: ["2d", "cad", "cad2d", "plan"],
+              enabled: {{ cad2d_workspace_enabled|tojson }},
+              configuredRequired: true,
+              path: cad2dPagePath,
               title: "2D"
             },
             lv: {
-              enabled: projectToolsEnabled,
+              key: "lv",
+              mode: "lv",
+              aliases: ["lv", "boq", "leistungsverzeichnis"],
+              enabled: {{ lv_workspace_enabled|tojson }},
               configuredRequired: true,
-              path: {{ lv_page_path|tojson }},
+              path: lvPagePath,
               title: "LV"
             },
+            versions: {
+              key: "versions",
+              mode: "versions",
+              aliases: ["versions", "versionen", "history"],
+              enabled: {{ versions_workspace_enabled|tojson }},
+              configuredRequired: true,
+              path: versionsPagePath,
+              apiPath: {{ versions_path|tojson }},
+              title: "Versionen"
+            },
             admin: {
-              enabled: projectExists,
+              key: "admin",
+              mode: "admin",
+              aliases: ["admin", "settings", "team", "permissions"],
+              enabled: {{ admin_workspace_enabled|tojson }},
               configuredRequired: false,
-              path: {{ admin_page_path|tojson }},
+              path: adminPagePath,
               title: "Admin"
             }
           },
@@ -509,11 +645,18 @@
         data-project-configured="{{ 'true' if project_is_configured else 'false' }}"
         data-project-tools-enabled="{{ 'true' if project_tools_enabled else 'false' }}"
         data-project-setup-status="{{ project_setup_status }}"
+        data-project-visibility="{{ project_visibility }}"
+        data-demo-mode="{{ 'true' if is_demo_mode else 'false' }}"
+        data-persistent="{{ 'true' if is_persistent else 'false' }}"
         data-default-mode="{{ resolved_default_mode }}"
         data-workspace-mode="{{ resolved_workspace_mode }}"
         data-project-page-path="{{ resolved_project_url }}"
         data-editor-page-path="{{ editor_page_path }}"
+        data-editor3d-page-path="{{ editor_page_path }}"
         data-map-page-path="{{ map_page_path }}"
+        data-cad2d-page-path="{{ cad2d_page_path }}"
+        data-lv-page-path="{{ lv_page_path }}"
+        data-versions-page-path="{{ versions_page_path }}"
         data-project-sidebar-enabled="{{ project_sidebar_enabled_raw }}"
         data-project-sidebar-storage-key="{{ project_sidebar_storage_key }}"
         data-project-sidebar-default-width="{{ project_sidebar_default_width }}"
@@ -524,6 +667,8 @@
     {% include "partials/project_sidebar.html" ignore missing %}
 
     <aside class="viewer-panel" id="viewer-panel" aria-label="Arbeitsbereich">
+      {% include "partials/demo_banner.html" ignore missing %}
+
       <div class="viewer-toolbar">
         <div class="toolbar-left">
           <div role="group" aria-label="Arbeitsbereich" class="mode-group">
@@ -533,6 +678,7 @@
                     aria-pressed="{{ 'true' if resolved_default_mode == 'project' else 'false' }}"
                     title="Projekt"
                     data-workspace-mode-button="project"
+                    data-workspace-key="project"
                     data-workspace-path="{{ resolved_project_url }}">
               Projekt
             </button>
@@ -541,36 +687,39 @@
                     class="btn"
                     type="button"
                     aria-pressed="{{ 'true' if resolved_default_mode == 'map' else 'false' }}"
-                    title="Karte"
+                    title="Map"
                     data-workspace-mode-button="map"
+                    data-workspace-key="map"
                     data-workspace-path="{{ map_page_path }}"
                     data-requires-configured-project="true"
-                    {% if not project_tools_enabled %}disabled aria-disabled="true"{% endif %}>
-              🗺️ Map
+                    {% if not map_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+              Map
             </button>
 
             <button id="mode3dBtn"
                     class="btn"
                     type="button"
                     aria-pressed="{{ 'true' if resolved_default_mode == '3d' else 'false' }}"
-                    title="3D-Editor"
+                    title="3D"
                     data-workspace-mode-button="3d"
+                    data-workspace-key="editor3d"
                     data-workspace-path="{{ initial_editor_path }}"
                     data-requires-configured-project="true"
-                    {% if not project_tools_enabled %}disabled aria-disabled="true"{% endif %}>
-              🧊 3D
+                    {% if not editor3d_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+              3D
             </button>
 
             <button id="mode2dBtn"
                     class="btn"
                     type="button"
                     aria-pressed="{{ 'true' if resolved_default_mode == '2d' else 'false' }}"
-                    title="2D-Ansicht"
+                    title="2D"
                     data-workspace-mode-button="2d"
+                    data-workspace-key="cad2d"
                     data-workspace-path="{{ cad2d_page_path }}"
                     data-requires-configured-project="true"
-                    {% if not project_tools_enabled %}disabled aria-disabled="true"{% endif %}>
-              📐 2D
+                    {% if not cad2d_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+              2D
             </button>
 
             <button id="modeLvBtn"
@@ -579,33 +728,41 @@
                     aria-pressed="{{ 'true' if resolved_default_mode == 'lv' else 'false' }}"
                     title="Leistungsverzeichnis"
                     data-workspace-mode-button="lv"
+                    data-workspace-key="lv"
                     data-workspace-path="{{ lv_page_path }}"
                     data-requires-configured-project="true"
-                    {% if not project_tools_enabled %}disabled aria-disabled="true"{% endif %}>
-              📄 LV
+                    {% if not lv_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+              LV
             </button>
 
-            <button id="modeAdminBtn"
+            <button id="versionsToggleBtn"
                     class="btn"
                     type="button"
-                    aria-pressed="{{ 'true' if resolved_default_mode == 'admin' else 'false' }}"
-                    title="Admin"
-                    data-workspace-mode-button="admin"
-                    data-workspace-path="{{ admin_page_path }}"
-                    {% if not project_exists %}disabled aria-disabled="true"{% endif %}>
-              🔧 Admin
+                    aria-pressed="{{ 'true' if resolved_default_mode == 'versions' else 'false' }}"
+                    title="Versionen"
+                    data-workspace-mode-button="versions"
+                    data-workspace-key="versions"
+                    data-workspace-path="{{ versions_page_path }}"
+                    data-versions-api-path="{{ versions_path }}"
+                    data-requires-configured-project="true"
+                    {% if not versions_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+              Versionen
             </button>
-          </div>
 
-          <button id="versionsToggleBtn"
-                  class="btn"
-                  type="button"
-                  title="Versionen anzeigen"
-                  aria-controls="versionsDropdown"
-                  aria-expanded="false"
-                  {% if not project_exists %}disabled aria-disabled="true"{% endif %}>
-            📚 Versionen
-          </button>
+            {% if can_manage_project %}
+              <button id="modeAdminBtn"
+                      class="btn"
+                      type="button"
+                      aria-pressed="{{ 'true' if resolved_default_mode == 'admin' else 'false' }}"
+                      title="Admin"
+                      data-workspace-mode-button="admin"
+                      data-workspace-key="admin"
+                      data-workspace-path="{{ admin_page_path }}"
+                      {% if not admin_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+                Admin
+              </button>
+            {% endif %}
+          </div>
         </div>
 
         <div class="toolbar-right">
@@ -613,7 +770,7 @@
                   class="btn"
                   type="button"
                   aria-pressed="false"
-                  title="Theme umschalten">🌗 Theme</button>
+                  title="Theme umschalten">Theme</button>
 
           <a id="viewerOpenRawBtn"
              class="btn btn-link"
@@ -621,7 +778,7 @@
              target="_blank"
              rel="noopener noreferrer"
              title="Aktuelle Ansicht im neuen Tab öffnen"
-             aria-label="Aktuelle Ansicht öffnen">🔗 Öffnen</a>
+             aria-label="Aktuelle Ansicht öffnen">Öffnen</a>
         </div>
       </div>
 
@@ -639,7 +796,7 @@
                     class="btn"
                     type="button"
                     title="Liste aktualisieren"
-                    aria-label="Versionen aktualisieren">⟳</button>
+                    aria-label="Versionen aktualisieren">Aktualisieren</button>
           </div>
         </header>
 

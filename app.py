@@ -46,9 +46,17 @@ def _load_core_blueprints() -> Dict[str, Optional[Blueprint]]:
     No legacy Speckle/old-viewer blueprints are loaded here.
     """
     return {
-        # New project-first app shell.
+        # Project/API layer.
         "projects_api_bp": _import_blueprint("routes.projects_api:bp"),
+
+        # App-shell project routes.
+        # Must be registered before routes.viewer because /project=<id>
+        # belongs to the shell, not directly to the iframe workspace.
         "ui_projects_bp": _import_blueprint("routes.ui.projects:bp"),
+
+        # New project/workspace viewer routes.
+        # Owns /ui/project/... iframe destinations and context.json.
+        "viewer_bp": _import_blueprint("routes.viewer:bp"),
 
         # Existing shell/workspace/chat routes.
         "ui_chat_bp": _import_blueprint("routes.ui.chat:bp"),
@@ -97,6 +105,15 @@ def _config_bool(app: Flask, key: str, default: bool = False) -> bool:
         return default
 
 
+def _config_str(app: Flask, key: str, default: str = "") -> str:
+    try:
+        value = app.config.get(key, default)
+        text = str(value if value is not None else "").strip()
+        return text or default
+    except Exception:
+        return default
+
+
 def _apply_default_config(app: Flask) -> None:
     """
     Apply safe defaults for the Speckle-free app shell and new project layer.
@@ -109,6 +126,28 @@ def _apply_default_config(app: Flask) -> None:
     app.config.setdefault("VECTOPLAN_APP_AUTO_CREATE_ALL", True)
     app.config.setdefault("VECTOPLAN_APP_ENSURE_DEFAULT_USER", True)
     app.config.setdefault("VECTOPLAN_ALLOW_USER_HEADER_OVERRIDE", False)
+
+    # Auth/demo phase defaults.
+    # Current local development stays compatible with placeholder user id=1.
+    app.config.setdefault("VECTOPLAN_AUTH_MODE", "dev")
+    app.config.setdefault("VECTOPLAN_TRUST_AUTH_HEADERS", False)
+    app.config.setdefault("VECTOPLAN_FORCE_DEMO_MODE", False)
+    app.config.setdefault("VECTOPLAN_ALLOW_DEMO_QUERY_PARAM", True)
+    app.config.setdefault("VECTOPLAN_DEMO_TTL_SECONDS", 1800)
+
+    # Future Auth/Registration service bridge.
+    app.config.setdefault("AUTH_IDENTITY_INTERNAL_URL", "")
+    app.config.setdefault("AUTH_IDENTITY_LOOKUP_PATH", "/internal/auth/identity/lookup-email")
+    app.config.setdefault("AUTH_IDENTITY_INVITATION_DISPATCH_PATH", "/internal/auth/invitations/project")
+    app.config.setdefault("AUTH_IDENTITY_API_TOKEN", "")
+    app.config.setdefault("AUTH_IDENTITY_DEV_MODE", True)
+    app.config.setdefault("AUTH_IDENTITY_DEV_REGISTERED_EMAILS", "")
+    app.config.setdefault("AUTH_IDENTITY_DEV_ACCEPT_ALL_REGISTERED", False)
+    app.config.setdefault("AUTH_IDENTITY_PLACEHOLDER_INVITES", True)
+
+    # Project publication / simplified form.
+    app.config.setdefault("PROJECT_PUBLICATION_CACHE_TTL_SECONDS", 10)
+    app.config.setdefault("VECTOPLAN_PROJECT_PAYLOAD_ALLOW_SYSTEM_REFS", False)
 
     # Hard disable legacy 3D backend behavior.
     app.config["LEGACY_SPECKLE_ENABLED"] = False
@@ -125,6 +164,13 @@ def _apply_default_config(app: Flask) -> None:
     app.config.setdefault("TEMPLATE_SEED", [])
     app.config.setdefault("TEMPLATE_SEED_PATH", None)
     app.config.setdefault("TEMPLATE_IMPORT_TO_DB_ON_STARTUP", False)
+
+    # Chunk integration.
+    app.config.setdefault("VECTOPLAN_CHUNK_INTERNAL_URL", "http://vectoplan-chunk:5000")
+    app.config.setdefault("VECTOPLAN_CHUNK_PUBLIC_URL", "")
+    app.config.setdefault("VECTOPLAN_CHUNK_PROVISION_ON_PROJECT_CREATE", True)
+    app.config.setdefault("VECTOPLAN_CHUNK_PROVISION_REQUIRED", False)
+    app.config.setdefault("VECTOPLAN_CHUNK_STATUS_CHECK_IN_APP_STATUS", False)
 
     # Editor iframe integration.
     app.config.setdefault("VECTOPLAN_EDITOR_PUBLIC_URL", "http://localhost:5100")
@@ -357,17 +403,33 @@ def _ensure_default_user_if_configured(app: Flask) -> Dict[str, Any]:
     Ensure placeholder AppUser(id=1) exists.
 
     This is best-effort during startup. Project APIs also ensure it per request.
+
+    In forced demo mode the placeholder user is intentionally not created.
     """
     result: Dict[str, Any] = {
         "enabled": _config_bool(app, "VECTOPLAN_APP_ENSURE_DEFAULT_USER", True),
         "ok": False,
         "user_id": None,
+        "skipped": False,
         "error": None,
     }
 
     if not result["enabled"]:
         result["ok"] = True
         return result
+
+    try:
+        auth_mode = _config_str(app, "VECTOPLAN_AUTH_MODE", "dev").lower()
+        force_demo = _config_bool(app, "VECTOPLAN_FORCE_DEMO_MODE", False)
+
+        if force_demo or auth_mode == "demo":
+            result["ok"] = True
+            result["skipped"] = True
+            result["reason"] = "demo_mode"
+            return result
+
+    except Exception:
+        pass
 
     try:
         with app.app_context():
@@ -427,6 +489,8 @@ def _create_system_blueprint() -> Blueprint:
                 "legacy_speckle_enabled": False,
                 "editor_integration": "iframe",
                 "project_management": True,
+                "project_viewer": True,
+                "demo_mode_supported": True,
             }
         )
 
@@ -437,6 +501,8 @@ def _create_system_blueprint() -> Blueprint:
             "service": "vectoplan-app",
             "legacy_speckle_enabled": False,
             "project_management": True,
+            "project_viewer": True,
+            "demo_mode_supported": True,
         }
 
         try:
@@ -453,6 +519,11 @@ def _create_system_blueprint() -> Blueprint:
             payload["default_user"] = dict(current_app.extensions.get("vectoplan_default_user_status") or {})
         except Exception:
             payload["default_user"] = {}
+
+        try:
+            payload["blueprints"] = sorted(str(name) for name in current_app.blueprints.keys())
+        except Exception:
+            payload["blueprints"] = []
 
         return jsonify(payload)
 
@@ -511,9 +582,14 @@ def create_app() -> Flask:
     # Core routes.
     core = _load_core_blueprints()
 
-    # New project-first routes should be available before legacy UI routes.
+    # Project routes.
+    # Order matters:
+    # 1. API routes first.
+    # 2. Shell routes next, so /project=<id> renders chat_viewer.html.
+    # 3. Viewer routes after shell routes, so /ui/project/... renders iframe workspaces.
     _register_bp(app, core.get("projects_api_bp"), "projects_api_bp")
     _register_bp(app, core.get("ui_projects_bp"), "ui_projects_bp")
+    _register_bp(app, core.get("viewer_bp"), "viewer_bp")
 
     # Existing app shell / chat / workspace routes.
     _register_bp(app, core.get("ui_chat_bp"), "ui_chat_bp")
@@ -570,11 +646,12 @@ def create_app() -> Flask:
             try:
                 path = str(request.path or "")
 
+                # Project workspaces are iframe destinations inside the app shell.
                 if path == "/ui/editor":
                     allow_embed = True
                 elif path == "/ui/project/new":
                     allow_embed = True
-                elif path.startswith("/ui/project/") and path.endswith("/project"):
+                elif path.startswith("/ui/project/"):
                     allow_embed = True
                 elif path.startswith("/ui/chat/") and path.endswith("/editor"):
                     allow_embed = True
@@ -616,7 +693,7 @@ def create_app() -> Flask:
     # Error handlers.
     @app.errorhandler(413)
     def too_large(_error):
-        return jsonify({"error": "payload too large"}), 413
+        return jsonify({"ok": False, "error": "payload too large", "code": "payload_too_large"}), 413
 
     @app.errorhandler(404)
     def not_found(error):

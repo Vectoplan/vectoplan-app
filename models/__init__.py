@@ -9,6 +9,7 @@ Zweck:
 - Hält bestehende Imports kompatibel:
     from models import Blob, Conversation
     from models import Project, ProjectVersion
+    from models import ProjectInvitation
 - Registriert alle SQLAlchemy-Models beim Import dieses Packages.
 - Nutzt die modularen Model-Dateien:
     base.py
@@ -20,6 +21,7 @@ Zweck:
     project_links.py
     project_versions.py
     project_audit.py
+    project_invitations.py
 - Lässt core.py vorerst als Kompatibilitätsschicht bestehen.
 - Verhindert doppelte SQLAlchemy-Tabellenregistrierung, indem core.py im
   Normalfall nicht mehr importiert wird.
@@ -27,13 +29,16 @@ Zweck:
 Wichtige Regel:
 - Alle produktiven Models müssen hier importiert werden, bevor db.create_all()
   oder Migrationen laufen.
+- vectoplan-app speichert Projekt-, Rollen-, Sichtbarkeits-, Einladungs-,
+  Service-Link-, Version- und Auditdaten.
+- vectoplan-app erzeugt KEINE echten Benutzeraccounts.
 - vectoplan-app speichert nur Service-Referenzen zu vectoplan-chunk.
 - vectoplan-app speichert keine Chunk-Zellen, keine Chunk-Snapshots und keine
   Chunk-Events.
 """
 
 import importlib.util
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 # ─────────────────────────────────────────────────────────────
@@ -50,6 +55,7 @@ _REQUIRED_MODEL_MODULES: Tuple[str, ...] = (
     "project_links",
     "project_versions",
     "project_audit",
+    "project_invitations",
 )
 
 _OPTIONAL_MODEL_MODULES: Tuple[str, ...] = (
@@ -94,6 +100,36 @@ def _store_import_error(module_name: str, exc: BaseException) -> None:
         pass
 
 
+def _compact_model_classes(values: Iterable[Any]) -> Tuple[Any, ...]:
+    result: List[Any] = []
+
+    try:
+        for value in values:
+            if value is None:
+                continue
+
+            try:
+                if not hasattr(value, "__tablename__"):
+                    continue
+            except Exception:
+                continue
+
+            if value not in result:
+                result.append(value)
+    except Exception:
+        pass
+
+    return tuple(result)
+
+
+def _safe_name(value: Any, default: str = "") -> str:
+    try:
+        text = str(value or "").strip()
+        return text or default
+    except Exception:
+        return default
+
+
 # ─────────────────────────────────────────────────────────────
 # Primary modular imports
 # ─────────────────────────────────────────────────────────────
@@ -123,7 +159,7 @@ if _missing:
             ProjectMembership,
             ProjectServiceLink,
             ProjectVersion,
-            CORE_MODEL_CLASSES,
+            CORE_MODEL_CLASSES as _CORE_FALLBACK_MODEL_CLASSES,
             _deep_merge_state,
             _is_legacy_viewer_key,
             _iso,
@@ -153,6 +189,52 @@ if _missing:
             "Failed to initialize models package. "
             "Required modular model files are missing and core.py fallback also failed."
         ) from exc
+
+    # Optional best-effort import, damit neue Tabellen auch in Übergangsständen
+    # registriert werden können, falls nur andere modulare Dateien fehlen.
+    ProjectInvitation = None
+    try:
+        if _module_spec_exists("project_invitations"):
+            from .project_invitations import (
+                ACTIVE_INVITATION_STATUSES,
+                DEFAULT_INVITATION_EXPIRY_DAYS,
+                DEFAULT_INVITATION_ROLE,
+                DISPATCH_FAILED,
+                DISPATCH_PENDING,
+                DISPATCH_PLACEHOLDER,
+                DISPATCH_SENT,
+                DISPATCH_SKIPPED,
+                INVITABLE_PROJECT_ROLES,
+                ProjectInvitation,
+                ROLE_ADMIN,
+                ROLE_EDITOR,
+                ROLE_OWNER,
+                ROLE_VIEWER,
+                STATUS_ACCEPTED,
+                STATUS_EXPIRED,
+                STATUS_FAILED,
+                STATUS_PENDING,
+                STATUS_REJECTED,
+                STATUS_REVOKED,
+                TERMINAL_INVITATION_STATUSES,
+                VALID_INVITATION_STATUSES,
+                VALID_PROJECT_ROLES,
+                default_expires_at,
+                generate_plain_invitation_token,
+                generate_project_invitation_public_id,
+                hash_invitation_token,
+                invitation_status_counts,
+                is_valid_email,
+                normalize_dispatch_status,
+                normalize_email,
+                normalize_invitation_role,
+                normalize_invitation_status,
+                serialize_project_invitation,
+                serialize_project_invitations,
+            )
+    except Exception as exc:
+        _store_import_error("project_invitations", exc)
+        ProjectInvitation = None
 
     # Minimal fallback constants/helpers so imports do not fail if modular files
     # are missing during transitional deployments.
@@ -251,6 +333,142 @@ if _missing:
         LINK_STATUS_ERROR,
         LINK_STATUS_DELETED,
     }
+
+    # Invitation fallback constants/helpers, falls project_invitations.py im
+    # Übergang nicht importierbar ist.
+    if "ROLE_OWNER" not in globals():
+        ROLE_OWNER = "owner"
+        ROLE_ADMIN = "admin"
+        ROLE_EDITOR = "editor"
+        ROLE_VIEWER = "viewer"
+        VALID_PROJECT_ROLES = {ROLE_OWNER, ROLE_ADMIN, ROLE_EDITOR, ROLE_VIEWER}
+        INVITABLE_PROJECT_ROLES = {ROLE_ADMIN, ROLE_EDITOR, ROLE_VIEWER}
+        DEFAULT_INVITATION_ROLE = ROLE_VIEWER
+
+        STATUS_PENDING = "pending"
+        STATUS_ACCEPTED = "accepted"
+        STATUS_REJECTED = "rejected"
+        STATUS_REVOKED = "revoked"
+        STATUS_EXPIRED = "expired"
+        STATUS_FAILED = "failed"
+        ACTIVE_INVITATION_STATUSES = {STATUS_PENDING}
+        TERMINAL_INVITATION_STATUSES = {
+            STATUS_ACCEPTED,
+            STATUS_REJECTED,
+            STATUS_REVOKED,
+            STATUS_EXPIRED,
+            STATUS_FAILED,
+        }
+        VALID_INVITATION_STATUSES = ACTIVE_INVITATION_STATUSES | TERMINAL_INVITATION_STATUSES
+
+        DISPATCH_PENDING = "pending"
+        DISPATCH_SENT = "sent"
+        DISPATCH_PLACEHOLDER = "placeholder"
+        DISPATCH_SKIPPED = "skipped"
+        DISPATCH_FAILED = "failed"
+
+        DEFAULT_INVITATION_EXPIRY_DAYS = 14
+
+        def normalize_email(value: Any) -> str:
+            try:
+                return str(value or "").strip().lower()[:320]
+            except Exception:
+                return ""
+
+        def is_valid_email(value: Any) -> bool:
+            text = normalize_email(value)
+            return bool(text and "@" in text and "." in text.rsplit("@", 1)[-1])
+
+        def normalize_invitation_role(value: Any, allow_owner: bool = False) -> str:
+            try:
+                text = str(value or DEFAULT_INVITATION_ROLE).strip().lower()
+                if text == ROLE_OWNER and not allow_owner:
+                    return ROLE_ADMIN
+                if text in VALID_PROJECT_ROLES:
+                    return text
+                return DEFAULT_INVITATION_ROLE
+            except Exception:
+                return DEFAULT_INVITATION_ROLE
+
+        def normalize_invitation_status(value: Any) -> str:
+            try:
+                text = str(value or STATUS_PENDING).strip().lower()
+                return text if text in VALID_INVITATION_STATUSES else STATUS_PENDING
+            except Exception:
+                return STATUS_PENDING
+
+        def normalize_dispatch_status(value: Any) -> str:
+            try:
+                text = str(value or DISPATCH_PENDING).strip().lower()
+                if text in {
+                    DISPATCH_PENDING,
+                    DISPATCH_SENT,
+                    DISPATCH_PLACEHOLDER,
+                    DISPATCH_SKIPPED,
+                    DISPATCH_FAILED,
+                }:
+                    return text
+                return DISPATCH_PENDING
+            except Exception:
+                return DISPATCH_PENDING
+
+        def generate_project_invitation_public_id() -> str:
+            try:
+                import secrets
+                return "pinv_" + secrets.token_hex(16)
+            except Exception:
+                return "pinv_fallback"
+
+        def generate_plain_invitation_token() -> str:
+            try:
+                import secrets
+                return secrets.token_urlsafe(32)
+            except Exception:
+                return "fallback-token"
+
+        def hash_invitation_token(token: Any) -> str:
+            try:
+                import hashlib
+                text = str(token or "")
+                return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else ""
+            except Exception:
+                return ""
+
+        def default_expires_at(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return _utcnow()
+            except Exception:
+                return None
+
+        def invitation_status_counts(invitations: Any) -> Dict[str, int]:
+            counts: Dict[str, int] = {"total": 0}
+            try:
+                for invitation in list(invitations or []):
+                    status = normalize_invitation_status(getattr(invitation, "status", STATUS_PENDING))
+                    counts[status] = counts.get(status, 0) + 1
+                    counts["total"] = counts.get("total", 0) + 1
+            except Exception:
+                pass
+            return counts
+
+        def serialize_project_invitation(invitation: Any, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+            try:
+                if invitation is None:
+                    return {}
+                if hasattr(invitation, "to_dict"):
+                    return invitation.to_dict(*args, **kwargs)
+                return {}
+            except Exception:
+                return {}
+
+        def serialize_project_invitations(invitations: Any, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
+            try:
+                return [
+                    serialize_project_invitation(invitation, *args, **kwargs)
+                    for invitation in list(invitations or [])
+                ]
+            except Exception:
+                return []
 
     def normalize_service(value: Any, default: str = SERVICE_EXTERNAL) -> str:
         try:
@@ -353,6 +571,7 @@ if _missing:
         chunk_universe_id = kwargs.get("chunk_universe_id") or kwargs.get("chunkUniverseId")
         chunk_world_id = kwargs.get("chunk_world_id") or kwargs.get("chunkWorldId")
         status = normalize_chunk_status(kwargs.get("status"), has_refs=bool(chunk_project_id and chunk_world_id))
+        route_hints = kwargs.get("route_hints") or kwargs.get("routeHints") or {}
         return {
             "status": status,
             "ready": bool(chunk_project_id and chunk_world_id and status == CHUNK_STATUS_READY),
@@ -362,8 +581,8 @@ if _missing:
             "chunkUniverseId": chunk_universe_id,
             "chunk_world_id": chunk_world_id,
             "chunkWorldId": chunk_world_id,
-            "route_hints": kwargs.get("route_hints") or kwargs.get("routeHints") or {},
-            "routeHints": kwargs.get("route_hints") or kwargs.get("routeHints") or {},
+            "route_hints": route_hints,
+            "routeHints": route_hints,
             "error": kwargs.get("error") or {},
         }
 
@@ -432,10 +651,14 @@ if _missing:
 
     def upsert_chunk_service_link(*args: Any, **kwargs: Any) -> Any:
         kwargs["service"] = SERVICE_CHUNK
-        return build_service_link(**kwargs)
+        return build_service_link(*args, **kwargs)
 
     def upsert_chunk_service_links(*args: Any, **kwargs: Any) -> List[Any]:
         return [upsert_chunk_service_link(*args, **kwargs)]
+
+    CORE_MODEL_CLASSES = _compact_model_classes(
+        tuple(_CORE_FALLBACK_MODEL_CLASSES) + (ProjectInvitation,)
+    )
 
 else:
     _MODEL_SOURCE = "modular"
@@ -678,21 +901,62 @@ else:
             serialize_audit_events,
         )
 
-        CORE_MODEL_CLASSES = (
-            AppUser,
-            Client,
-            IdempotencyKey,
-            Job,
-            Blob,
-            Conversation,
-            MessageTemplate,
-            ConversationState,
-            Project,
-            ProjectMembership,
-            ProjectEmbedPolicy,
-            ProjectServiceLink,
-            ProjectVersion,
-            ProjectAuditEvent,
+        from .project_invitations import (
+            ACTIVE_INVITATION_STATUSES,
+            DEFAULT_INVITATION_EXPIRY_DAYS,
+            DEFAULT_INVITATION_ROLE,
+            DISPATCH_FAILED,
+            DISPATCH_PENDING,
+            DISPATCH_PLACEHOLDER,
+            DISPATCH_SENT,
+            DISPATCH_SKIPPED,
+            INVITABLE_PROJECT_ROLES,
+            ProjectInvitation,
+            ROLE_ADMIN,
+            ROLE_EDITOR,
+            ROLE_OWNER,
+            ROLE_VIEWER,
+            STATUS_ACCEPTED,
+            STATUS_EXPIRED,
+            STATUS_FAILED,
+            STATUS_PENDING,
+            STATUS_REJECTED,
+            STATUS_REVOKED,
+            TERMINAL_INVITATION_STATUSES,
+            VALID_INVITATION_STATUSES,
+            VALID_PROJECT_ROLES,
+            default_expires_at,
+            generate_plain_invitation_token,
+            generate_project_invitation_public_id,
+            hash_invitation_token,
+            invitation_status_counts,
+            is_valid_email,
+            normalize_dispatch_status,
+            normalize_email,
+            normalize_invitation_role,
+            normalize_invitation_status,
+            serialize_project_invitation,
+            serialize_project_invitations,
+        )
+
+        CORE_MODEL_CLASSES = _compact_model_classes(
+            (
+                AppUser,
+                Client,
+                IdempotencyKey,
+                Job,
+                Blob,
+                Conversation,
+                MessageTemplate,
+                ConversationState,
+                Project,
+                ProjectMembership,
+                ProjectEmbedPolicy,
+                ProjectServiceLink,
+                ProjectVersion,
+                ProjectAuditEvent,
+                ProjectInvitation,
+            )
         )
 
     except Exception as exc:
@@ -701,7 +965,7 @@ else:
             "Failed to import modular VECTOPLAN model package. "
             "Check models/base.py, users.py, legacy.py, projects.py, "
             "project_access.py, project_embed.py, project_links.py, "
-            "project_versions.py and project_audit.py."
+            "project_versions.py, project_audit.py and project_invitations.py."
         ) from exc
 
 
@@ -754,6 +1018,16 @@ try:
 except NameError:
     ProjectVersionLink = ProjectVersion
 
+try:
+    ProjectInvite
+except NameError:
+    ProjectInvite = ProjectInvitation
+
+try:
+    ProjectInvitationLink
+except NameError:
+    ProjectInvitationLink = ProjectInvitation
+
 
 # ─────────────────────────────────────────────────────────────
 # Model registry helpers
@@ -767,23 +1041,26 @@ def get_core_model_classes() -> Tuple[Any, ...]:
     from modular model files in normal operation.
     """
     try:
-        return tuple(CORE_MODEL_CLASSES)
+        return _compact_model_classes(CORE_MODEL_CLASSES)
     except Exception:
-        return (
-            AppUser,
-            Client,
-            IdempotencyKey,
-            Job,
-            Blob,
-            Conversation,
-            MessageTemplate,
-            ConversationState,
-            Project,
-            ProjectMembership,
-            ProjectEmbedPolicy,
-            ProjectServiceLink,
-            ProjectVersion,
-            ProjectAuditEvent,
+        return _compact_model_classes(
+            (
+                AppUser,
+                Client,
+                IdempotencyKey,
+                Job,
+                Blob,
+                Conversation,
+                MessageTemplate,
+                ConversationState,
+                Project,
+                ProjectMembership,
+                ProjectEmbedPolicy,
+                ProjectServiceLink,
+                ProjectVersion,
+                ProjectAuditEvent,
+                ProjectInvitation,
+            )
         )
 
 
@@ -914,6 +1191,63 @@ def is_app_chunk_model_shape_ready() -> bool:
         return False
 
 
+def is_project_invitation_model_shape_ready() -> bool:
+    """Return whether project invitation model exposes required invitation shape."""
+    try:
+        column_map = get_model_column_map()
+        columns = set(column_map.get("ProjectInvitation", []))
+
+        required = {
+            "id",
+            "public_id",
+            "project_id",
+            "email",
+            "email_normalized",
+            "auth_user_id",
+            "role",
+            "status",
+            "dispatch_status",
+            "invited_by_user_id",
+            "invited_at",
+            "expires_at",
+            "metadata_json",
+        }
+
+        return required.issubset(columns)
+    except Exception:
+        return False
+
+
+def get_project_invitations_model_status() -> Dict[str, Any]:
+    """Lightweight diagnostics for ProjectInvitation."""
+    try:
+        model_cls = globals().get("ProjectInvitation")
+        if model_cls is None:
+            return {
+                "ok": False,
+                "available": False,
+                "reason": "ProjectInvitation not imported",
+            }
+
+        return {
+            "ok": True,
+            "available": True,
+            "model": _safe_name(getattr(model_cls, "__name__", ""), "ProjectInvitation"),
+            "table": _safe_name(getattr(model_cls, "__tablename__", ""), "project_invitations"),
+            "columns": _model_columns(model_cls),
+            "shapeReady": is_project_invitation_model_shape_ready(),
+            "validRoles": sorted(list(VALID_PROJECT_ROLES)),
+            "invitableRoles": sorted(list(INVITABLE_PROJECT_ROLES)),
+            "validStatuses": sorted(list(VALID_INVITATION_STATUSES)),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "available": False,
+            "error": str(exc),
+        }
+
+
 def get_model_import_status() -> Dict[str, Any]:
     """
     Return import diagnostics for this package.
@@ -931,6 +1265,7 @@ def get_model_import_status() -> Dict[str, Any]:
         "tables": get_model_table_names(),
         "columnMap": get_model_column_map(),
         "appChunkModelShapeReady": is_app_chunk_model_shape_ready(),
+        "projectInvitationModelShapeReady": is_project_invitation_model_shape_ready(),
     }
 
 
@@ -943,6 +1278,7 @@ def get_model_status() -> Dict[str, Any]:
         "import": get_model_import_status(),
         "tables": get_model_table_names(),
         "appChunkModelShapeReady": is_app_chunk_model_shape_ready(),
+        "projectInvitationModelShapeReady": is_project_invitation_model_shape_ready(),
     }
 
     try:
@@ -955,8 +1291,10 @@ def get_model_status() -> Dict[str, Any]:
             status["project_links"] = get_project_links_model_status()
             status["project_versions"] = get_project_versions_model_status()
             status["project_audit"] = get_project_audit_model_status()
+            status["project_invitations"] = get_project_invitations_model_status()
         else:
             status["core_fallback"] = True
+            status["project_invitations"] = get_project_invitations_model_status()
 
     except Exception as exc:
         status["ok"] = False
@@ -975,6 +1313,10 @@ def ensure_default_user(*args: Any, **kwargs: Any) -> Any:
 
     In modular mode this delegates to models/users.py.
     In core fallback mode this delegates to AppUser.ensure_default_user().
+
+    Wichtig:
+    Dieser Helper ist nur ein aktueller Dev-/Placeholder-Pfad.
+    Er ist nicht die echte spätere Benutzerregistrierung.
     """
     try:
         if _MODEL_SOURCE == "modular":
@@ -1044,12 +1386,15 @@ __all__ = [
     "ProjectEmbedPolicy",
     "ProjectServiceLink",
     "ProjectAuditEvent",
+    "ProjectInvitation",
     # aliases
     "User",
     "ProjectUser",
     "ProjectAccess",
     "ProjectPermission",
     "ProjectVersionLink",
+    "ProjectInvite",
+    "ProjectInvitationLink",
     # app project constants
     "PROJECT_SETUP_DRAFT",
     "PROJECT_SETUP_DEFINED",
@@ -1060,6 +1405,29 @@ __all__ = [
     "PROJECT_VISIBILITY_PRIVATE",
     "PROJECT_VISIBILITY_SHARED",
     "PROJECT_VISIBILITY_PUBLIC",
+    # invitation constants
+    "ROLE_OWNER",
+    "ROLE_ADMIN",
+    "ROLE_EDITOR",
+    "ROLE_VIEWER",
+    "VALID_PROJECT_ROLES",
+    "INVITABLE_PROJECT_ROLES",
+    "DEFAULT_INVITATION_ROLE",
+    "STATUS_PENDING",
+    "STATUS_ACCEPTED",
+    "STATUS_REJECTED",
+    "STATUS_REVOKED",
+    "STATUS_EXPIRED",
+    "STATUS_FAILED",
+    "ACTIVE_INVITATION_STATUSES",
+    "TERMINAL_INVITATION_STATUSES",
+    "VALID_INVITATION_STATUSES",
+    "DISPATCH_PENDING",
+    "DISPATCH_SENT",
+    "DISPATCH_PLACEHOLDER",
+    "DISPATCH_SKIPPED",
+    "DISPATCH_FAILED",
+    "DEFAULT_INVITATION_EXPIRY_DAYS",
     # chunk project constants
     "CHUNK_STATUS_DISABLED",
     "CHUNK_STATUS_PENDING",
@@ -1111,6 +1479,8 @@ __all__ = [
     "get_model_import_status",
     "get_model_status",
     "is_app_chunk_model_shape_ready",
+    "is_project_invitation_model_shape_ready",
+    "get_project_invitations_model_status",
     "ensure_default_user",
     "current_user_id_placeholder",
     # user helpers
@@ -1144,6 +1514,19 @@ __all__ = [
     "serialize_membership",
     "serialize_memberships",
     "ensure_owner_membership",
+    # invitation helpers
+    "normalize_email",
+    "is_valid_email",
+    "normalize_invitation_role",
+    "normalize_invitation_status",
+    "normalize_dispatch_status",
+    "generate_project_invitation_public_id",
+    "generate_plain_invitation_token",
+    "hash_invitation_token",
+    "default_expires_at",
+    "invitation_status_counts",
+    "serialize_project_invitation",
+    "serialize_project_invitations",
     # embed helpers
     "normalize_embed_mode",
     "build_embed_policy",

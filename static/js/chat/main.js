@@ -20,7 +20,7 @@ import { loadVersions } from "./versions.js";
 const WORKSPACE_IFRAME_ALLOW = "fullscreen; pointer-lock; clipboard-read; clipboard-write";
 const WORKSPACE_IFRAME_REFERRER_POLICY = "no-referrer";
 
-const DEFAULT_PROJECT_ROUTE = "/ui/project/new";
+const DEFAULT_PROJECT_ROUTE = "/ui/project/new/project";
 
 const PROJECT_SIDEBAR_ROOT_SELECTOR = "[data-vp-project-sidebar]";
 
@@ -32,7 +32,20 @@ const LEGACY_OR_INTERNAL_BROWSER_TARGETS = [
   "http://server-openlayer:8090",
   "http://vectoplan-editor:5000",
   "http://editor:5000",
+  "http://server-editor:5000",
 ];
+
+const INTERNAL_HOSTNAMES = new Set([
+  "openlayer",
+  "vectoplan-openlayer",
+  "server-openlayer",
+  "vectoplan-editor",
+  "editor",
+  "server-editor",
+  "vectoplan-chunk",
+  "chunk",
+  "server-chunk",
+]);
 
 const MODE_TO_BUTTON_ID = {
   project: "modeProjectBtn",
@@ -40,6 +53,7 @@ const MODE_TO_BUTTON_ID = {
   "3d": "mode3dBtn",
   "2d": "mode2dBtn",
   lv: "modeLvBtn",
+  versions: "versionsToggleBtn",
   admin: "modeAdminBtn",
 };
 
@@ -47,14 +61,17 @@ const MODE_TITLE = {
   project: "Projekt",
   "3d": "VECTOPLAN Editor",
   editor: "VECTOPLAN Editor",
+  editor3d: "VECTOPLAN Editor",
   map: "Karte",
   "2d": "2D Ansicht",
   cad2d: "2D Ansicht",
   lv: "Leistungsverzeichnis",
+  versions: "Versionen",
   admin: "Admin",
 };
 
 const MODES_REQUIRING_CONFIGURED_PROJECT = new Set(["map", "3d", "2d", "lv"]);
+const MODES_REQUIRING_EXISTING_PROJECT = new Set(["map", "3d", "2d", "lv", "versions", "admin"]);
 
 
 /* ───────────────────────── Boot safety ───────────────────────── */
@@ -246,6 +263,25 @@ function pathValue(key, fallback = "") {
   }
 }
 
+function currentProject() {
+  try {
+    const c = cfg();
+    const project =
+      c.currentProject ||
+      c.project ||
+      window.__VECTOPLAN_CURRENT_PROJECT__ ||
+      {};
+
+    if (project && typeof project === "object" && !Array.isArray(project)) {
+      return project;
+    }
+
+    return {};
+  } catch (_) {
+    return {};
+  }
+}
+
 function projectPublicId() {
   try {
     const p = currentProject();
@@ -278,24 +314,206 @@ function projectId() {
   }
 }
 
+function projectExists() {
+  try {
+    if (cfgBool("projectExists", false)) return true;
+
+    const publicId = projectPublicId();
+    const isNew = cfgBool("projectIsNew", dataValue("projectIsNew", "true") === "true");
+
+    return !!publicId && publicId !== "new" && !isNew;
+  } catch (_) {
+    return false;
+  }
+}
+
+function projectConfigured() {
+  try {
+    if (cfgBool("projectConfigured", false)) return true;
+
+    const p = currentProject();
+    const status = String(
+      p.setup_status ||
+        p.setupStatus ||
+        cfgValue("projectSetupStatus", dataValue("projectSetupStatus", "draft")) ||
+        "draft"
+    ).trim().toLowerCase();
+
+    return (
+      boolFromValue(p.is_configured || p.isConfigured, false) ||
+      status === "configured" ||
+      dataValue("projectConfigured", "false") === "true"
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+function projectToolsEnabled() {
+  try {
+    return projectExists() && projectConfigured();
+  } catch (_) {
+    return false;
+  }
+}
+
+function canManageProject() {
+  try {
+    if (cfgBool("canManageProject", false)) return true;
+
+    const p = currentProject();
+    const access = p.access && typeof p.access === "object" ? p.access : {};
+    const permissions = access.permissions && typeof access.permissions === "object" ? access.permissions : {};
+
+    return boolFromValue(
+      access.can_manage ||
+        access.canManage ||
+        permissions.manage ||
+        permissions.manage_settings ||
+        permissions.manageSettings,
+      false
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+
+/* ───────────────────────── Mode / tab helpers ───────────────────────── */
+
+function normalizeMode(mode) {
+  try {
+    const value = String(mode || "").trim().toLowerCase().replace(/-/g, "_");
+
+    if (["project", "projekt", "meta", "metadata", "info", "overview"].includes(value)) return "project";
+
+    if (["editor", "editor3d", "editor_3d", "viewer", "viewer3d", "model", "3d"].includes(value)) return "3d";
+
+    if (["cad", "cad2d", "cad_2d", "plan", "plan2d", "2d"].includes(value)) return "2d";
+
+    if (["map", "karte", "openlayer", "openlayers"].includes(value)) return "map";
+
+    if (["lv", "boq", "leistungsverzeichnis"].includes(value)) return "lv";
+
+    if (["versions", "version", "versionen", "history"].includes(value)) return "versions";
+
+    if (["admin", "settings", "team", "permissions", "rechte"].includes(value)) return "admin";
+
+    return "project";
+  } catch (_) {
+    return "project";
+  }
+}
+
+function canonicalTabKey(mode) {
+  try {
+    const normalized = normalizeMode(mode);
+
+    if (normalized === "3d") return "editor3d";
+    if (normalized === "2d") return "cad2d";
+
+    return normalized;
+  } catch (_) {
+    return "project";
+  }
+}
+
+function workspaceTabs() {
+  try {
+    const tabs = cfgObject("workspaceTabs", {});
+    return tabs && typeof tabs === "object" && !Array.isArray(tabs) ? tabs : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function tabConfig(mode) {
+  try {
+    const tabs = workspaceTabs();
+    const normalized = normalizeMode(mode);
+    const key = canonicalTabKey(normalized);
+
+    const candidates = [
+      key,
+      normalized,
+      mode,
+      String(mode || "").trim(),
+    ];
+
+    for (const candidate of candidates) {
+      if (candidate && tabs[candidate] && typeof tabs[candidate] === "object") {
+        return tabs[candidate];
+      }
+    }
+
+    return {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function tabEnabled(mode, fallback = false) {
+  try {
+    const tab = tabConfig(mode);
+
+    if (tab && Object.prototype.hasOwnProperty.call(tab, "enabled")) {
+      return boolFromValue(tab.enabled, fallback);
+    }
+
+    return !!fallback;
+  } catch (_) {
+    return !!fallback;
+  }
+}
+
+function buttonForMode(mode) {
+  try {
+    const normalized = normalizeMode(mode);
+    const id = MODE_TO_BUTTON_ID[normalized];
+    return id ? $(id) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function buttonWorkspacePath(mode) {
+  try {
+    const btn = buttonForMode(mode);
+    if (!btn || !btn.dataset) return "";
+
+    return String(btn.dataset.workspacePath || "").trim();
+  } catch (_) {
+    return "";
+  }
+}
+
+
+/* ───────────────────────── URL safety ───────────────────────── */
+
 function routeForProject(pathSuffix = "project") {
   try {
     const publicId = projectPublicId();
+    const suffix = String(pathSuffix || "project").trim().toLowerCase().replace(/-/g, "_");
+
     if (!publicId || publicId === "new") {
-      return pathSuffix === "project" ? DEFAULT_PROJECT_ROUTE : "";
+      return suffix === "project" ? DEFAULT_PROJECT_ROUTE : "";
     }
 
-    if (pathSuffix === "project") return `/ui/project/${encodePathPart(publicId)}/project`;
-    if (pathSuffix === "editor") return `/ui/project/${encodePathPart(publicId)}/editor`;
-    if (pathSuffix === "map") return `/ui/project/${encodePathPart(publicId)}/map`;
-    if (pathSuffix === "cad2d") return `/ui/project/${encodePathPart(publicId)}/cad2d`;
-    if (pathSuffix === "lv") return `/ui/project/${encodePathPart(publicId)}/lv`;
-    if (pathSuffix === "admin") return `/ui/project/${encodePathPart(publicId)}/admin`;
-    if (pathSuffix === "plan2d") return `/ui/project/${encodePathPart(publicId)}/plan2d.json`;
-    if (pathSuffix === "cad-embed") return `/ui/project/${encodePathPart(publicId)}/cad-embed.json`;
-    if (pathSuffix === "map-json") return `/ui/project/${encodePathPart(publicId)}/map.json`;
+    const id = encodePathPart(publicId);
 
-    return `/ui/project/${encodePathPart(publicId)}/project`;
+    if (suffix === "project") return `/ui/project/${id}/project`;
+    if (["editor", "editor3d", "editor_3d", "3d", "viewer", "viewer3d"].includes(suffix)) return `/ui/project/${id}/editor3d`;
+    if (suffix === "map") return `/ui/project/${id}/map`;
+    if (["cad2d", "cad_2d", "2d"].includes(suffix)) return `/ui/project/${id}/cad2d`;
+    if (suffix === "lv") return `/ui/project/${id}/lv`;
+    if (suffix === "versions") return `/ui/project/${id}/versions`;
+    if (suffix === "admin") return `/ui/project/${id}/admin`;
+    if (suffix === "plan2d") return `/ui/project/${id}/plan2d.json`;
+    if (suffix === "cad_embed" || suffix === "cad-embed") return `/ui/project/${id}/cad-embed.json`;
+    if (suffix === "map_json" || suffix === "map-json") return `/ui/project/${id}/map.json`;
+    if (suffix === "context") return `/ui/project/${id}/context.json`;
+
+    return `/ui/project/${id}/project`;
   } catch (_) {
     return pathSuffix === "project" ? DEFAULT_PROJECT_ROUTE : "";
   }
@@ -369,15 +587,7 @@ function isUnsafeLegacyTarget(input) {
       const url = new URL(raw, location.origin);
       const host = String(url.hostname || "").toLowerCase();
 
-      if (
-        [
-          "openlayer",
-          "vectoplan-openlayer",
-          "server-openlayer",
-          "vectoplan-editor",
-          "editor",
-        ].includes(host)
-      ) {
+      if (INTERNAL_HOSTNAMES.has(host)) {
         return true;
       }
     } catch (_) {}
@@ -391,81 +601,203 @@ function isUnsafeLegacyTarget(input) {
 function sanitizeWorkspaceUrl(input, fallback) {
   try {
     const raw = normalizeRelativeUrl(input);
+    const fallbackRaw = normalizeRelativeUrl(fallback);
 
     if (!raw || isUnsafeLegacyTarget(raw)) {
-      return normalizeRelativeUrl(fallback);
+      if (fallbackRaw && fallbackRaw !== raw && !isUnsafeLegacyTarget(fallbackRaw)) {
+        return fallbackRaw;
+      }
+
+      return projectUrl();
     }
 
     return raw;
   } catch (_) {
-    return normalizeRelativeUrl(fallback);
+    return normalizeRelativeUrl(fallback) || projectUrl();
   }
 }
 
 
-/* ───────────────────────── Project state helpers ───────────────────────── */
+/* ───────────────────────── Workspace URL resolution ───────────────────────── */
 
-function currentProject() {
+function projectUrl() {
   try {
-    const c = cfg();
-    const project =
-      c.currentProject ||
-      c.project ||
-      window.__VECTOPLAN_CURRENT_PROJECT__ ||
-      {};
+    const fallback = DEFAULT_PROJECT_ROUTE;
 
-    if (project && typeof project === "object" && !Array.isArray(project)) {
-      return project;
+    const candidate =
+      buttonWorkspacePath("project") ||
+      pathValue("projectPagePath") ||
+      pathValue("projectUrl") ||
+      cfgValue("projectPagePath") ||
+      cfgValue("projectUrl") ||
+      dataValue("projectPagePath") ||
+      routeForProject("project") ||
+      fallback;
+
+    return sanitizeWorkspaceUrl(candidate, fallback);
+  } catch (_) {
+    return DEFAULT_PROJECT_ROUTE;
+  }
+}
+
+function editorUrl() {
+  try {
+    const fallback = routeForProject("editor3d") || projectUrl();
+
+    const candidate =
+      buttonWorkspacePath("3d") ||
+      pathValue("editor3dPagePath") ||
+      pathValue("editorPagePath") ||
+      pathValue("initialEditorUrl") ||
+      cfgValue("editor3dPagePath") ||
+      cfgValue("editorPagePath") ||
+      cfgValue("initialEditorUrl") ||
+      dataValue("editor3dPagePath") ||
+      dataValue("editorPagePath") ||
+      fallback;
+
+    return sanitizeWorkspaceUrl(candidate, fallback);
+  } catch (_) {
+    return routeForProject("editor3d") || projectUrl();
+  }
+}
+
+function mapUrl() {
+  try {
+    const fallback = routeForProject("map") || projectUrl();
+
+    const candidate =
+      buttonWorkspacePath("map") ||
+      pathValue("mapPagePath") ||
+      cfgValue("mapPagePath") ||
+      dataValue("mapPagePath") ||
+      fallback;
+
+    return sanitizeWorkspaceUrl(candidate, fallback);
+  } catch (_) {
+    return routeForProject("map") || projectUrl();
+  }
+}
+
+function twoDPageUrl() {
+  try {
+    const fallback = routeForProject("cad2d") || projectUrl();
+
+    const candidate =
+      buttonWorkspacePath("2d") ||
+      pathValue("cad2dPagePath") ||
+      cfgValue("cad2dPagePath") ||
+      dataValue("cad2dPagePath") ||
+      fallback;
+
+    return sanitizeWorkspaceUrl(candidate, fallback);
+  } catch (_) {
+    return routeForProject("cad2d") || projectUrl();
+  }
+}
+
+function adminUrl() {
+  try {
+    const fallback = routeForProject("admin") || projectUrl();
+
+    const candidate =
+      buttonWorkspacePath("admin") ||
+      pathValue("adminPagePath") ||
+      cfgValue("adminPagePath") ||
+      dataValue("adminPagePath") ||
+      fallback;
+
+    return sanitizeWorkspaceUrl(candidate, fallback);
+  } catch (_) {
+    return routeForProject("admin") || projectUrl();
+  }
+}
+
+function lvUrl() {
+  try {
+    const fallback = routeForProject("lv") || projectUrl();
+
+    const candidate =
+      buttonWorkspacePath("lv") ||
+      pathValue("lvPagePath") ||
+      cfgValue("lvPagePath") ||
+      dataValue("lvPagePath") ||
+      fallback;
+
+    return sanitizeWorkspaceUrl(candidate, fallback);
+  } catch (_) {
+    return routeForProject("lv") || projectUrl();
+  }
+}
+
+function versionsPageUrl() {
+  try {
+    const fallback = routeForProject("versions") || projectUrl();
+
+    const candidate =
+      buttonWorkspacePath("versions") ||
+      pathValue("versionsPagePath") ||
+      cfgValue("versionsPagePath") ||
+      dataValue("versionsPagePath") ||
+      fallback;
+
+    return sanitizeWorkspaceUrl(candidate, fallback);
+  } catch (_) {
+    return routeForProject("versions") || projectUrl();
+  }
+}
+
+function versionsApiUrl() {
+  try {
+    const candidate =
+      pathValue("versionsPath") ||
+      cfgValue("versionsPath") ||
+      cfgValue("versionsApiPath") ||
+      "";
+
+    return sanitizeWorkspaceUrl(candidate, "");
+  } catch (_) {
+    return "";
+  }
+}
+
+async function resolve2dUrl() {
+  try {
+    const jsonPath =
+      pathValue("cadEmbedJsonPath") ||
+      cfgValue("cadEmbedJsonPath") ||
+      routeForProject("cad-embed");
+
+    if (!jsonPath) return twoDPageUrl();
+
+    const data = await fetch(jsonPath, {
+      credentials: "same-origin",
+      cache: "no-store",
+    })
+      .then((response) => response.json())
+      .catch(() => null);
+
+    const candidates = [
+      data?.iframe_url,
+      data?.embed_url,
+      data?.viewer_url,
+      data?.url,
+      data?.src,
+    ];
+
+    for (const candidate of candidates) {
+      const value = String(candidate || "").trim();
+      if (value && !isUnsafeLegacyTarget(value)) return value;
     }
 
-    return {};
+    return twoDPageUrl();
   } catch (_) {
-    return {};
+    return twoDPageUrl();
   }
 }
 
-function projectExists() {
-  try {
-    if (cfgBool("projectExists", false)) return true;
 
-    const publicId = projectPublicId();
-    const isNew = cfgBool("projectIsNew", dataValue("projectIsNew", "true") === "true");
-
-    return !!publicId && publicId !== "new" && !isNew;
-  } catch (_) {
-    return false;
-  }
-}
-
-function projectConfigured() {
-  try {
-    if (cfgBool("projectConfigured", false)) return true;
-
-    const p = currentProject();
-    const status = String(
-      p.setup_status ||
-        p.setupStatus ||
-        cfgValue("projectSetupStatus", dataValue("projectSetupStatus", "draft")) ||
-        "draft"
-    ).trim().toLowerCase();
-
-    return (
-      boolFromValue(p.is_configured || p.isConfigured, false) ||
-      status === "configured" ||
-      dataValue("projectConfigured", "false") === "true"
-    );
-  } catch (_) {
-    return false;
-  }
-}
-
-function projectToolsEnabled() {
-  try {
-    return projectExists() && projectConfigured();
-  } catch (_) {
-    return false;
-  }
-}
+/* ───────────────────────── Project state updates ───────────────────────── */
 
 function setProjectDataset(project, detail = {}) {
   try {
@@ -497,6 +829,7 @@ function setProjectDataset(project, detail = {}) {
       p.setup_status ||
         p.setupStatus ||
         detail.setup_status ||
+        detail.setupStatus ||
         (configured ? "configured" : "draft")
     ).trim();
 
@@ -511,16 +844,71 @@ function setProjectDataset(project, detail = {}) {
 
     if (paths.projectPagePath || paths.projectUrl) {
       root.dataset.projectPagePath = String(paths.projectPagePath || paths.projectUrl);
+    } else if (publicId && publicId !== "new") {
+      root.dataset.projectPagePath = `/ui/project/${encodePathPart(publicId)}/project`;
     }
 
-    if (paths.editorPagePath) {
-      root.dataset.editorPagePath = String(paths.editorPagePath);
+    if (paths.editor3dPagePath || paths.editorPagePath || paths.initialEditorUrl) {
+      root.dataset.editor3dPagePath = String(paths.editor3dPagePath || paths.editorPagePath || paths.initialEditorUrl);
+      root.dataset.editorPagePath = String(paths.editor3dPagePath || paths.editorPagePath || paths.initialEditorUrl);
+    } else if (publicId && publicId !== "new") {
+      root.dataset.editor3dPagePath = `/ui/project/${encodePathPart(publicId)}/editor3d`;
+      root.dataset.editorPagePath = `/ui/project/${encodePathPart(publicId)}/editor3d`;
     }
 
     if (paths.mapPagePath) {
       root.dataset.mapPagePath = String(paths.mapPagePath);
+    } else if (publicId && publicId !== "new") {
+      root.dataset.mapPagePath = `/ui/project/${encodePathPart(publicId)}/map`;
+    }
+
+    if (paths.cad2dPagePath) {
+      root.dataset.cad2dPagePath = String(paths.cad2dPagePath);
+    } else if (publicId && publicId !== "new") {
+      root.dataset.cad2dPagePath = `/ui/project/${encodePathPart(publicId)}/cad2d`;
+    }
+
+    if (paths.lvPagePath) {
+      root.dataset.lvPagePath = String(paths.lvPagePath);
+    } else if (publicId && publicId !== "new") {
+      root.dataset.lvPagePath = `/ui/project/${encodePathPart(publicId)}/lv`;
+    }
+
+    if (paths.versionsPagePath) {
+      root.dataset.versionsPagePath = String(paths.versionsPagePath);
+    } else if (publicId && publicId !== "new") {
+      root.dataset.versionsPagePath = `/ui/project/${encodePathPart(publicId)}/versions`;
+    }
+
+    if (paths.adminPagePath) {
+      root.dataset.adminPagePath = String(paths.adminPagePath);
+    } else if (publicId && publicId !== "new") {
+      root.dataset.adminPagePath = `/ui/project/${encodePathPart(publicId)}/admin`;
     }
   } catch (_) {}
+}
+
+function ensureWorkspaceTabConfig(key, patch) {
+  try {
+    if (!window.APP_CONFIG || typeof window.APP_CONFIG !== "object") {
+      window.APP_CONFIG = {};
+    }
+
+    if (!window.APP_CONFIG.workspaceTabs || typeof window.APP_CONFIG.workspaceTabs !== "object") {
+      window.APP_CONFIG.workspaceTabs = {};
+    }
+
+    const tabs = window.APP_CONFIG.workspaceTabs;
+    const existing = tabs[key] && typeof tabs[key] === "object" ? tabs[key] : {};
+    tabs[key] = {
+      ...existing,
+      ...(patch || {}),
+    };
+
+    return tabs[key];
+  } catch (_) {
+    return {};
+  }
 }
 
 function updateAppConfigProject(project, detail = {}) {
@@ -542,14 +930,7 @@ function updateAppConfigProject(project, detail = {}) {
       window.APP_CONFIG.projectPublicId ||
       "new";
 
-    window.APP_CONFIG.project = p;
-    window.APP_CONFIG.currentProject = p;
-    window.APP_CONFIG.projectId = p.id || p.project_id || window.APP_CONFIG.projectId || "";
-    window.APP_CONFIG.projectPublicId = publicId;
-    window.APP_CONFIG.currentProjectId = publicId;
-    window.APP_CONFIG.projectName = p.name || p.display_name || p.displayName || window.APP_CONFIG.projectName || "";
-    window.APP_CONFIG.projectIsNew = publicId === "new";
-
+    const encodedPublicId = encodePathPart(publicId);
     const configured = boolFromValue(
       detail.isConfigured ??
         detail.is_configured ??
@@ -558,6 +939,13 @@ function updateAppConfigProject(project, detail = {}) {
       false
     );
 
+    window.APP_CONFIG.project = p;
+    window.APP_CONFIG.currentProject = p;
+    window.APP_CONFIG.projectId = p.id || p.project_id || window.APP_CONFIG.projectId || "";
+    window.APP_CONFIG.projectPublicId = publicId;
+    window.APP_CONFIG.currentProjectId = publicId;
+    window.APP_CONFIG.projectName = p.name || p.display_name || p.displayName || window.APP_CONFIG.projectName || "";
+    window.APP_CONFIG.projectIsNew = publicId === "new";
     window.APP_CONFIG.projectExists = publicId !== "new";
     window.APP_CONFIG.projectConfigured = configured;
     window.APP_CONFIG.projectToolsEnabled = window.APP_CONFIG.projectExists && configured;
@@ -569,73 +957,154 @@ function updateAppConfigProject(project, detail = {}) {
 
     const workspacePaths = window.APP_CONFIG.workspacePaths;
 
-    if (paths.projectPagePath || paths.projectUrl) {
-      window.APP_CONFIG.projectPagePath = paths.projectPagePath || paths.projectUrl;
-      window.APP_CONFIG.projectUrl = paths.projectPagePath || paths.projectUrl;
-      workspacePaths.projectPagePath = paths.projectPagePath || paths.projectUrl;
-      workspacePaths.projectUrl = paths.projectPagePath || paths.projectUrl;
-    } else if (publicId && publicId !== "new") {
-      workspacePaths.projectPagePath = routeForProject("project");
-      workspacePaths.projectUrl = routeForProject("project");
-      window.APP_CONFIG.projectPagePath = workspacePaths.projectPagePath;
-      window.APP_CONFIG.projectUrl = workspacePaths.projectUrl;
-    }
+    const projectPath = paths.projectPagePath || paths.projectUrl || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/project` : DEFAULT_PROJECT_ROUTE);
+    const editorPath = paths.editor3dPagePath || paths.editorPagePath || paths.initialEditorUrl || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/editor3d` : "");
+    const mapPath = paths.mapPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/map` : "");
+    const cad2dPath = paths.cad2dPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/cad2d` : "");
+    const lvPath = paths.lvPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/lv` : "");
+    const versionsPagePath = paths.versionsPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/versions` : "");
+    const versionsPath = paths.versionsPath || (publicId && publicId !== "new" ? `/v1/projects/${encodedPublicId}/versions` : "");
+    const adminPath = paths.adminPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/admin` : "");
+    const contextPath = paths.contextPath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/context.json` : "/ui/project/new/context.json");
+
+    window.APP_CONFIG.projectPagePath = projectPath;
+    window.APP_CONFIG.projectUrl = projectPath;
+    workspacePaths.projectPagePath = projectPath;
+    workspacePaths.projectUrl = projectPath;
+
+    workspacePaths.contextPath = contextPath;
 
     if (paths.projectPublicUrl) {
       window.APP_CONFIG.projectPublicUrl = paths.projectPublicUrl;
       workspacePaths.projectPublicUrl = paths.projectPublicUrl;
     } else if (publicId && publicId !== "new") {
-      workspacePaths.projectPublicUrl = `/project=${encodePathPart(publicId)}`;
+      workspacePaths.projectPublicUrl = `/project=${encodedPublicId}`;
       window.APP_CONFIG.projectPublicUrl = workspacePaths.projectPublicUrl;
     }
 
-    if (paths.editorPagePath) {
-      window.APP_CONFIG.editorPagePath = paths.editorPagePath;
-      workspacePaths.editorPagePath = paths.editorPagePath;
-    } else if (publicId && publicId !== "new") {
-      workspacePaths.editorPagePath = routeForProject("editor");
-      window.APP_CONFIG.editorPagePath = workspacePaths.editorPagePath;
+    if (editorPath) {
+      window.APP_CONFIG.editorPagePath = editorPath;
+      window.APP_CONFIG.editor3dPagePath = editorPath;
+      window.APP_CONFIG.initialEditorUrl = editorPath;
+      workspacePaths.editorPagePath = editorPath;
+      workspacePaths.editor3dPagePath = editorPath;
+      workspacePaths.initialEditorUrl = editorPath;
     }
 
-    if (paths.initialEditorUrl) {
-      window.APP_CONFIG.initialEditorUrl = paths.initialEditorUrl;
-      workspacePaths.initialEditorUrl = paths.initialEditorUrl;
-    } else if (workspacePaths.editorPagePath) {
-      window.APP_CONFIG.initialEditorUrl = workspacePaths.editorPagePath;
-      workspacePaths.initialEditorUrl = workspacePaths.editorPagePath;
+    if (mapPath) {
+      window.APP_CONFIG.mapPagePath = mapPath;
+      workspacePaths.mapPagePath = mapPath;
     }
 
-    if (paths.mapPagePath) {
-      window.APP_CONFIG.mapPagePath = paths.mapPagePath;
-      workspacePaths.mapPagePath = paths.mapPagePath;
-    } else if (publicId && publicId !== "new") {
-      workspacePaths.mapPagePath = routeForProject("map");
-      window.APP_CONFIG.mapPagePath = workspacePaths.mapPagePath;
+    if (cad2dPath) {
+      window.APP_CONFIG.cad2dPagePath = cad2dPath;
+      workspacePaths.cad2dPagePath = cad2dPath;
     }
 
-    if (paths.cad2dPagePath) {
-      window.APP_CONFIG.cad2dPagePath = paths.cad2dPagePath;
-      workspacePaths.cad2dPagePath = paths.cad2dPagePath;
-    } else if (publicId && publicId !== "new") {
-      workspacePaths.cad2dPagePath = routeForProject("cad2d");
-      window.APP_CONFIG.cad2dPagePath = workspacePaths.cad2dPagePath;
+    if (lvPath) {
+      window.APP_CONFIG.lvPagePath = lvPath;
+      workspacePaths.lvPagePath = lvPath;
     }
 
-    if (paths.lvPagePath) {
-      window.APP_CONFIG.lvPagePath = paths.lvPagePath;
-      workspacePaths.lvPagePath = paths.lvPagePath;
-    } else if (publicId && publicId !== "new") {
-      workspacePaths.lvPagePath = routeForProject("lv");
-      window.APP_CONFIG.lvPagePath = workspacePaths.lvPagePath;
+    if (versionsPagePath) {
+      window.APP_CONFIG.versionsPagePath = versionsPagePath;
+      workspacePaths.versionsPagePath = versionsPagePath;
     }
 
-    if (paths.adminPagePath) {
-      window.APP_CONFIG.adminPagePath = paths.adminPagePath;
-      workspacePaths.adminPagePath = paths.adminPagePath;
-    } else if (publicId && publicId !== "new") {
-      workspacePaths.adminPagePath = routeForProject("admin");
-      window.APP_CONFIG.adminPagePath = workspacePaths.adminPagePath;
+    if (versionsPath) {
+      window.APP_CONFIG.versionsPath = versionsPath;
+      workspacePaths.versionsPath = versionsPath;
     }
+
+    if (adminPath) {
+      window.APP_CONFIG.adminPagePath = adminPath;
+      workspacePaths.adminPagePath = adminPath;
+    }
+
+    const enabled = publicId !== "new" && configured;
+    const adminEnabled = publicId !== "new" && canManageProject();
+
+    ensureWorkspaceTabConfig("project", {
+      key: "project",
+      mode: "project",
+      enabled: true,
+      configuredRequired: false,
+      path: projectPath,
+      title: "Projekt",
+    });
+
+    ensureWorkspaceTabConfig("editor3d", {
+      key: "editor3d",
+      mode: "3d",
+      enabled,
+      configuredRequired: true,
+      path: editorPath,
+      title: "3D",
+    });
+
+    ensureWorkspaceTabConfig("3d", {
+      key: "editor3d",
+      mode: "3d",
+      enabled,
+      configuredRequired: true,
+      path: editorPath,
+      title: "3D",
+    });
+
+    ensureWorkspaceTabConfig("map", {
+      key: "map",
+      mode: "map",
+      enabled,
+      configuredRequired: true,
+      path: mapPath,
+      title: "Map",
+    });
+
+    ensureWorkspaceTabConfig("cad2d", {
+      key: "cad2d",
+      mode: "2d",
+      enabled,
+      configuredRequired: true,
+      path: cad2dPath,
+      title: "2D",
+    });
+
+    ensureWorkspaceTabConfig("2d", {
+      key: "cad2d",
+      mode: "2d",
+      enabled,
+      configuredRequired: true,
+      path: cad2dPath,
+      title: "2D",
+    });
+
+    ensureWorkspaceTabConfig("lv", {
+      key: "lv",
+      mode: "lv",
+      enabled,
+      configuredRequired: true,
+      path: lvPath,
+      title: "LV",
+    });
+
+    ensureWorkspaceTabConfig("versions", {
+      key: "versions",
+      mode: "versions",
+      enabled: publicId !== "new",
+      configuredRequired: false,
+      path: versionsPagePath,
+      apiPath: versionsPath,
+      title: "Versionen",
+    });
+
+    ensureWorkspaceTabConfig("admin", {
+      key: "admin",
+      mode: "admin",
+      enabled: adminEnabled,
+      configuredRequired: false,
+      path: adminPath,
+      title: "Admin",
+    });
 
     if (window.APP_CONFIG.projectSidebar && typeof window.APP_CONFIG.projectSidebar === "object") {
       window.APP_CONFIG.projectSidebar.currentProjectId = publicId;
@@ -645,6 +1114,8 @@ function updateAppConfigProject(project, detail = {}) {
     }
 
     window.__VECTOPLAN_CURRENT_PROJECT__ = p;
+
+    syncWorkspaceButtonPaths();
   } catch (_) {}
 }
 
@@ -695,140 +1166,6 @@ function handleProjectSaved(detail = {}, eventType = "vectoplan:project:saved") 
     try {
       console.warn("[project] saved event handling failed", error);
     } catch (_) {}
-  }
-}
-
-
-/* ───────────────────────── Workspace URL resolution ───────────────────────── */
-
-function projectUrl() {
-  try {
-    const candidate =
-      pathValue("projectPagePath") ||
-      pathValue("projectUrl") ||
-      cfgValue("projectPagePath") ||
-      cfgValue("projectUrl") ||
-      dataValue("projectPagePath") ||
-      routeForProject("project") ||
-      DEFAULT_PROJECT_ROUTE;
-
-    return sanitizeWorkspaceUrl(candidate, DEFAULT_PROJECT_ROUTE);
-  } catch (_) {
-    return DEFAULT_PROJECT_ROUTE;
-  }
-}
-
-function editorUrl() {
-  try {
-    const fallback = routeForProject("editor") || projectUrl();
-
-    const candidate =
-      pathValue("editorPagePath") ||
-      pathValue("initialEditorUrl") ||
-      cfgValue("editorPagePath") ||
-      cfgValue("initialEditorUrl") ||
-      dataValue("editorPagePath") ||
-      fallback;
-
-    return sanitizeWorkspaceUrl(candidate, fallback);
-  } catch (_) {
-    return routeForProject("editor") || projectUrl();
-  }
-}
-
-function mapUrl() {
-  try {
-    const fallback = routeForProject("map") || projectUrl();
-
-    const candidate =
-      pathValue("mapPagePath") ||
-      cfgValue("mapPagePath") ||
-      dataValue("mapPagePath") ||
-      fallback;
-
-    return sanitizeWorkspaceUrl(candidate, fallback);
-  } catch (_) {
-    return routeForProject("map") || projectUrl();
-  }
-}
-
-function twoDPageUrl() {
-  try {
-    const fallback = routeForProject("cad2d") || projectUrl();
-
-    const candidate =
-      pathValue("cad2dPagePath") ||
-      cfgValue("cad2dPagePath") ||
-      fallback;
-
-    return sanitizeWorkspaceUrl(candidate, fallback);
-  } catch (_) {
-    return routeForProject("cad2d") || projectUrl();
-  }
-}
-
-function adminUrl() {
-  try {
-    const fallback = routeForProject("admin") || projectUrl();
-
-    const candidate =
-      pathValue("adminPagePath") ||
-      cfgValue("adminPagePath") ||
-      fallback;
-
-    return sanitizeWorkspaceUrl(candidate, fallback);
-  } catch (_) {
-    return routeForProject("admin") || projectUrl();
-  }
-}
-
-function lvUrl() {
-  try {
-    const fallback = routeForProject("lv") || projectUrl();
-
-    const candidate =
-      pathValue("lvPagePath") ||
-      cfgValue("lvPagePath") ||
-      fallback;
-
-    return sanitizeWorkspaceUrl(candidate, fallback);
-  } catch (_) {
-    return routeForProject("lv") || projectUrl();
-  }
-}
-
-async function resolve2dUrl() {
-  try {
-    const jsonPath =
-      pathValue("cadEmbedJsonPath") ||
-      cfgValue("cadEmbedJsonPath") ||
-      routeForProject("cad-embed");
-
-    if (!jsonPath) return twoDPageUrl();
-
-    const data = await fetch(jsonPath, {
-      credentials: "same-origin",
-      cache: "no-store",
-    })
-      .then((response) => response.json())
-      .catch(() => null);
-
-    const candidates = [
-      data?.iframe_url,
-      data?.embed_url,
-      data?.viewer_url,
-      data?.url,
-      data?.src,
-    ];
-
-    for (const candidate of candidates) {
-      const value = String(candidate || "").trim();
-      if (value && !isUnsafeLegacyTarget(value)) return value;
-    }
-
-    return twoDPageUrl();
-  } catch (_) {
-    return twoDPageUrl();
   }
 }
 
@@ -903,7 +1240,8 @@ function setFrameTitle(mode) {
     const frame = viewerFrame();
     if (!frame) return;
 
-    frame.setAttribute("title", MODE_TITLE[mode] || "Arbeitsbereich");
+    const normalized = normalizeMode(mode);
+    frame.setAttribute("title", MODE_TITLE[normalized] || "Arbeitsbereich");
   } catch (_) {}
 }
 
@@ -932,6 +1270,19 @@ function applyIframeCapabilities(frame) {
       frame.removeAttribute("sandbox");
     } catch (_) {}
   } catch (_) {}
+}
+
+function iframeTimeoutForMode(mode) {
+  try {
+    const normalized = normalizeMode(mode);
+
+    if (normalized === "3d") return 15000;
+    if (normalized === "map") return 10000;
+
+    return 8000;
+  } catch (_) {
+    return 8000;
+  }
 }
 
 function makeIframeLoadHandlers(frame, rawSrc, mode) {
@@ -987,9 +1338,28 @@ function makeIframeLoadHandlers(frame, rawSrc, mode) {
         showWorkspaceFallback("Arbeitsbereich lädt noch oder wurde vom Browser blockiert. Prüfe Console, CSP und X-Frame-Options.");
       }
     } catch (_) {}
-  }, normalizedMode === "map" ? 6000 : 8000);
+  }, iframeTimeoutForMode(normalizedMode));
 
   return { onLoad, onError, clear };
+}
+
+function safeFallbackForMode(mode) {
+  try {
+    const normalized = normalizeMode(mode);
+
+    if (normalized === "project") return projectUrl();
+    if (normalized === "map") return mapUrl();
+    if (normalized === "2d") return twoDPageUrl();
+    if (normalized === "lv") return lvUrl();
+    if (normalized === "admin") return adminUrl();
+
+    const editor = editorUrl();
+    if (editor && !isUnsafeLegacyTarget(editor)) return editor;
+
+    return projectUrl();
+  } catch (_) {
+    return projectUrl();
+  }
 }
 
 function hardSwapIframe(nextSrc, options = {}) {
@@ -1004,16 +1374,16 @@ function hardSwapIframe(nextSrc, options = {}) {
     const title = String(options.title || MODE_TITLE[normalizedMode] || oldFrame.getAttribute("title") || "Arbeitsbereich");
 
     if (isUnsafeLegacyTarget(rawSrc)) {
-      const fallback =
-        normalizedMode === "map"
-          ? mapUrl()
-          : normalizedMode === "project"
-            ? projectUrl()
-            : editorUrl();
+      const fallback = safeFallbackForMode(normalizedMode);
 
       try {
         console.warn("[workspace] blocked unsafe iframe target", rawSrc, "fallback", fallback);
       } catch (_) {}
+
+      if (!fallback || fallback === rawSrc || isUnsafeLegacyTarget(fallback)) {
+        showWorkspaceFallback("Unsicheres iframe-Ziel wurde blockiert.");
+        return false;
+      }
 
       return hardSwapIframe(cacheBustLocalUrl(fallback), { ...options, mode: normalizedMode });
     }
@@ -1036,6 +1406,7 @@ function hardSwapIframe(nextSrc, options = {}) {
 
     setFrameDataset(fresh, {
       mode: normalizedMode,
+      key: canonicalTabKey(normalizedMode),
       target: rawSrc,
       swappedAt: Date.now(),
     });
@@ -1069,31 +1440,6 @@ function hardSwapIframe(nextSrc, options = {}) {
   }
 }
 
-function normalizeMode(mode) {
-  try {
-    const value = String(mode || "").trim().toLowerCase();
-
-    if (value === "project") return "project";
-    if (value === "projekt") return "project";
-    if (value === "meta") return "project";
-    if (value === "metadata") return "project";
-
-    if (value === "editor") return "3d";
-    if (value === "cad") return "2d";
-    if (value === "cad2d") return "2d";
-    if (value === "viewer") return "3d";
-    if (value === "viewer3d") return "3d";
-    if (value === "model") return "3d";
-    if (value === "version") return "3d";
-
-    if (["3d", "2d", "map", "lv", "admin"].includes(value)) return value;
-
-    return "project";
-  } catch (_) {
-    return "project";
-  }
-}
-
 function setModePressed(activeMode) {
   try {
     const mode = normalizeMode(activeMode);
@@ -1113,10 +1459,18 @@ function isWorkspaceModeAllowed(mode) {
     const normalized = normalizeMode(mode);
 
     if (normalized === "project") return true;
-    if (normalized === "admin") return projectExists();
+
+    if (normalized === "admin") {
+      return projectExists() && canManageProject() && tabEnabled("admin", true);
+    }
+
+    if (normalized === "versions") {
+      return projectExists() && tabEnabled("versions", true);
+    }
 
     if (MODES_REQUIRING_CONFIGURED_PROJECT.has(normalized)) {
-      return projectToolsEnabled();
+      const tabFallback = projectToolsEnabled();
+      return projectToolsEnabled() && tabEnabled(normalized, tabFallback);
     }
 
     return false;
@@ -1129,8 +1483,16 @@ function workspaceModeDisabledMessage(mode) {
   try {
     const normalized = normalizeMode(mode);
 
+    if (normalized === "admin" && !canManageProject()) {
+      return "Admin ist nur für Projektverwalter verfügbar.";
+    }
+
     if (normalized === "admin" && !projectExists()) {
       return "Projekt zuerst erstellen. Danach ist Admin verfügbar.";
+    }
+
+    if (normalized === "versions" && !projectExists()) {
+      return "Projekt zuerst erstellen. Danach sind Versionen verfügbar.";
     }
 
     if (MODES_REQUIRING_CONFIGURED_PROJECT.has(normalized) && !projectToolsEnabled()) {
@@ -1141,6 +1503,32 @@ function workspaceModeDisabledMessage(mode) {
   } catch (_) {
     return "Dieser Arbeitsbereich ist aktuell nicht verfügbar.";
   }
+}
+
+function syncWorkspaceButtonPaths() {
+  try {
+    const paths = {
+      project: projectUrl(),
+      map: mapUrl(),
+      "3d": editorUrl(),
+      "2d": twoDPageUrl(),
+      lv: lvUrl(),
+      versions: versionsPageUrl(),
+      admin: adminUrl(),
+    };
+
+    for (const [mode, id] of Object.entries(MODE_TO_BUTTON_ID)) {
+      const btn = $(id);
+      if (!btn || !btn.dataset) continue;
+
+      const path = paths[mode] || "";
+      if (path) {
+        btn.dataset.workspacePath = path;
+      }
+
+      btn.dataset.workspaceKey = canonicalTabKey(mode);
+    }
+  } catch (_) {}
 }
 
 function syncWorkspaceGating(options = {}) {
@@ -1157,11 +1545,15 @@ function syncWorkspaceGating(options = {}) {
       root.dataset.projectIsNew = exists ? "false" : "true";
     }
 
+    syncWorkspaceButtonPaths();
+
     for (const [mode, id] of Object.entries(MODE_TO_BUTTON_ID)) {
       const btn = $(id);
       if (!btn) continue;
 
-      const allowed = isWorkspaceModeAllowed(mode);
+      const allowed = mode === "versions"
+        ? projectExists()
+        : isWorkspaceModeAllowed(mode);
 
       btn.disabled = !allowed;
       btn.setAttribute("aria-disabled", allowed ? "false" : "true");
@@ -1173,16 +1565,6 @@ function syncWorkspaceGating(options = {}) {
         btn.title = "Projekt";
       } else {
         btn.title = MODE_TITLE[mode] || "Arbeitsbereich";
-      }
-    }
-
-    const versionsToggle = $("versionsToggleBtn");
-    if (versionsToggle) {
-      versionsToggle.disabled = !exists;
-      versionsToggle.setAttribute("aria-disabled", exists ? "false" : "true");
-      versionsToggle.classList.toggle("is-disabled", !exists);
-      if (!exists) {
-        versionsToggle.title = "Projekt zuerst erstellen. Danach sind Versionen verfügbar.";
       }
     }
 
@@ -1299,6 +1681,10 @@ async function setWorkspaceMode(mode, options = {}) {
         mode: "lv",
         title: "Leistungsverzeichnis",
       });
+    } else if (normalized === "versions") {
+      versionsOpen();
+      target = versionsPageUrl() || projectUrl();
+      setRawOpenUrl(target);
     } else if (normalized === "admin") {
       target = adminUrl();
       hardSwapIframe(cacheBustLocalUrl(target), {
@@ -1311,9 +1697,11 @@ async function setWorkspaceMode(mode, options = {}) {
       await persistWorkspaceMode(normalized);
     }
 
-    try {
-      versionsClose();
-    } catch (_) {}
+    if (normalized !== "versions") {
+      try {
+        versionsClose();
+      } catch (_) {}
+    }
 
     showStatus("");
 
@@ -1691,7 +2079,7 @@ function themeApply(theme = "light") {
     if (btn) {
       const isDark = next === "dark";
       btn.setAttribute("aria-pressed", String(isDark));
-      btn.textContent = isDark ? "☀️ Hell" : "🌙 Dunkel";
+      btn.textContent = isDark ? "Hell" : "Dunkel";
       btn.title = isDark
         ? "Auf helles Theme umschalten"
         : "Auf dunkles Theme umschalten";
@@ -1812,7 +2200,7 @@ function versionsToggle() {
 
 async function fetchVersionsRaw() {
   try {
-    const path = pathValue("versionsPath") || cfgValue("versionsPath");
+    const path = versionsApiUrl() || pathValue("versionsPath") || cfgValue("versionsPath");
     if (!path || !projectExists()) return [];
 
     const data = await fetch(path, {
@@ -1910,6 +2298,12 @@ function wireVersionsDropdown() {
       try {
         event.preventDefault();
       } catch (_) {}
+
+      if (!projectExists()) {
+        showStatus("Projekt zuerst erstellen. Danach sind Versionen verfügbar.");
+        return;
+      }
+
       versionsToggle();
     });
 
@@ -2188,21 +2582,35 @@ function exposeWorkspaceDebugApi() {
         exists: projectExists,
         configured: projectConfigured,
         toolsEnabled: projectToolsEnabled,
+        canManage: canManageProject,
         url: projectUrl,
         syncGating: syncWorkspaceGating,
         updateConfig: updateAppConfigProject,
       },
-      projectUrl,
-      editorUrl,
-      mapUrl,
-      twoDPageUrl,
-      lvUrl,
-      adminUrl,
-      setWorkspaceMode,
-      viewerFrame,
-      isUnsafeLegacyTarget,
-      stableLocalUrl,
-      cacheBustLocalUrl,
+      routes: {
+        forProject: routeForProject,
+        project: projectUrl,
+        editor: editorUrl,
+        map: mapUrl,
+        cad2d: twoDPageUrl,
+        lv: lvUrl,
+        versionsPage: versionsPageUrl,
+        versionsApi: versionsApiUrl,
+        admin: adminUrl,
+      },
+      modes: {
+        normalize: normalizeMode,
+        canonicalTabKey,
+        allowed: isWorkspaceModeAllowed,
+        set: setWorkspaceMode,
+      },
+      iframe: {
+        frame: viewerFrame,
+        swap: hardSwapIframe,
+        unsafe: isUnsafeLegacyTarget,
+        stableLocalUrl,
+        cacheBustLocalUrl,
+      },
       projectSidebar: {
         root: projectSidebarRoot,
         api: projectSidebarApi,

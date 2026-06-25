@@ -9,8 +9,31 @@
   - Bestehendes Projekt über PATCH /v1/projects/<public_id> aktualisieren.
   - Nach Erstellung Parent-Shell auf /project=<public_id> weiterleiten.
   - Nach Speichern Parent-Shell informieren, damit Sidebar und Workspace-Gating
-    später aktualisiert werden können.
+    aktualisiert werden können.
   - Kein direkter Zugriff auf Chunk-, Editor-, 2D- oder LV-Daten.
+
+  Neuer Formularstand:
+  - Gesendet werden nur:
+      name
+      title
+      description
+      address_text
+      address.text
+      visibility
+  - Keine manuellen Felder mehr für:
+      street
+      house_number
+      postal_code
+      city
+      region
+      country
+      latitude
+      longitude
+      coordinate_srid
+      is_public
+  - is_public wird serverseitig aus visibility abgeleitet.
+  - Veröffentlichte Reiter werden separat über project_publication.js gespeichert.
+  - Team/Einladungen werden separat über project_team.js gespeichert.
 
   Erwartetes Template:
   - services/vectoplan-app/templates/viewer/project.html
@@ -31,12 +54,11 @@
   var EXPORT_NAME = "VectoplanProjectForm";
   var LEGACY_EXPORT_NAME = "__VECTOPLAN_PROJECT_FORM__";
 
-  var INTERNAL_VERSION = 1;
+  var INTERNAL_VERSION = 2;
 
   var DEFAULT_CREATE_PATH = "/v1/projects";
   var DEFAULT_PROJECT_NEW_URL = "/project=new";
   var DEFAULT_PROJECT_ROOT_URL = "/";
-  var DEFAULT_COUNTRY = "DE";
 
   var FORM_SELECTOR = "[data-project-form]";
   var ROOT_SELECTOR = "[data-project-workspace]";
@@ -49,6 +71,7 @@
   var CLASS_ERROR = "is-error";
   var CLASS_READONLY = "is-readonly";
   var CLASS_INVALID = "is-invalid";
+  var CLASS_SELECTED = "is-selected";
 
   var FIELD_ERROR_CLASS = "vp-project-field__error";
 
@@ -58,6 +81,13 @@
   var EVENT_CONFIGURED = "vectoplan:project:configured";
   var EVENT_DIRTY = "vectoplan:project:dirty";
   var EVENT_ERROR = "vectoplan:project:error";
+  var EVENT_VISIBILITY_CHANGED = "vectoplan:project:visibility:changed";
+
+  var VALID_VISIBILITIES = {
+    private: true,
+    unlisted: true,
+    public: true
+  };
 
   var state = {
     version: INTERNAL_VERSION,
@@ -65,6 +95,10 @@
     destroyed: false,
     isNew: true,
     canEdit: true,
+    canManage: false,
+    demoMode: false,
+    persistent: true,
+    authenticated: true,
     isDirty: false,
     isSaving: false,
     lastSavedAt: null,
@@ -72,7 +106,7 @@
     originalPayload: null,
     currentProject: null,
     config: null,
-    refs: {},
+    refs: {}
   };
 
   function getWindow() {
@@ -93,10 +127,6 @@
 
   function isObject(value) {
     return !!value && typeof value === "object" && !Array.isArray(value);
-  }
-
-  function isArray(value) {
-    return Array.isArray(value);
   }
 
   function isElement(value) {
@@ -172,50 +202,6 @@
     }
   }
 
-  function toNumberOrNull(value) {
-    try {
-      if (value === null || value === undefined || value === "") {
-        return null;
-      }
-
-      if (typeof value === "boolean") {
-        return null;
-      }
-
-      var parsed = Number(value);
-
-      if (!Number.isFinite(parsed)) {
-        return null;
-      }
-
-      return parsed;
-    } catch (error) {
-      return null;
-    }
-  }
-
-  function toIntegerOrNull(value) {
-    try {
-      if (value === null || value === undefined || value === "") {
-        return null;
-      }
-
-      if (typeof value === "boolean") {
-        return null;
-      }
-
-      var parsed = parseInt(String(value), 10);
-
-      if (!Number.isFinite(parsed)) {
-        return null;
-      }
-
-      return parsed;
-    } catch (error) {
-      return null;
-    }
-  }
-
   function safeJsonStringify(value) {
     try {
       return JSON.stringify(value);
@@ -259,7 +245,7 @@
         return {
           name: "Error",
           message: "Unknown error",
-          stack: "",
+          stack: ""
         };
       }
 
@@ -267,7 +253,7 @@
         return {
           name: "Error",
           message: error,
-          stack: "",
+          stack: ""
         };
       }
 
@@ -277,29 +263,14 @@
         stack: trimString(error.stack, ""),
         code: trimString(error.code, ""),
         status: error.status || error.statusCode || null,
+        payload: error.payload || null
       };
     } catch (innerError) {
       return {
         name: "Error",
         message: "Unknown error",
-        stack: "",
+        stack: ""
       };
-    }
-  }
-
-  function safeCall(label, fn, fallback) {
-    try {
-      if (typeof fn !== "function") {
-        return fallback;
-      }
-
-      return fn();
-    } catch (error) {
-      try {
-        console.warn("[vectoplan-project] " + label + " failed", error);
-      } catch (_) {}
-
-      return fallback;
     }
   }
 
@@ -314,6 +285,20 @@
       return base.querySelector(selector);
     } catch (error) {
       return null;
+    }
+  }
+
+  function queryAll(selector, root) {
+    try {
+      var base = root || getDocument();
+
+      if (!base || !base.querySelectorAll) {
+        return [];
+      }
+
+      return Array.prototype.slice.call(base.querySelectorAll(selector));
+    } catch (error) {
+      return [];
     }
   }
 
@@ -344,6 +329,40 @@
     }
   }
 
+  function normalizeVisibility(value, fallback) {
+    try {
+      var text = trimString(value, fallback || "private")
+        .toLowerCase()
+        .replace(/-/g, "_");
+
+      if (text === "öffentlich" || text === "oeffentlich" || text === "open" || text === "listed") {
+        return "public";
+      }
+
+      if (
+        text === "not_listed" ||
+        text === "nicht_gelistet" ||
+        text === "link" ||
+        text === "link_shared" ||
+        text === "share_link"
+      ) {
+        return "unlisted";
+      }
+
+      if (text === "shared" || text === "geteilt" || text === "privat" || text === "internal") {
+        return "private";
+      }
+
+      if (VALID_VISIBILITIES[text]) {
+        return text;
+      }
+
+      return fallback || "private";
+    } catch (error) {
+      return fallback || "private";
+    }
+  }
+
   function getConfig() {
     try {
       var win = getWindow();
@@ -357,16 +376,48 @@
       }
 
       var paths = isObject(config.paths) ? config.paths : {};
+      var parentEvents = isObject(config.parentEvents) ? config.parentEvents : {};
       var project = isObject(config.project) ? config.project : {};
       var currentUser = isObject(config.currentUser) ? config.currentUser : {};
+      var access = isObject(config.access) ? config.access : isObject(project.access) ? project.access : {};
+
+      var demoMode = toBooleanSafe(
+        config.demoMode ||
+          config.demo_mode ||
+          currentUser.demo_mode ||
+          currentUser.demoMode ||
+          currentUser.is_demo,
+        false
+      );
+
+      var authenticated = toBooleanSafe(
+        config.authenticated ||
+          currentUser.authenticated ||
+          currentUser.is_authenticated ||
+          currentUser.isAuthenticated,
+        !demoMode
+      );
+
+      var persistent = toBooleanSafe(
+        config.persistent !== undefined ? config.persistent : currentUser.persistent,
+        authenticated && !demoMode
+      );
+
+      var canEdit = toBooleanSafe(config.canEdit, true) && persistent && !demoMode;
+      var canManage = toBooleanSafe(config.canManage, false);
 
       return {
         version: INTERNAL_VERSION,
         isNew: toBooleanSafe(config.isNew, true),
-        canEdit: toBooleanSafe(config.canEdit, true),
+        canEdit: canEdit,
+        canManage: canManage,
+        demoMode: demoMode,
+        authenticated: authenticated,
+        persistent: persistent,
         project: project,
         currentProject: isObject(config.currentProject) ? config.currentProject : project,
         currentUser: currentUser,
+        access: access,
         projectId: trimString(config.projectId || project.id || project.project_id, ""),
         projectPublicId: trimString(
           config.projectPublicId ||
@@ -375,54 +426,54 @@
             (config.isNew ? "new" : ""),
           config.isNew ? "new" : ""
         ),
+        projectVisibility: normalizeVisibility(config.projectVisibility || project.visibility, "private"),
         paths: {
           createProject: trimString(paths.createProject, DEFAULT_CREATE_PATH),
           updateProject: trimString(paths.updateProject, ""),
           getProject: trimString(paths.getProject, ""),
           context: trimString(paths.context, ""),
+          publication: trimString(paths.publication, ""),
+          members: trimString(paths.members, ""),
+          invitations: trimString(paths.invitations, ""),
           projectRoot: trimString(paths.projectRoot, DEFAULT_PROJECT_ROOT_URL),
-          projectNew: trimString(paths.projectNew, DEFAULT_PROJECT_NEW_URL),
+          projectNew: trimString(paths.projectNew, DEFAULT_PROJECT_NEW_URL)
         },
         parentEvents: {
-          saved: trimString(
-            config.parentEvents && config.parentEvents.saved,
-            EVENT_SAVED
-          ),
-          created: trimString(
-            config.parentEvents && config.parentEvents.created,
-            EVENT_CREATED
-          ),
-          updated: trimString(
-            config.parentEvents && config.parentEvents.updated,
-            EVENT_UPDATED
-          ),
-          deleted: trimString(
-            config.parentEvents && config.parentEvents.deleted,
-            "vectoplan:project:deleted"
-          ),
-          configured: trimString(
-            config.parentEvents && config.parentEvents.configured,
-            EVENT_CONFIGURED
-          ),
-        },
+          saved: trimString(parentEvents.saved, EVENT_SAVED),
+          created: trimString(parentEvents.created, EVENT_CREATED),
+          updated: trimString(parentEvents.updated, EVENT_UPDATED),
+          deleted: trimString(parentEvents.deleted, "vectoplan:project:deleted"),
+          configured: trimString(parentEvents.configured, EVENT_CONFIGURED),
+          publicationChanged: trimString(parentEvents.publicationChanged, "vectoplan:project:publication:changed"),
+          teamChanged: trimString(parentEvents.teamChanged, "vectoplan:project:team:changed")
+        }
       };
     } catch (error) {
       return {
         version: INTERNAL_VERSION,
         isNew: true,
         canEdit: true,
+        canManage: false,
+        demoMode: false,
+        authenticated: true,
+        persistent: true,
         project: {},
         currentProject: {},
         currentUser: {},
+        access: {},
         projectId: "",
         projectPublicId: "new",
+        projectVisibility: "private",
         paths: {
           createProject: DEFAULT_CREATE_PATH,
           updateProject: "",
           getProject: "",
           context: "",
+          publication: "",
+          members: "",
+          invitations: "",
           projectRoot: DEFAULT_PROJECT_ROOT_URL,
-          projectNew: DEFAULT_PROJECT_NEW_URL,
+          projectNew: DEFAULT_PROJECT_NEW_URL
         },
         parentEvents: {
           saved: EVENT_SAVED,
@@ -430,7 +481,9 @@
           updated: EVENT_UPDATED,
           deleted: "vectoplan:project:deleted",
           configured: EVENT_CONFIGURED,
-        },
+          publicationChanged: "vectoplan:project:publication:changed",
+          teamChanged: "vectoplan:project:team:changed"
+        }
       };
     }
   }
@@ -450,27 +503,21 @@
 
       name: queryById("projectName"),
       description: queryById("projectDescription"),
-
       addressText: queryById("projectAddressText"),
-      addressStreet: queryById("projectAddressStreet"),
-      addressHouseNumber: queryById("projectAddressHouseNumber"),
-      addressPostalCode: queryById("projectAddressPostalCode"),
-      addressCity: queryById("projectAddressCity"),
-      addressRegion: queryById("projectAddressRegion"),
-      addressCountry: queryById("projectAddressCountry"),
-
-      latitude: queryById("projectLatitude"),
-      longitude: queryById("projectLongitude"),
-      coordinateSrid: queryById("projectCoordinateSrid"),
 
       visibility: queryById("projectVisibility"),
-      isPublic: queryById("projectIsPublic"),
+      visibilityOptions: queryAll("[data-project-visibility-option]"),
+      visibilityCurrentLabel: query("[data-project-visibility-current-label]"),
+      visibilityHelp: query("[data-project-visibility-help]"),
+
+      addressCounter: query("[data-project-address-counter]"),
+      addressCounterCurrent: query("[data-project-address-counter-current]"),
 
       submit: query("[data-project-submit]"),
       reset: query("[data-project-reset]"),
 
       statusPill: query("[data-project-status-pill]"),
-      setupStatusText: query("[data-project-setup-status-text]"),
+      setupStatusText: query("[data-project-setup-status-text]")
     };
   }
 
@@ -494,6 +541,26 @@
         element.textContent = trimString(value, "");
       }
     } catch (error) {}
+  }
+
+  function setValue(element, value) {
+    try {
+      if (element) {
+        element.value = value === null || value === undefined ? "" : String(value);
+      }
+    } catch (error) {}
+  }
+
+  function getValue(element) {
+    try {
+      if (!element) {
+        return "";
+      }
+
+      return trimString(element.value, "");
+    } catch (error) {
+      return "";
+    }
   }
 
   function setAlert(kind, message) {
@@ -605,7 +672,7 @@
 
       dispatchLocal(EVENT_DIRTY, {
         dirty: state.isDirty,
-        project: state.currentProject,
+        project: state.currentProject
       });
     } catch (error) {}
   }
@@ -622,50 +689,14 @@
 
       if (state.refs.statusPill) {
         state.refs.statusPill.classList.toggle("vp-project-status--configured", !!isConfigured);
-        state.refs.statusPill.classList.toggle("vp-project-status--draft", !isConfigured);
-        state.refs.statusPill.textContent = isConfigured ? "Konfiguriert" : "Entwurf";
+        state.refs.statusPill.classList.toggle("vp-project-status--draft", !isConfigured && !state.demoMode);
+        state.refs.statusPill.textContent = state.demoMode ? "Demo" : isConfigured ? "Konfiguriert" : "Entwurf";
       }
 
       if (state.refs.setupStatusText) {
         state.refs.setupStatusText.textContent = status;
       }
     } catch (error) {}
-  }
-
-  function getValue(element) {
-    try {
-      if (!element) {
-        return "";
-      }
-
-      return trimString(element.value, "");
-    } catch (error) {
-      return "";
-    }
-  }
-
-  function setValue(element, value) {
-    try {
-      if (element) {
-        element.value = value === null || value === undefined ? "" : String(value);
-      }
-    } catch (error) {}
-  }
-
-  function setChecked(element, checked) {
-    try {
-      if (element) {
-        element.checked = !!checked;
-      }
-    } catch (error) {}
-  }
-
-  function getChecked(element) {
-    try {
-      return !!(element && element.checked);
-    } catch (error) {
-      return false;
-    }
   }
 
   function findFieldWrapper(element) {
@@ -739,14 +770,135 @@
       [
         refs.name,
         refs.addressText,
-        refs.latitude,
-        refs.longitude,
-        refs.coordinateSrid,
-        refs.visibility,
+        refs.visibility
       ].forEach(function clearOne(element) {
         removeFieldError(element);
       });
     } catch (error) {}
+  }
+
+  function updateAddressCounter() {
+    try {
+      var refs = state.refs || {};
+      var textarea = refs.addressText;
+
+      if (!textarea || !refs.addressCounterCurrent) {
+        return;
+      }
+
+      var value = textarea.value || "";
+      refs.addressCounterCurrent.textContent = String(value.length);
+
+      var maxLength = Number(textarea.getAttribute("maxlength") || refs.addressCounter.getAttribute("data-max-length") || 2000);
+      if (Number.isFinite(maxLength) && maxLength > 0) {
+        refs.addressCounter.setAttribute("data-over-limit", value.length > maxLength ? "true" : "false");
+      }
+    } catch (error) {}
+  }
+
+  function visibilityLabel(value) {
+    var normalized = normalizeVisibility(value, "private");
+
+    if (normalized === "public") {
+      return "Öffentlich";
+    }
+
+    if (normalized === "unlisted") {
+      return "Nicht gelistet";
+    }
+
+    return "Privat";
+  }
+
+  function visibilityHelpText(value) {
+    var normalized = normalizeVisibility(value, "private");
+
+    if (normalized === "public") {
+      return "Öffentlich bedeutet nicht automatisch, dass alle Arbeitsbereiche sichtbar sind. Map, 3D, 2D, LV und Versionen werden separat über Veröffentlichung freigegeben.";
+    }
+
+    if (normalized === "unlisted") {
+      return "Nicht gelistet eignet sich für Linkfreigaben. Das Projekt erscheint nicht automatisch in öffentlichen Listen.";
+    }
+
+    return "Privat ist der sicherste Standard. Zugriff erhalten nur berechtigte Projektmitglieder.";
+  }
+
+  function syncVisibilityCards(value) {
+    try {
+      var refs = state.refs || {};
+      var normalized = normalizeVisibility(value || getValue(refs.visibility), "private");
+
+      setValue(refs.visibility, normalized);
+
+      if (refs.root) {
+        refs.root.setAttribute("data-project-visibility", normalized);
+      }
+
+      if (refs.visibilityCurrentLabel) {
+        refs.visibilityCurrentLabel.textContent = visibilityLabel(normalized);
+      }
+
+      if (refs.visibilityHelp) {
+        refs.visibilityHelp.textContent = visibilityHelpText(normalized);
+      }
+
+      (refs.visibilityOptions || []).forEach(function syncOption(option) {
+        try {
+          var optionValue = normalizeVisibility(option.getAttribute("data-value"), "private");
+          var selected = optionValue === normalized;
+
+          option.classList.toggle(CLASS_SELECTED, selected);
+          option.setAttribute("aria-checked", selected ? "true" : "false");
+        } catch (error) {}
+      });
+    } catch (error) {}
+  }
+
+  function setVisibility(value, options) {
+    try {
+      var normalized = normalizeVisibility(value, "private");
+      var opts = isObject(options) ? options : {};
+
+      setValue(state.refs.visibility, normalized);
+      syncVisibilityCards(normalized);
+
+      if (!opts.silent) {
+        dispatchLocal(EVENT_VISIBILITY_CHANGED, {
+          visibility: normalized,
+          project: state.currentProject
+        });
+
+        markDirtyFromInput();
+      }
+
+      return normalized;
+    } catch (error) {
+      return "private";
+    }
+  }
+
+  function collectPayload() {
+    try {
+      var refs = state.refs || {};
+      var visibility = normalizeVisibility(getValue(refs.visibility), "private");
+      var addressText = getValue(refs.addressText);
+
+      return {
+        name: getValue(refs.name),
+        title: getValue(refs.name),
+        description: getValue(refs.description),
+
+        address_text: addressText,
+        address: {
+          text: addressText
+        },
+
+        visibility: visibility
+      };
+    } catch (error) {
+      return {};
+    }
   }
 
   function validatePayload(payload) {
@@ -759,7 +911,7 @@
         errors.push({
           field: "name",
           element: state.refs.name,
-          message: "Projektname ist erforderlich.",
+          message: "Projektname ist erforderlich."
         });
       }
 
@@ -767,35 +919,15 @@
         errors.push({
           field: "address_text",
           element: state.refs.addressText,
-          message: "Adresse oder Standortbeschreibung ist erforderlich.",
+          message: "Adresse oder Standortbeschreibung ist erforderlich."
         });
       }
 
-      if (payload.latitude !== null && (payload.latitude < -90 || payload.latitude > 90)) {
+      if (!VALID_VISIBILITIES[normalizeVisibility(payload.visibility, "")]) {
         errors.push({
-          field: "latitude",
-          element: state.refs.latitude,
-          message: "Latitude muss zwischen -90 und 90 liegen.",
-        });
-      }
-
-      if (payload.longitude !== null && (payload.longitude < -180 || payload.longitude > 180)) {
-        errors.push({
-          field: "longitude",
-          element: state.refs.longitude,
-          message: "Longitude muss zwischen -180 und 180 liegen.",
-        });
-      }
-
-      if (
-        payload.coordinate_srid !== null &&
-        payload.coordinate_srid !== undefined &&
-        payload.coordinate_srid <= 0
-      ) {
-        errors.push({
-          field: "coordinate_srid",
-          element: state.refs.coordinateSrid,
-          message: "SRID muss eine positive Zahl sein.",
+          field: "visibility",
+          element: state.refs.visibility,
+          message: "Bitte wähle eine gültige Sichtbarkeit."
         });
       }
 
@@ -811,7 +943,7 @@
 
       return {
         ok: errors.length === 0,
-        errors: errors,
+        errors: errors
       };
     } catch (error) {
       return {
@@ -819,69 +951,10 @@
         errors: [
           {
             field: "form",
-            message: "Validierung fehlgeschlagen.",
-          },
-        ],
+            message: "Validierung fehlgeschlagen."
+          }
+        ]
       };
-    }
-  }
-
-  function collectPayload() {
-    try {
-      var refs = state.refs || {};
-      var visibility = getValue(refs.visibility) || "private";
-      var isPublic = getChecked(refs.isPublic) || visibility === "public";
-
-      if (isPublic) {
-        visibility = "public";
-      }
-
-      var latitude = toNumberOrNull(getValue(refs.latitude));
-      var longitude = toNumberOrNull(getValue(refs.longitude));
-      var coordinateSrid = toIntegerOrNull(getValue(refs.coordinateSrid));
-
-      if (coordinateSrid === null) {
-        coordinateSrid = 4326;
-      }
-
-      return {
-        name: getValue(refs.name),
-        title: getValue(refs.name),
-        description: getValue(refs.description),
-
-        address_text: getValue(refs.addressText),
-        address_street: getValue(refs.addressStreet),
-        address_house_number: getValue(refs.addressHouseNumber),
-        address_postal_code: getValue(refs.addressPostalCode),
-        address_city: getValue(refs.addressCity),
-        address_region: getValue(refs.addressRegion),
-        address_country: getValue(refs.addressCountry) || DEFAULT_COUNTRY,
-
-        address: {
-          text: getValue(refs.addressText),
-          street: getValue(refs.addressStreet),
-          house_number: getValue(refs.addressHouseNumber),
-          postal_code: getValue(refs.addressPostalCode),
-          city: getValue(refs.addressCity),
-          region: getValue(refs.addressRegion),
-          country: getValue(refs.addressCountry) || DEFAULT_COUNTRY,
-        },
-
-        latitude: latitude,
-        longitude: longitude,
-        coordinate_srid: coordinateSrid,
-
-        coordinates: {
-          latitude: latitude,
-          longitude: longitude,
-          srid: coordinateSrid,
-        },
-
-        visibility: visibility,
-        is_public: isPublic,
-      };
-    } catch (error) {
-      return {};
     }
   }
 
@@ -890,55 +963,30 @@
       var refs = state.refs || {};
       var p = isObject(project) ? project : {};
       var address = isObject(p.address) ? p.address : {};
-      var coordinates = isObject(p.coordinates) ? p.coordinates : {};
+
+      var publicId = p.public_id || p.publicId || "";
+      var isNew = toBooleanSafe(p.is_new || p.isNew, false) || !trimString(publicId, "");
 
       setValue(refs.projectId, p.id || p.project_id || "");
-      setValue(refs.projectPublicId, p.public_id || p.publicId || "");
-      setValue(refs.projectIsNew, p.is_new || p.isNew ? "true" : "false");
+      setValue(refs.projectPublicId, publicId);
+      setValue(refs.projectIsNew, isNew ? "true" : "false");
 
       setValue(refs.name, p.name || p.display_name || p.displayName || "");
       setValue(refs.description, p.description || "");
+      setValue(refs.addressText, p.address_text || p.addressText || address.text || "");
 
-      setValue(refs.addressText, p.address_text || address.text || "");
-      setValue(refs.addressStreet, p.address_street || address.street || "");
-      setValue(refs.addressHouseNumber, p.address_house_number || address.house_number || "");
-      setValue(refs.addressPostalCode, p.address_postal_code || address.postal_code || "");
-      setValue(refs.addressCity, p.address_city || address.city || "");
-      setValue(refs.addressRegion, p.address_region || address.region || "");
-      setValue(refs.addressCountry, p.address_country || address.country || DEFAULT_COUNTRY);
-
-      setValue(
-        refs.latitude,
-        p.latitude !== undefined && p.latitude !== null
-          ? p.latitude
-          : coordinates.latitude !== undefined && coordinates.latitude !== null
-            ? coordinates.latitude
-            : ""
-      );
-
-      setValue(
-        refs.longitude,
-        p.longitude !== undefined && p.longitude !== null
-          ? p.longitude
-          : coordinates.longitude !== undefined && coordinates.longitude !== null
-            ? coordinates.longitude
-            : ""
-      );
-
-      setValue(refs.coordinateSrid, p.coordinate_srid || coordinates.srid || 4326);
-
-      setValue(refs.visibility, p.visibility || "private");
-      setChecked(refs.isPublic, toBooleanSafe(p.is_public, false) || p.visibility === "public");
+      setVisibility(p.visibility || state.config.projectVisibility || "private", { silent: true });
 
       state.currentProject = safeClone(p);
-      state.isNew = toBooleanSafe(p.is_new || p.isNew, false) || !trimString(p.public_id || p.publicId, "");
+      state.isNew = isNew;
       state.originalPayload = collectPayload();
 
       setConfigured(
         toBooleanSafe(p.is_configured || p.isConfigured, false),
-        p.setup_status || "draft"
+        p.setup_status || p.setupStatus || "draft"
       );
 
+      updateAddressCounter();
       setDirty(false);
     } catch (error) {}
   }
@@ -984,10 +1032,11 @@
       var p = isObject(project) ? project : {};
       var name = trimString(p.name || p.display_name || p.displayName, "");
       var address = isObject(p.address) ? p.address : {};
-      var addressText = trimString(p.address_text || address.text, "");
+      var addressText = trimString(p.address_text || p.addressText || address.text, "");
 
       return toBooleanSafe(p.is_configured || p.isConfigured, false) ||
         p.setup_status === "configured" ||
+        p.setupStatus === "configured" ||
         (!!name && !!addressText);
     } catch (error) {
       return false;
@@ -1027,6 +1076,28 @@
     }
   }
 
+  function dispatchLocal(type, detail) {
+    try {
+      var root = state.refs && state.refs.root;
+
+      if (!root || typeof CustomEvent !== "function") {
+        return false;
+      }
+
+      root.dispatchEvent(
+        new CustomEvent(type, {
+          bubbles: true,
+          cancelable: false,
+          detail: detail || {}
+        })
+      );
+
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
   function emitParentEvent(type, detail) {
     try {
       var payload = {
@@ -1036,7 +1107,7 @@
         version: INTERNAL_VERSION,
         detail: detail || {},
         project: detail && detail.project ? detail.project : state.currentProject,
-        ts: Date.now(),
+        ts: Date.now()
       };
 
       dispatchLocal(type, payload.detail);
@@ -1062,7 +1133,7 @@
         ) {
           window.parent.dispatchEvent(
             new window.parent.CustomEvent(type, {
-              detail: payload.detail,
+              detail: payload.detail
             })
           );
         }
@@ -1086,28 +1157,6 @@
     }
   }
 
-  function dispatchLocal(type, detail) {
-    try {
-      var root = state.refs && state.refs.root;
-
-      if (!root || typeof CustomEvent !== "function") {
-        return false;
-      }
-
-      root.dispatchEvent(
-        new CustomEvent(type, {
-          bubbles: true,
-          cancelable: false,
-          detail: detail || {},
-        })
-      );
-
-      return true;
-    } catch (error) {
-      return false;
-    }
-  }
-
   async function requestJson(url, options) {
     try {
       var target = trimString(url, "");
@@ -1121,20 +1170,19 @@
         method: opts.method || "GET",
         headers: {
           "Content-Type": "application/json",
-          "Accept": "application/json",
-          ...(opts.headers || {}),
+          "Accept": "application/json"
         },
         credentials: "same-origin",
         cache: "no-store",
-        body: opts.body !== undefined ? opts.body : undefined,
+        body: opts.body !== undefined ? opts.body : undefined
       });
 
       var text = await response.text();
       var data = safeJsonParse(text, null);
 
       if (!response.ok) {
-        var message = data && data.error
-          ? data.error
+        var message = data && (data.error || data.message)
+          ? data.error || data.message
           : "Request failed with status " + response.status;
 
         var error = new Error(message);
@@ -1153,43 +1201,33 @@
     }
   }
 
-  function syncVisibilityFromPublicCheckbox() {
-    try {
-      var refs = state.refs || {};
-
-      if (!refs.visibility || !refs.isPublic) {
-        return;
-      }
-
-      if (refs.isPublic.checked) {
-        refs.visibility.value = "public";
-      } else if (refs.visibility.value === "public") {
-        refs.visibility.value = "private";
-      }
-    } catch (error) {}
-  }
-
-  function syncPublicCheckboxFromVisibility() {
-    try {
-      var refs = state.refs || {};
-
-      if (!refs.visibility || !refs.isPublic) {
-        return;
-      }
-
-      refs.isPublic.checked = refs.visibility.value === "public";
-    } catch (error) {}
-  }
-
   function markDirtyFromInput() {
     try {
       if (state.isSaving) {
         return;
       }
 
+      updateAddressCounter();
       setDirty(true);
       setRootState("saved", false);
       setAlert("", "");
+    } catch (error) {}
+  }
+
+  function updateConfigPathsFromProject(project) {
+    try {
+      var publicId = getProjectPublicId(project);
+
+      if (!publicId || publicId === "new") {
+        return;
+      }
+
+      state.config.projectPublicId = publicId;
+      state.config.paths.updateProject = "/v1/projects/" + encodeURIComponent(publicId);
+      state.config.paths.getProject = "/v1/projects/" + encodeURIComponent(publicId);
+      state.config.paths.publication = "/v1/projects/" + encodeURIComponent(publicId) + "/publication";
+      state.config.paths.members = "/v1/projects/" + encodeURIComponent(publicId) + "/members";
+      state.config.paths.invitations = "/v1/projects/" + encodeURIComponent(publicId) + "/invitations";
     } catch (error) {}
   }
 
@@ -1210,10 +1248,27 @@
       state.lastSavedAt = nowIso();
       state.lastError = null;
 
+      updateConfigPathsFromProject(project);
+
       fillFormFromProject({
-        ...project,
+        id: project.id,
+        project_id: project.project_id,
+        public_id: project.public_id || project.publicId,
+        publicId: project.publicId || project.public_id,
+        name: project.name,
+        display_name: project.display_name || project.displayName,
+        displayName: project.displayName || project.display_name,
+        description: project.description,
+        address_text: project.address_text || project.addressText,
+        addressText: project.addressText || project.address_text,
+        address: isObject(project.address) ? project.address : {},
+        visibility: project.visibility,
+        is_configured: project.is_configured || project.isConfigured,
+        isConfigured: project.isConfigured || project.is_configured,
+        setup_status: project.setup_status || project.setupStatus,
+        setupStatus: project.setupStatus || project.setup_status,
         is_new: false,
-        isNew: false,
+        isNew: false
       });
 
       setDirty(false);
@@ -1221,7 +1276,7 @@
       setRootState("saved", true);
 
       var configured = isProjectConfigured(project);
-      setConfigured(configured, configured ? "configured" : (project.setup_status || "draft"));
+      setConfigured(configured, configured ? "configured" : (project.setup_status || project.setupStatus || "draft"));
 
       var detail = {
         project: project,
@@ -1231,7 +1286,7 @@
         isConfigured: configured,
         is_configured: configured,
         redirectUrl: payload && payload.redirect_url ? payload.redirect_url : buildProjectUrl(project),
-        savedAt: state.lastSavedAt,
+        savedAt: state.lastSavedAt
       };
 
       emitParentEvent(state.config.parentEvents.saved || EVENT_SAVED, detail);
@@ -1251,7 +1306,7 @@
       return {
         project: state.currentProject,
         isNew: !!wasNew,
-        redirectUrl: DEFAULT_PROJECT_ROOT_URL,
+        redirectUrl: DEFAULT_PROJECT_ROOT_URL
       };
     }
   }
@@ -1293,7 +1348,13 @@
   async function saveProject() {
     try {
       if (!state.canEdit) {
-        setAlert("warning", "Du hast für dieses Projekt nur Leserechte.");
+        if (state.demoMode) {
+          setAlert("warning", "Im Demo-Modus wird dieses Projekt nicht dauerhaft gespeichert.");
+        } else if (!state.persistent) {
+          setAlert("warning", "Dein Account ist noch nicht lokal verknüpft. Speichern ist deaktiviert.");
+        } else {
+          setAlert("warning", "Du hast für dieses Projekt nur Leserechte.");
+        }
         return false;
       }
 
@@ -1324,11 +1385,11 @@
 
       var response = await requestJson(url, {
         method: method,
-        body: safeJsonStringify(payload),
+        body: safeJsonStringify(payload)
       });
 
       if (!response || response.ok === false) {
-        throw new Error(response && response.error ? response.error : "Speichern fehlgeschlagen.");
+        throw new Error(response && (response.error || response.message) ? response.error || response.message : "Speichern fehlgeschlagen.");
       }
 
       var detail = updateAfterSave(response, wasNew);
@@ -1355,7 +1416,7 @@
 
       emitParentEvent(EVENT_ERROR, {
         error: normalized,
-        project: state.currentProject,
+        project: state.currentProject
       });
 
       return false;
@@ -1373,18 +1434,12 @@
           name: state.originalPayload.name,
           description: state.originalPayload.description,
           address_text: state.originalPayload.address_text,
-          address_street: state.originalPayload.address_street,
-          address_house_number: state.originalPayload.address_house_number,
-          address_postal_code: state.originalPayload.address_postal_code,
-          address_city: state.originalPayload.address_city,
-          address_region: state.originalPayload.address_region,
-          address_country: state.originalPayload.address_country,
-          latitude: state.originalPayload.latitude,
-          longitude: state.originalPayload.longitude,
-          coordinate_srid: state.originalPayload.coordinate_srid,
+          address: {
+            text: state.originalPayload.address_text
+          },
           visibility: state.originalPayload.visibility,
-          is_public: state.originalPayload.is_public,
           is_new: state.isNew,
+          isNew: state.isNew
         };
 
         fillFormFromProject(p);
@@ -1418,17 +1473,39 @@
     } catch (error) {}
   }
 
-  function onVisibilityChange() {
+  function onVisibilityOptionClick(event) {
     try {
-      syncPublicCheckboxFromVisibility();
-      markDirtyFromInput();
+      if (event && event.preventDefault) {
+        event.preventDefault();
+      }
+
+      var target = event && event.currentTarget ? event.currentTarget : null;
+      if (!target || target.disabled) {
+        return;
+      }
+
+      setVisibility(target.getAttribute("data-value") || "private");
     } catch (error) {}
   }
 
-  function onPublicChange() {
+  function onVisibilityOptionKeydown(event) {
     try {
-      syncVisibilityFromPublicCheckbox();
-      markDirtyFromInput();
+      if (!event) {
+        return;
+      }
+
+      var key = event.key || "";
+      if (key !== "Enter" && key !== " ") {
+        return;
+      }
+
+      onVisibilityOptionClick(event);
+    } catch (error) {}
+  }
+
+  function onVisibilityInputChange() {
+    try {
+      setVisibility(getValue(state.refs.visibility));
     } catch (error) {}
   }
 
@@ -1442,16 +1519,7 @@
       [
         refs.name,
         refs.description,
-        refs.addressText,
-        refs.addressStreet,
-        refs.addressHouseNumber,
-        refs.addressPostalCode,
-        refs.addressCity,
-        refs.addressRegion,
-        refs.addressCountry,
-        refs.latitude,
-        refs.longitude,
-        refs.coordinateSrid,
+        refs.addressText
       ].forEach(function wireInput(element) {
         addListener(element, "input", function onInput() {
           removeFieldError(element);
@@ -1464,8 +1532,12 @@
         });
       });
 
-      addListener(refs.visibility, "change", onVisibilityChange);
-      addListener(refs.isPublic, "change", onPublicChange);
+      addListener(refs.visibility, "change", onVisibilityInputChange);
+
+      (refs.visibilityOptions || []).forEach(function wireOption(option) {
+        addListener(option, "click", onVisibilityOptionClick);
+        addListener(option, "keydown", onVisibilityOptionKeydown);
+      });
 
       addListener(window, "message", function onMessage(event) {
         try {
@@ -1535,8 +1607,29 @@
     try {
       setRootState("readonly", !state.canEdit);
 
+      if (state.refs.submit) {
+        state.refs.submit.disabled = state.isSaving || !state.canEdit;
+      }
+
+      if (state.refs.reset) {
+        state.refs.reset.disabled = state.isSaving || !state.canEdit;
+      }
+
+      (state.refs.visibilityOptions || []).forEach(function syncDisabled(option) {
+        try {
+          option.disabled = !state.canEdit;
+          option.setAttribute("aria-disabled", !state.canEdit ? "true" : "false");
+        } catch (error) {}
+      });
+
       if (!state.canEdit) {
-        setAlert("warning", "Du hast für dieses Projekt nur Leserechte.");
+        if (state.demoMode) {
+          setAlert("warning", "Demo-Modus: Dieses Formular speichert nicht dauerhaft.");
+        } else if (!state.persistent) {
+          setAlert("warning", "Dein Account ist noch nicht lokal verknüpft. Speichern ist deaktiviert.");
+        } else {
+          setAlert("warning", "Du hast für dieses Projekt nur Leserechte.");
+        }
       }
     } catch (error) {}
   }
@@ -1551,6 +1644,10 @@
       state.refs = queryRefs();
       state.isNew = toBooleanSafe(state.config.isNew, true);
       state.canEdit = toBooleanSafe(state.config.canEdit, true);
+      state.canManage = toBooleanSafe(state.config.canManage, false);
+      state.demoMode = toBooleanSafe(state.config.demoMode, false);
+      state.authenticated = toBooleanSafe(state.config.authenticated, true);
+      state.persistent = toBooleanSafe(state.config.persistent, true);
       state.currentProject = safeClone(state.config.project || {});
 
       if (!state.refs.root || !state.refs.form) {
@@ -1561,12 +1658,15 @@
 
       fillFormFromProject({
         ...(state.currentProject || {}),
+        visibility: state.config.projectVisibility || (state.currentProject && state.currentProject.visibility) || "private",
         is_new: state.isNew,
-        isNew: state.isNew,
+        isNew: state.isNew
       });
 
       updateReadonlyState();
       wireEvents();
+      updateAddressCounter();
+      syncVisibilityCards(getValue(state.refs.visibility) || state.config.projectVisibility);
 
       state.initialized = true;
 
@@ -1574,6 +1674,8 @@
         project: state.currentProject,
         isNew: state.isNew,
         canEdit: state.canEdit,
+        demoMode: state.demoMode,
+        persistent: state.persistent
       });
 
       try {
@@ -1605,18 +1707,21 @@
         destroyed: state.destroyed,
         isNew: state.isNew,
         canEdit: state.canEdit,
+        canManage: state.canManage,
+        demoMode: state.demoMode,
+        persistent: state.persistent,
         isDirty: state.isDirty,
         isSaving: state.isSaving,
         lastSavedAt: state.lastSavedAt,
         lastError: state.lastError,
         currentProject: state.currentProject,
-        payload: collectPayload(),
+        payload: collectPayload()
       };
     } catch (error) {
       return {
         version: INTERNAL_VERSION,
         initialized: false,
-        error: normalizeError(error),
+        error: normalizeError(error)
       };
     }
   }
@@ -1632,6 +1737,7 @@
     getSnapshot: getSnapshot,
     setAlert: setAlert,
     applyTheme: applyTheme,
+    setVisibility: setVisibility,
     _private: {
       getConfig: getConfig,
       queryRefs: queryRefs,
@@ -1640,7 +1746,8 @@
       emitParentEvent: emitParentEvent,
       requestJson: requestJson,
       normalizeError: normalizeError,
-    },
+      normalizeVisibility: normalizeVisibility
+    }
   };
 
   try {

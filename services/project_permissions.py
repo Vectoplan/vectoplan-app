@@ -6,9 +6,13 @@ VECTOPLAN project permission service.
 
 Zweck:
 - Zentrale Rechteprüfung für Projekte in vectoplan-app.
-- Nutzt die neuen modularen Models direkt.
-- Phase 1 nutzt weiterhin den Platzhalter-User id=1.
-- Keine Altmodell-Kompatibilität mehr.
+- Verwaltet App-seitige Projektrollen und Projektberechtigungen.
+- Bleibt kompatibel mit dem aktuellen Entwicklungsuser id=1.
+- Unterstützt den vorbereiteten Auth-/Demo-Kontext aus current_user.py.
+- Verhindert, dass unberechtigte User Projektsettings, Teamverwaltung oder
+  technische Bereiche sehen.
+- Verhindert persistente Projektänderungen im Demo-Modus.
+- Erzeugt KEINE echten Benutzeraccounts.
 
 Rollen:
 - owner  : alles inklusive löschen, Rechte ändern, Besitz übertragen
@@ -16,13 +20,16 @@ Rollen:
 - editor : ansehen und bearbeiten
 - viewer : nur ansehen
 
-Wichtig:
-- vectoplan-app verwaltet hier nur App-seitige Projektverwaltung und UI-Zugriff.
-- Chunk-, Editor-, LV-, 2D- und Library-Daten bleiben in ihren Microservices.
+Wichtige Architekturregel:
+- vectoplan-app verwaltet Rollen, Sichtbarkeit, Veröffentlichungen und
+  Projektfrontend.
+- Registrierung, Login, Abo-Status und Bigdata-Zugriff liegen später im
+  separaten Auth-/Registrierungsdienst.
+- Chunk-, Editor-, LV-, 2D- und Library-Fachdaten bleiben in ihren Microservices.
 """
 
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 try:
     from flask import current_app, has_app_context
@@ -32,25 +39,113 @@ except Exception:  # pragma: no cover
     def has_app_context() -> bool:  # type: ignore
         return False
 
-from extensions import db
-
-from models import (
-    AppUser,
-    Project,
-    ProjectMembership,
-    safe_bool,
-    safe_dict,
-    safe_int,
-    safe_str,
-    utcnow,
-)
 
 try:
-    from services.current_user import get_current_user_id_from_g_or_default
+    from extensions import db
 except Exception:  # pragma: no cover
+    db = None  # type: ignore
+
+
+try:
+    from models import (
+        AppUser,
+        Project,
+        ProjectMembership,
+        safe_bool,
+        safe_dict,
+        safe_int,
+        safe_str,
+        utcnow,
+    )
+except Exception:  # pragma: no cover
+    AppUser = None  # type: ignore
+    Project = None  # type: ignore
+    ProjectMembership = None  # type: ignore
+
+    def safe_bool(value: Any, default: bool = False) -> bool:  # type: ignore
+        try:
+            if isinstance(value, bool):
+                return value
+            text = str(value if value is not None else "").strip().lower()
+            if text in {"1", "true", "yes", "y", "on", "ja"}:
+                return True
+            if text in {"0", "false", "no", "n", "off", "nein"}:
+                return False
+            return default
+        except Exception:
+            return default
+
+    def safe_dict(value: Any) -> Dict[str, Any]:  # type: ignore
+        try:
+            if isinstance(value, dict):
+                return dict(value)
+            if isinstance(value, Mapping):
+                return dict(value)
+            if hasattr(value, "to_dict") and callable(value.to_dict):
+                return dict(value.to_dict())
+            return {}
+        except Exception:
+            return {}
+
+    def safe_int(value: Any, default: int = 0) -> int:  # type: ignore
+        try:
+            if value is None or isinstance(value, bool):
+                return default
+            parsed = int(str(value).strip())
+            return parsed
+        except Exception:
+            return default
+
+    def safe_str(value: Any, default: str = "", max_len: int = 240) -> str:  # type: ignore
+        try:
+            text = str(value if value is not None else default).strip()
+            if not text:
+                text = default
+            return text[:max_len] if max_len > 0 else text
+        except Exception:
+            return default
+
+    def utcnow() -> Any:  # type: ignore
+        import datetime as _dt
+        return _dt.datetime.utcnow()
+
+
+try:
+    from services.current_user import (
+        current_user_can_persist,
+        get_current_user_context,
+        get_current_user_id_from_g_or_default,
+        get_current_user_id_optional,
+        is_current_user_demo,
+    )
+except Exception:  # pragma: no cover
+
     def get_current_user_id_from_g_or_default() -> int:  # type: ignore
         return 1
 
+    def get_current_user_id_optional() -> Optional[int]:  # type: ignore
+        return 1
+
+    def get_current_user_context(*args: Any, **kwargs: Any) -> Any:  # type: ignore
+        return {
+            "user_id": 1,
+            "id": 1,
+            "authenticated": True,
+            "demo_mode": False,
+            "persistent": True,
+            "source": "fallback",
+        }
+
+    def is_current_user_demo() -> bool:  # type: ignore
+        return False
+
+    def current_user_can_persist() -> bool:  # type: ignore
+        return True
+
+
+# ─────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────
 
 ROLE_OWNER = "owner"
 ROLE_ADMIN = "admin"
@@ -63,6 +158,14 @@ PERMISSION_MANAGE = "manage"
 PERMISSION_DELETE = "delete"
 PERMISSION_TRANSFER = "transfer"
 PERMISSION_EMBED = "embed"
+
+# UI-/Settings-spezifische Berechtigungen.
+# Diese sind bewusst abgeleitet und nicht zwingend DB-Spalten.
+PERMISSION_VIEW_SETTINGS = "view_settings"
+PERMISSION_MANAGE_SETTINGS = "manage_settings"
+PERMISSION_VIEW_TEAM = "view_team"
+PERMISSION_MANAGE_TEAM = "manage_team"
+PERMISSION_VIEW_ADMIN = "view_admin"
 
 VALID_PROJECT_ROLES = {
     ROLE_OWNER,
@@ -78,6 +181,28 @@ VALID_PROJECT_PERMISSIONS = {
     PERMISSION_DELETE,
     PERMISSION_TRANSFER,
     PERMISSION_EMBED,
+    PERMISSION_VIEW_SETTINGS,
+    PERMISSION_MANAGE_SETTINGS,
+    PERMISSION_VIEW_TEAM,
+    PERMISSION_MANAGE_TEAM,
+    PERMISSION_VIEW_ADMIN,
+}
+
+BASE_PROJECT_PERMISSIONS = {
+    PERMISSION_VIEW,
+    PERMISSION_EDIT,
+    PERMISSION_MANAGE,
+    PERMISSION_DELETE,
+    PERMISSION_TRANSFER,
+    PERMISSION_EMBED,
+}
+
+SETTINGS_PERMISSIONS = {
+    PERMISSION_VIEW_SETTINGS,
+    PERMISSION_MANAGE_SETTINGS,
+    PERMISSION_VIEW_TEAM,
+    PERMISSION_MANAGE_TEAM,
+    PERMISSION_VIEW_ADMIN,
 }
 
 ROLE_PERMISSION_DEFAULTS: Dict[str, Dict[str, bool]] = {
@@ -124,6 +249,37 @@ MEMBERSHIP_PERMISSION_ATTRS = {
     PERMISSION_EMBED: "can_embed",
 }
 
+PROJECT_VISIBILITY_PRIVATE = "private"
+PROJECT_VISIBILITY_SHARED = "shared"
+PROJECT_VISIBILITY_UNLISTED = "unlisted"
+PROJECT_VISIBILITY_PUBLIC = "public"
+
+PUBLIC_VIEW_VISIBILITIES = {
+    PROJECT_VISIBILITY_PUBLIC,
+    PROJECT_VISIBILITY_UNLISTED,
+}
+
+ACTIVE_MEMBERSHIP_STATUSES = {
+    "active",
+    "accepted",
+    "enabled",
+}
+
+INACTIVE_MEMBERSHIP_STATUSES = {
+    "revoked",
+    "removed",
+    "deleted",
+    "disabled",
+    "inactive",
+    "rejected",
+    "expired",
+}
+
+MANAGER_ROLES = {
+    ROLE_OWNER,
+    ROLE_ADMIN,
+}
+
 
 # ─────────────────────────────────────────────────────────────
 # Exceptions / result objects
@@ -152,6 +308,7 @@ class PermissionDenied(RuntimeError):
         return {
             "ok": False,
             "error": self.message,
+            "message": self.message,
             "code": self.code,
             "permission": self.permission,
             "project_id": self.project_id,
@@ -166,15 +323,33 @@ class PermissionResult:
     project_id: Optional[int]
     project_public_id: Optional[str]
     role: str
+
     can_view: bool
     can_edit: bool
     can_manage: bool
     can_delete: bool
     can_transfer: bool
     can_embed: bool
+
+    # Settings/UI visibility.
+    can_view_settings: bool = False
+    can_manage_settings: bool = False
+    can_view_team: bool = False
+    can_manage_team: bool = False
+    can_view_admin: bool = False
+
     is_owner: bool = False
     is_public_viewer: bool = False
+    is_unlisted_viewer: bool = False
+    is_member: bool = False
+
+    authenticated: bool = True
+    demo_mode: bool = False
+    persistent: bool = True
+
     source: str = "unknown"
+    reason: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def permissions(self) -> Dict[str, bool]:
@@ -185,6 +360,32 @@ class PermissionResult:
             PERMISSION_DELETE: bool(self.can_delete),
             PERMISSION_TRANSFER: bool(self.can_transfer),
             PERMISSION_EMBED: bool(self.can_embed),
+            PERMISSION_VIEW_SETTINGS: bool(self.can_view_settings),
+            PERMISSION_MANAGE_SETTINGS: bool(self.can_manage_settings),
+            PERMISSION_VIEW_TEAM: bool(self.can_view_team),
+            PERMISSION_MANAGE_TEAM: bool(self.can_manage_team),
+            PERMISSION_VIEW_ADMIN: bool(self.can_view_admin),
+        }
+
+    @property
+    def base_permissions(self) -> Dict[str, bool]:
+        return {
+            PERMISSION_VIEW: bool(self.can_view),
+            PERMISSION_EDIT: bool(self.can_edit),
+            PERMISSION_MANAGE: bool(self.can_manage),
+            PERMISSION_DELETE: bool(self.can_delete),
+            PERMISSION_TRANSFER: bool(self.can_transfer),
+            PERMISSION_EMBED: bool(self.can_embed),
+        }
+
+    @property
+    def settings_permissions(self) -> Dict[str, bool]:
+        return {
+            PERMISSION_VIEW_SETTINGS: bool(self.can_view_settings),
+            PERMISSION_MANAGE_SETTINGS: bool(self.can_manage_settings),
+            PERMISSION_VIEW_TEAM: bool(self.can_view_team),
+            PERMISSION_MANAGE_TEAM: bool(self.can_manage_team),
+            PERMISSION_VIEW_ADMIN: bool(self.can_view_admin),
         }
 
     def allows(self, permission: Any) -> bool:
@@ -198,15 +399,29 @@ class PermissionResult:
             "project_public_id": self.project_public_id,
             "role": self.role,
             "permissions": self.permissions,
+            "base_permissions": self.base_permissions,
+            "settings_permissions": self.settings_permissions,
             "can_view": self.can_view,
             "can_edit": self.can_edit,
             "can_manage": self.can_manage,
             "can_delete": self.can_delete,
             "can_transfer": self.can_transfer,
             "can_embed": self.can_embed,
+            "can_view_settings": self.can_view_settings,
+            "can_manage_settings": self.can_manage_settings,
+            "can_view_team": self.can_view_team,
+            "can_manage_team": self.can_manage_team,
+            "can_view_admin": self.can_view_admin,
             "is_owner": self.is_owner,
             "is_public_viewer": self.is_public_viewer,
+            "is_unlisted_viewer": self.is_unlisted_viewer,
+            "is_member": self.is_member,
+            "authenticated": self.authenticated,
+            "demo_mode": self.demo_mode,
+            "persistent": self.persistent,
             "source": self.source,
+            "reason": self.reason,
+            "extra": dict(self.extra or {}),
         }
 
 
@@ -215,25 +430,69 @@ class PermissionResult:
 # ─────────────────────────────────────────────────────────────
 
 def _safe_str(value: Any, default: str = "", max_len: int = 240) -> str:
-    return safe_str(value, default, max_len)
+    try:
+        return safe_str(value, default, max_len)
+    except Exception:
+        try:
+            text = str(value if value is not None else default).strip()
+            if not text:
+                text = default
+            return text[:max_len] if max_len > 0 else text
+        except Exception:
+            return default
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return safe_int(value, default)
     except Exception:
-        return default
+        try:
+            if value is None or isinstance(value, bool):
+                return default
+            return int(str(value).strip())
+        except Exception:
+            return default
+
+
+def _safe_int_optional(value: Any) -> Optional[int]:
+    try:
+        parsed = _safe_int(value, 0)
+        return parsed if parsed > 0 else None
+    except Exception:
+        return None
 
 
 def _safe_bool(value: Any, default: bool = False) -> bool:
     try:
         return safe_bool(value, default)
     except Exception:
-        return default
+        try:
+            if isinstance(value, bool):
+                return value
+            text = str(value if value is not None else "").strip().lower()
+            if text in {"1", "true", "yes", "y", "on", "ja"}:
+                return True
+            if text in {"0", "false", "no", "n", "off", "nein"}:
+                return False
+            return default
+        except Exception:
+            return default
 
 
 def _safe_dict(value: Any) -> Dict[str, Any]:
-    return safe_dict(value)
+    try:
+        return safe_dict(value)
+    except Exception:
+        try:
+            if isinstance(value, dict):
+                return dict(value)
+            if isinstance(value, Mapping):
+                return dict(value)
+            if hasattr(value, "to_dict") and callable(value.to_dict):
+                return dict(value.to_dict())
+            return {}
+        except Exception:
+            return {}
 
 
 def _log_warning(message: str, *args: Any) -> None:
@@ -255,6 +514,153 @@ def _log_exception(message: str, exc: Optional[Exception] = None) -> None:
         pass
 
 
+def _db_add(obj: Any) -> None:
+    try:
+        if db is not None:
+            db.session.add(obj)
+    except Exception:
+        pass
+
+
+def _db_flush_or_commit(commit: bool = False) -> None:
+    if db is None:
+        return
+
+    if commit:
+        db.session.commit()
+    else:
+        db.session.flush()
+
+
+def _db_rollback_safely() -> None:
+    try:
+        if db is not None:
+            db.session.rollback()
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────
+# Auth/current actor helpers
+# ─────────────────────────────────────────────────────────────
+
+def get_actor_context(user_id: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Liefert aktuellen Actor-Kontext als Dict.
+
+    Bei explizitem user_id wird bewusst ein persistenter Kontext angenommen.
+    Das hält bestehende Service-Aufrufe kompatibel.
+    """
+    if user_id is not None:
+        parsed = _safe_int_optional(user_id)
+        return {
+            "user_id": parsed,
+            "id": parsed,
+            "authenticated": bool(parsed),
+            "demo_mode": False,
+            "persistent": bool(parsed),
+            "source": "explicit_user_id",
+        }
+
+    try:
+        context = get_current_user_context(ensure=False)
+        data = _safe_dict(context)
+        if not data and hasattr(context, "to_dict"):
+            data = _safe_dict(context.to_dict())
+        return data
+    except Exception:
+        uid = _safe_int_optional(get_current_user_id_from_g_or_default())
+        return {
+            "user_id": uid,
+            "id": uid,
+            "authenticated": bool(uid),
+            "demo_mode": False,
+            "persistent": bool(uid),
+            "source": "fallback",
+        }
+
+
+def actor_user_id(user_id: Optional[int] = None) -> Optional[int]:
+    try:
+        context = get_actor_context(user_id)
+        return _safe_int_optional(context.get("user_id") or context.get("id"))
+    except Exception:
+        return None
+
+
+def actor_is_authenticated(user_id: Optional[int] = None) -> bool:
+    try:
+        context = get_actor_context(user_id)
+        return _safe_bool(
+            context.get("authenticated")
+            or context.get("is_authenticated")
+            or context.get("logged_in"),
+            default=bool(_safe_int_optional(context.get("user_id") or context.get("id"))),
+        )
+    except Exception:
+        return False
+
+
+def actor_is_demo(user_id: Optional[int] = None) -> bool:
+    try:
+        if user_id is not None:
+            return False
+
+        context = get_actor_context(user_id)
+        return _safe_bool(
+            context.get("demo_mode")
+            or context.get("is_demo")
+            or context.get("demo"),
+            default=False,
+        )
+    except Exception:
+        try:
+            return bool(is_current_user_demo())
+        except Exception:
+            return False
+
+
+def actor_can_persist(user_id: Optional[int] = None) -> bool:
+    try:
+        if user_id is not None:
+            return True
+
+        context = get_actor_context(user_id)
+        return _safe_bool(
+            context.get("persistent"),
+            default=bool(_safe_int_optional(context.get("user_id") or context.get("id"))) and not actor_is_demo(),
+        )
+    except Exception:
+        try:
+            return bool(current_user_can_persist())
+        except Exception:
+            return False
+
+
+def current_user_id(user_id: Optional[int] = None) -> int:
+    """
+    Legacy-kompatibler Resolver.
+
+    Achtung:
+    - Für Demo-/Auth-sensible Logik besser actor_user_id() verwenden.
+    - Diese Funktion gibt aus Kompatibilitätsgründen 1 zurück, wenn kein User
+      auflösbar ist.
+    """
+    try:
+        parsed = _safe_int(user_id, 0)
+        if parsed > 0:
+            return parsed
+
+        optional = get_current_user_id_optional()
+        if optional:
+            return _safe_int(optional, 1)
+
+        return _safe_int(get_current_user_id_from_g_or_default(), 1)
+
+    except Exception:
+        return 1
+
+
 # ─────────────────────────────────────────────────────────────
 # Normalization
 # ─────────────────────────────────────────────────────────────
@@ -266,18 +672,26 @@ def normalize_role(role: Any, default: str = ROLE_VIEWER) -> str:
         aliases = {
             "owner": ROLE_OWNER,
             "besitzer": ROLE_OWNER,
+            "eigentümer": ROLE_OWNER,
+            "eigentuemer": ROLE_OWNER,
             "admin": ROLE_ADMIN,
             "administrator": ROLE_ADMIN,
             "manager": ROLE_ADMIN,
+            "manage": ROLE_ADMIN,
             "editor": ROLE_EDITOR,
             "bearbeiter": ROLE_EDITOR,
             "edit": ROLE_EDITOR,
+            "write": ROLE_EDITOR,
+            "writer": ROLE_EDITOR,
+            "member": ROLE_EDITOR,
             "viewer": ROLE_VIEWER,
             "zuschauer": ROLE_VIEWER,
             "view": ROLE_VIEWER,
             "reader": ROLE_VIEWER,
             "readonly": ROLE_VIEWER,
             "read_only": ROLE_VIEWER,
+            "gast": ROLE_VIEWER,
+            "guest": ROLE_VIEWER,
         }
 
         normalized = aliases.get(text, text)
@@ -293,7 +707,7 @@ def normalize_role(role: Any, default: str = ROLE_VIEWER) -> str:
 
 def normalize_permission(permission: Any, default: str = PERMISSION_VIEW) -> str:
     try:
-        text = _safe_str(permission, default, 40).lower().replace("-", "_").strip()
+        text = _safe_str(permission, default, 60).lower().replace("-", "_").strip()
 
         aliases = {
             "read": PERMISSION_VIEW,
@@ -301,26 +715,51 @@ def normalize_permission(permission: Any, default: str = PERMISSION_VIEW) -> str
             "viewer": PERMISSION_VIEW,
             "sehen": PERMISSION_VIEW,
             "anschauen": PERMISSION_VIEW,
+
             "write": PERMISSION_EDIT,
             "edit": PERMISSION_EDIT,
             "editor": PERMISSION_EDIT,
             "bearbeiten": PERMISSION_EDIT,
             "change": PERMISSION_EDIT,
             "modify": PERMISSION_EDIT,
+
             "manage": PERMISSION_MANAGE,
             "admin": PERMISSION_MANAGE,
             "verwalten": PERMISSION_MANAGE,
+
             "delete": PERMISSION_DELETE,
             "remove": PERMISSION_DELETE,
             "löschen": PERMISSION_DELETE,
             "loeschen": PERMISSION_DELETE,
+
             "transfer": PERMISSION_TRANSFER,
             "owner_transfer": PERMISSION_TRANSFER,
             "besitz_uebertragen": PERMISSION_TRANSFER,
             "besitz_übertragen": PERMISSION_TRANSFER,
+
             "embed": PERMISSION_EMBED,
             "iframe": PERMISSION_EMBED,
             "einbetten": PERMISSION_EMBED,
+
+            "settings": PERMISSION_VIEW_SETTINGS,
+            "view_settings": PERMISSION_VIEW_SETTINGS,
+            "settings_view": PERMISSION_VIEW_SETTINGS,
+            "einstellungen": PERMISSION_VIEW_SETTINGS,
+
+            "manage_settings": PERMISSION_MANAGE_SETTINGS,
+            "settings_manage": PERMISSION_MANAGE_SETTINGS,
+            "edit_settings": PERMISSION_MANAGE_SETTINGS,
+
+            "team": PERMISSION_VIEW_TEAM,
+            "members": PERMISSION_VIEW_TEAM,
+            "view_team": PERMISSION_VIEW_TEAM,
+
+            "manage_team": PERMISSION_MANAGE_TEAM,
+            "edit_team": PERMISSION_MANAGE_TEAM,
+            "members_manage": PERMISSION_MANAGE_TEAM,
+
+            "admin_view": PERMISSION_VIEW_ADMIN,
+            "view_admin": PERMISSION_VIEW_ADMIN,
         }
 
         normalized = aliases.get(text, text)
@@ -332,6 +771,51 @@ def normalize_permission(permission: Any, default: str = PERMISSION_VIEW) -> str
 
     except Exception:
         return PERMISSION_VIEW
+
+
+def normalize_visibility(value: Any, default: str = PROJECT_VISIBILITY_PRIVATE) -> str:
+    try:
+        text = _safe_str(value, default, 40).lower().replace("-", "_").strip()
+
+        aliases = {
+            "private": PROJECT_VISIBILITY_PRIVATE,
+            "privat": PROJECT_VISIBILITY_PRIVATE,
+            "internal": PROJECT_VISIBILITY_PRIVATE,
+            "intern": PROJECT_VISIBILITY_PRIVATE,
+            "closed": PROJECT_VISIBILITY_PRIVATE,
+            "shared": PROJECT_VISIBILITY_PRIVATE,
+            "geteilt": PROJECT_VISIBILITY_PRIVATE,
+
+            "unlisted": PROJECT_VISIBILITY_UNLISTED,
+            "not_listed": PROJECT_VISIBILITY_UNLISTED,
+            "nicht_gelistet": PROJECT_VISIBILITY_UNLISTED,
+            "link": PROJECT_VISIBILITY_UNLISTED,
+            "linkshare": PROJECT_VISIBILITY_UNLISTED,
+            "link_shared": PROJECT_VISIBILITY_UNLISTED,
+
+            "public": PROJECT_VISIBILITY_PUBLIC,
+            "öffentlich": PROJECT_VISIBILITY_PUBLIC,
+            "oeffentlich": PROJECT_VISIBILITY_PUBLIC,
+            "open": PROJECT_VISIBILITY_PUBLIC,
+            "listed": PROJECT_VISIBILITY_PUBLIC,
+        }
+
+        normalized = aliases.get(text, text)
+
+        if normalized in {
+            PROJECT_VISIBILITY_PRIVATE,
+            PROJECT_VISIBILITY_SHARED,
+            PROJECT_VISIBILITY_UNLISTED,
+            PROJECT_VISIBILITY_PUBLIC,
+        }:
+            if normalized == PROJECT_VISIBILITY_SHARED:
+                return PROJECT_VISIBILITY_PRIVATE
+            return normalized
+
+        return default
+
+    except Exception:
+        return default
 
 
 def role_permission_defaults(role: Any) -> Dict[str, bool]:
@@ -364,21 +848,33 @@ def normalize_permission_overrides(overrides: Optional[Dict[str, Any]] = None) -
         return {}
 
 
+def derive_settings_permissions(base_permissions: Mapping[str, Any], role: Any) -> Dict[str, bool]:
+    """
+    Settings/Admin/Team werden nur aus manage-Recht abgeleitet.
+
+    Konsequenz:
+    - viewer/editor sehen Projektsettings nicht.
+    - public/unlisted viewer sehen Projektsettings nicht.
+    - admin/owner sehen Team/Veröffentlichung/Admin.
+    """
+    clean_role = normalize_role(role)
+    can_manage = _safe_bool(base_permissions.get(PERMISSION_MANAGE), False)
+
+    if clean_role in {ROLE_OWNER, ROLE_ADMIN}:
+        can_manage = True
+
+    return {
+        PERMISSION_VIEW_SETTINGS: bool(can_manage),
+        PERMISSION_MANAGE_SETTINGS: bool(can_manage),
+        PERMISSION_VIEW_TEAM: bool(can_manage),
+        PERMISSION_MANAGE_TEAM: bool(can_manage),
+        PERMISSION_VIEW_ADMIN: bool(can_manage),
+    }
+
+
 # ─────────────────────────────────────────────────────────────
-# User / project helpers
+# Project/user helpers
 # ─────────────────────────────────────────────────────────────
-
-def current_user_id(user_id: Optional[int] = None) -> int:
-    try:
-        parsed = _safe_int(user_id, 0)
-        if parsed > 0:
-            return parsed
-
-        return _safe_int(get_current_user_id_from_g_or_default(), 1)
-
-    except Exception:
-        return 1
-
 
 def project_identity(project: Any) -> Tuple[Optional[int], Optional[str]]:
     try:
@@ -415,15 +911,48 @@ def is_project_deleted(project: Any) -> bool:
         return True
 
 
+def project_visibility(project: Any) -> str:
+    try:
+        if project is None:
+            return PROJECT_VISIBILITY_PRIVATE
+
+        return normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
+
+    except Exception:
+        return PROJECT_VISIBILITY_PRIVATE
+
+
 def is_project_public(project: Any) -> bool:
     try:
         if project is None or is_project_deleted(project):
             return False
 
-        visibility = _safe_str(getattr(project, "visibility", ""), "", 40).lower()
+        visibility = project_visibility(project)
         public_flag = _safe_bool(getattr(project, "is_public", False), False)
 
-        return public_flag or visibility == "public"
+        return public_flag or visibility == PROJECT_VISIBILITY_PUBLIC
+
+    except Exception:
+        return False
+
+
+def is_project_unlisted(project: Any) -> bool:
+    try:
+        if project is None or is_project_deleted(project):
+            return False
+
+        return project_visibility(project) == PROJECT_VISIBILITY_UNLISTED
+
+    except Exception:
+        return False
+
+
+def is_project_publicly_viewable(project: Any) -> bool:
+    try:
+        if project is None or is_project_deleted(project):
+            return False
+
+        return is_project_public(project) or is_project_unlisted(project)
 
     except Exception:
         return False
@@ -431,9 +960,9 @@ def is_project_public(project: Any) -> bool:
 
 def is_project_owner(project: Any, user_id: Optional[int] = None) -> bool:
     try:
-        uid = current_user_id(user_id)
+        uid = actor_user_id(user_id)
 
-        if project is None or uid <= 0:
+        if project is None or not uid:
             return False
 
         owner_id = _safe_int(getattr(project, "owner_user_id", None), 0)
@@ -449,13 +978,26 @@ def membership_is_active(membership: Any) -> bool:
             return False
 
         if hasattr(membership, "is_active"):
-            return bool(getattr(membership, "is_active"))
+            try:
+                return bool(getattr(membership, "is_active"))
+            except Exception:
+                pass
 
         if getattr(membership, "revoked_at", None) is not None:
             return False
 
+        if getattr(membership, "deleted_at", None) is not None:
+            return False
+
+        if _safe_bool(getattr(membership, "is_deleted", False), False):
+            return False
+
         status = _safe_str(getattr(membership, "status", "active"), "active", 40).lower()
-        return status in {"active", "accepted", "enabled"}
+
+        if status in INACTIVE_MEMBERSHIP_STATUSES:
+            return False
+
+        return status in ACTIVE_MEMBERSHIP_STATUSES or not status
 
     except Exception:
         return False
@@ -468,13 +1010,13 @@ def get_project_membership(
     include_inactive: bool = False,
 ) -> Any:
     try:
-        if project is None:
+        if project is None or ProjectMembership is None:
             return None
 
-        uid = current_user_id(user_id)
+        uid = actor_user_id(user_id)
         project_id, _ = project_identity(project)
 
-        if not project_id or uid <= 0:
+        if not project_id or not uid:
             return None
 
         row = ProjectMembership.query.filter_by(
@@ -498,14 +1040,7 @@ def get_project_membership(
 def membership_permissions(membership: Any) -> Dict[str, bool]:
     try:
         if membership is None:
-            return {
-                PERMISSION_VIEW: False,
-                PERMISSION_EDIT: False,
-                PERMISSION_MANAGE: False,
-                PERMISSION_DELETE: False,
-                PERMISSION_TRANSFER: False,
-                PERMISSION_EMBED: False,
-            }
+            return {permission: False for permission in BASE_PROJECT_PERMISSIONS}
 
         role = normalize_role(getattr(membership, "role", ROLE_VIEWER))
         permissions = role_permission_defaults(role)
@@ -525,19 +1060,12 @@ def membership_permissions(membership: Any) -> Dict[str, bool]:
         return permissions
 
     except Exception:
-        return {
-            PERMISSION_VIEW: False,
-            PERMISSION_EDIT: False,
-            PERMISSION_MANAGE: False,
-            PERMISSION_DELETE: False,
-            PERMISSION_TRANSFER: False,
-            PERMISSION_EMBED: False,
-        }
+        return {permission: False for permission in BASE_PROJECT_PERMISSIONS}
 
 
 def project_public_view_permissions(project: Any) -> Dict[str, bool]:
     try:
-        if is_project_public(project):
+        if is_project_publicly_viewable(project):
             return {
                 PERMISSION_VIEW: True,
                 PERMISSION_EDIT: False,
@@ -547,24 +1075,80 @@ def project_public_view_permissions(project: Any) -> Dict[str, bool]:
                 PERMISSION_EMBED: False,
             }
 
-        return {
-            PERMISSION_VIEW: False,
-            PERMISSION_EDIT: False,
-            PERMISSION_MANAGE: False,
-            PERMISSION_DELETE: False,
-            PERMISSION_TRANSFER: False,
-            PERMISSION_EMBED: False,
-        }
+        return {permission: False for permission in BASE_PROJECT_PERMISSIONS}
 
     except Exception:
-        return {
-            PERMISSION_VIEW: False,
-            PERMISSION_EDIT: False,
-            PERMISSION_MANAGE: False,
-            PERMISSION_DELETE: False,
-            PERMISSION_TRANSFER: False,
-            PERMISSION_EMBED: False,
-        }
+        return {permission: False for permission in BASE_PROJECT_PERMISSIONS}
+
+
+def _permission_result_from_base(
+    *,
+    user_id: Optional[int],
+    project_id: Optional[int],
+    project_public_id: Optional[str],
+    role: str,
+    base_permissions: Mapping[str, Any],
+    is_owner: bool = False,
+    is_public_viewer: bool = False,
+    is_unlisted_viewer: bool = False,
+    is_member: bool = False,
+    authenticated: bool = True,
+    demo_mode: bool = False,
+    persistent: bool = True,
+    source: str = "unknown",
+    reason: Optional[str] = None,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> PermissionResult:
+    clean_role = normalize_role(role)
+    base = {permission: _safe_bool(base_permissions.get(permission), False) for permission in BASE_PROJECT_PERMISSIONS}
+
+    if demo_mode or not persistent:
+        # Demo und nicht verknüpfte Auth-User dürfen nur öffentlich sehen.
+        if not is_public_viewer and not is_unlisted_viewer:
+            base = {permission: False for permission in BASE_PROJECT_PERMISSIONS}
+        else:
+            base[PERMISSION_EDIT] = False
+            base[PERMISSION_MANAGE] = False
+            base[PERMISSION_DELETE] = False
+            base[PERMISSION_TRANSFER] = False
+            base[PERMISSION_EMBED] = False
+
+    settings = derive_settings_permissions(base, clean_role)
+
+    if is_public_viewer or is_unlisted_viewer:
+        # Öffentliche/ungelistete Betrachter sehen keine Einstellungen.
+        settings = {permission: False for permission in SETTINGS_PERMISSIONS}
+
+    if demo_mode or not persistent:
+        settings = {permission: False for permission in SETTINGS_PERMISSIONS}
+
+    return PermissionResult(
+        user_id=user_id,
+        project_id=project_id,
+        project_public_id=project_public_id,
+        role=clean_role,
+        can_view=base[PERMISSION_VIEW],
+        can_edit=base[PERMISSION_EDIT],
+        can_manage=base[PERMISSION_MANAGE],
+        can_delete=base[PERMISSION_DELETE],
+        can_transfer=base[PERMISSION_TRANSFER],
+        can_embed=base[PERMISSION_EMBED],
+        can_view_settings=settings[PERMISSION_VIEW_SETTINGS],
+        can_manage_settings=settings[PERMISSION_MANAGE_SETTINGS],
+        can_view_team=settings[PERMISSION_VIEW_TEAM],
+        can_manage_team=settings[PERMISSION_MANAGE_TEAM],
+        can_view_admin=settings[PERMISSION_VIEW_ADMIN],
+        is_owner=is_owner,
+        is_public_viewer=is_public_viewer,
+        is_unlisted_viewer=is_unlisted_viewer,
+        is_member=is_member,
+        authenticated=authenticated,
+        demo_mode=demo_mode,
+        persistent=persistent,
+        source=source,
+        reason=reason,
+        extra=dict(extra or {}),
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -577,121 +1161,129 @@ def get_project_permission_result(
     *,
     allow_public_view: bool = True,
     membership: Any = None,
+    actor_context: Optional[Mapping[str, Any]] = None,
 ) -> PermissionResult:
-    uid = current_user_id(user_id)
+    context = _safe_dict(actor_context) if actor_context is not None else get_actor_context(user_id)
+    uid = _safe_int_optional(context.get("user_id") or context.get("id"))
     project_id, public_id = project_identity(project)
+
+    authenticated = _safe_bool(
+        context.get("authenticated")
+        or context.get("is_authenticated")
+        or context.get("logged_in"),
+        default=bool(uid),
+    )
+    demo_mode = _safe_bool(
+        context.get("demo_mode")
+        or context.get("is_demo")
+        or context.get("demo"),
+        default=False,
+    )
+    persistent = _safe_bool(
+        context.get("persistent"),
+        default=bool(uid) and not demo_mode,
+    )
 
     try:
         if project is None or is_project_deleted(project):
-            return PermissionResult(
+            return _permission_result_from_base(
                 user_id=uid,
                 project_id=project_id,
                 project_public_id=public_id,
                 role=ROLE_VIEWER,
-                can_view=False,
-                can_edit=False,
-                can_manage=False,
-                can_delete=False,
-                can_transfer=False,
-                can_embed=False,
-                is_owner=False,
-                is_public_viewer=False,
+                base_permissions={},
+                authenticated=authenticated,
+                demo_mode=demo_mode,
+                persistent=persistent,
                 source="deleted_or_missing",
+                reason="project_deleted_or_missing",
             )
 
-        if is_project_owner(project, uid):
-            permissions = role_permission_defaults(ROLE_OWNER)
-
-            return PermissionResult(
+        if uid and persistent and is_project_owner(project, uid):
+            return _permission_result_from_base(
                 user_id=uid,
                 project_id=project_id,
                 project_public_id=public_id,
                 role=ROLE_OWNER,
-                can_view=permissions[PERMISSION_VIEW],
-                can_edit=permissions[PERMISSION_EDIT],
-                can_manage=permissions[PERMISSION_MANAGE],
-                can_delete=permissions[PERMISSION_DELETE],
-                can_transfer=permissions[PERMISSION_TRANSFER],
-                can_embed=permissions[PERMISSION_EMBED],
+                base_permissions=role_permission_defaults(ROLE_OWNER),
                 is_owner=True,
-                is_public_viewer=False,
+                is_member=True,
+                authenticated=authenticated,
+                demo_mode=demo_mode,
+                persistent=persistent,
                 source="owner",
             )
 
         row = membership if membership is not None else get_project_membership(project, uid)
 
-        if row is not None and membership_is_active(row):
+        if uid and persistent and row is not None and membership_is_active(row):
             role = normalize_role(getattr(row, "role", ROLE_VIEWER))
             permissions = membership_permissions(row)
 
-            return PermissionResult(
+            return _permission_result_from_base(
                 user_id=uid,
                 project_id=project_id,
                 project_public_id=public_id,
                 role=role,
-                can_view=permissions[PERMISSION_VIEW],
-                can_edit=permissions[PERMISSION_EDIT],
-                can_manage=permissions[PERMISSION_MANAGE],
-                can_delete=permissions[PERMISSION_DELETE],
-                can_transfer=permissions[PERMISSION_TRANSFER],
-                can_embed=permissions[PERMISSION_EMBED],
+                base_permissions=permissions,
                 is_owner=role == ROLE_OWNER,
-                is_public_viewer=False,
+                is_member=True,
+                authenticated=authenticated,
+                demo_mode=demo_mode,
+                persistent=persistent,
                 source="membership",
+                extra={"membership_id": getattr(row, "id", None)},
             )
 
-        if allow_public_view and is_project_public(project):
+        if allow_public_view and is_project_publicly_viewable(project):
             permissions = project_public_view_permissions(project)
+            visibility = project_visibility(project)
 
-            return PermissionResult(
+            return _permission_result_from_base(
                 user_id=uid,
                 project_id=project_id,
                 project_public_id=public_id,
                 role=ROLE_VIEWER,
-                can_view=permissions[PERMISSION_VIEW],
-                can_edit=permissions[PERMISSION_EDIT],
-                can_manage=permissions[PERMISSION_MANAGE],
-                can_delete=permissions[PERMISSION_DELETE],
-                can_transfer=permissions[PERMISSION_TRANSFER],
-                can_embed=permissions[PERMISSION_EMBED],
+                base_permissions=permissions,
                 is_owner=False,
-                is_public_viewer=True,
-                source="public",
+                is_member=False,
+                is_public_viewer=visibility == PROJECT_VISIBILITY_PUBLIC,
+                is_unlisted_viewer=visibility == PROJECT_VISIBILITY_UNLISTED,
+                authenticated=authenticated,
+                demo_mode=demo_mode,
+                persistent=persistent,
+                source="public_visibility" if visibility == PROJECT_VISIBILITY_PUBLIC else "unlisted_visibility",
+                reason="public_or_unlisted_view_only",
+                extra={"visibility": visibility},
             )
 
-        return PermissionResult(
+        return _permission_result_from_base(
             user_id=uid,
             project_id=project_id,
             project_public_id=public_id,
             role=ROLE_VIEWER,
-            can_view=False,
-            can_edit=False,
-            can_manage=False,
-            can_delete=False,
-            can_transfer=False,
-            can_embed=False,
-            is_owner=False,
-            is_public_viewer=False,
+            base_permissions={},
+            authenticated=authenticated,
+            demo_mode=demo_mode,
+            persistent=persistent,
             source="none",
+            reason="no_membership_or_public_access",
         )
 
     except Exception as exc:
         _log_exception("get_project_permission_result failed", exc)
 
-        return PermissionResult(
+        return _permission_result_from_base(
             user_id=uid,
             project_id=project_id,
             project_public_id=public_id,
             role=ROLE_VIEWER,
-            can_view=False,
-            can_edit=False,
-            can_manage=False,
-            can_delete=False,
-            can_transfer=False,
-            can_embed=False,
-            is_owner=False,
-            is_public_viewer=False,
+            base_permissions={},
+            authenticated=authenticated,
+            demo_mode=demo_mode,
+            persistent=persistent,
             source="error",
+            reason=exc.__class__.__name__,
         )
 
 
@@ -737,6 +1329,26 @@ def can_embed_project(project: Any, user_id: Optional[int] = None) -> bool:
     return has_project_permission(project, PERMISSION_EMBED, user_id, allow_public_view=False)
 
 
+def can_view_project_settings(project: Any, user_id: Optional[int] = None) -> bool:
+    return has_project_permission(project, PERMISSION_VIEW_SETTINGS, user_id, allow_public_view=False)
+
+
+def can_manage_project_settings(project: Any, user_id: Optional[int] = None) -> bool:
+    return has_project_permission(project, PERMISSION_MANAGE_SETTINGS, user_id, allow_public_view=False)
+
+
+def can_view_project_team(project: Any, user_id: Optional[int] = None) -> bool:
+    return has_project_permission(project, PERMISSION_VIEW_TEAM, user_id, allow_public_view=False)
+
+
+def can_manage_project_team(project: Any, user_id: Optional[int] = None) -> bool:
+    return has_project_permission(project, PERMISSION_MANAGE_TEAM, user_id, allow_public_view=False)
+
+
+def can_view_project_admin(project: Any, user_id: Optional[int] = None) -> bool:
+    return has_project_permission(project, PERMISSION_VIEW_ADMIN, user_id, allow_public_view=False)
+
+
 def require_project_permission(
     project: Any,
     permission: Any = PERMISSION_VIEW,
@@ -746,30 +1358,73 @@ def require_project_permission(
     message: Optional[str] = None,
 ) -> PermissionResult:
     normalized_permission = normalize_permission(permission)
-    uid = current_user_id(user_id)
+    uid = actor_user_id(user_id)
     project_id, public_id = project_identity(project)
 
     result = get_project_permission_result(
         project,
-        user_id=uid,
+        user_id=user_id,
         allow_public_view=allow_public_view,
     )
 
     if result.allows(normalized_permission):
         return result
 
+    if result.demo_mode:
+        code = "demo_mode_not_allowed"
+        default_message = "Im Demo-Modus ist diese Projektaktion nicht erlaubt."
+    elif not result.authenticated:
+        code = "authentication_required"
+        default_message = "Für diese Projektaktion ist Login erforderlich."
+    elif not result.persistent:
+        code = "persistent_user_required"
+        default_message = "Für diese Projektaktion ist eine lokale AppUser-Verknüpfung erforderlich."
+    else:
+        code = "project_permission_denied"
+        default_message = f"missing project permission: {normalized_permission}"
+
     raise PermissionDenied(
-        message or f"missing project permission: {normalized_permission}",
+        message or default_message,
         permission=normalized_permission,
         project_id=public_id or project_id,
         user_id=uid,
-        status_code=403,
-        code="project_permission_denied",
+        status_code=401 if code == "authentication_required" else 403,
+        code=code,
+    )
+
+
+def require_project_settings_permission(
+    project: Any,
+    user_id: Optional[int] = None,
+    *,
+    message: Optional[str] = None,
+) -> PermissionResult:
+    return require_project_permission(
+        project,
+        PERMISSION_MANAGE_SETTINGS,
+        user_id=user_id,
+        allow_public_view=False,
+        message=message or "missing project settings permission",
+    )
+
+
+def require_project_team_permission(
+    project: Any,
+    user_id: Optional[int] = None,
+    *,
+    message: Optional[str] = None,
+) -> PermissionResult:
+    return require_project_permission(
+        project,
+        PERMISSION_MANAGE_TEAM,
+        user_id=user_id,
+        allow_public_view=False,
+        message=message or "missing project team permission",
     )
 
 
 # ─────────────────────────────────────────────────────────────
-# Membership mutation helpers
+# Membership mutation safeguards
 # ─────────────────────────────────────────────────────────────
 
 def apply_role_to_membership(
@@ -777,9 +1432,13 @@ def apply_role_to_membership(
     role: Any = ROLE_VIEWER,
     *,
     permissions: Optional[Dict[str, Any]] = None,
+    allow_owner: bool = True,
 ) -> Any:
     try:
         clean_role = normalize_role(role)
+        if clean_role == ROLE_OWNER and not allow_owner:
+            clean_role = ROLE_ADMIN
+
         defaults = role_permission_defaults(clean_role)
         overrides = normalize_permission_overrides(permissions)
 
@@ -823,10 +1482,17 @@ def build_membership_for_role(
     created_by_user_id: Optional[int] = None,
     overrides: Optional[Dict[str, Any]] = None,
     permissions: Optional[Dict[str, Any]] = None,
+    allow_owner: bool = True,
 ) -> Any:
+    if ProjectMembership is None:
+        raise RuntimeError("ProjectMembership model unavailable")
+
     clean_project_id = _safe_int(project_id, 0)
     clean_user_id = _safe_int(user_id, 0)
     clean_role = normalize_role(role)
+    if clean_role == ROLE_OWNER and not allow_owner:
+        clean_role = ROLE_ADMIN
+
     clean_permissions = _safe_dict(permissions or overrides)
 
     if clean_project_id <= 0:
@@ -866,9 +1532,52 @@ def build_membership_for_role(
         membership,
         clean_role,
         permissions=clean_permissions,
+        allow_owner=allow_owner,
     )
 
     return membership
+
+
+def active_manager_count(project: Any, *, exclude_user_id: Optional[int] = None) -> int:
+    try:
+        if project is None or ProjectMembership is None:
+            return 0
+
+        project_id, _ = project_identity(project)
+        if not project_id:
+            return 0
+
+        owner_id = _safe_int(getattr(project, "owner_user_id", None), 0)
+        excluded = _safe_int(exclude_user_id, 0)
+
+        count = 0
+
+        if owner_id > 0 and owner_id != excluded:
+            count += 1
+
+        rows = ProjectMembership.query.filter_by(project_id=project_id).all()
+
+        for row in rows:
+            try:
+                uid = _safe_int(getattr(row, "user_id", None), 0)
+                if uid <= 0 or uid == excluded:
+                    continue
+
+                if not membership_is_active(row):
+                    continue
+
+                role = normalize_role(getattr(row, "role", ROLE_VIEWER))
+                perms = membership_permissions(row)
+
+                if role in MANAGER_ROLES or _safe_bool(perms.get(PERMISSION_MANAGE), False):
+                    count += 1
+            except Exception:
+                continue
+
+        return count
+
+    except Exception:
+        return 0
 
 
 def ensure_owner_membership(
@@ -880,6 +1589,9 @@ def ensure_owner_membership(
     commit: bool = False,
 ) -> Any:
     try:
+        if ProjectMembership is None or db is None:
+            return None
+
         resolved_project_id = _safe_int(project_id, 0)
 
         if not resolved_project_id and project is not None:
@@ -891,7 +1603,7 @@ def ensure_owner_membership(
             uid = _safe_int(getattr(project, "owner_user_id", None), 0)
 
         if not uid:
-            uid = 1
+            uid = actor_user_id() or 0
 
         if not resolved_project_id or uid <= 0:
             return None
@@ -907,22 +1619,19 @@ def ensure_owner_membership(
                 user_id=uid,
                 role=ROLE_OWNER,
                 created_by_user_id=created_by_user_id or uid,
+                allow_owner=True,
             )
         else:
-            apply_role_to_membership(membership, ROLE_OWNER)
+            apply_role_to_membership(membership, ROLE_OWNER, allow_owner=True)
 
-        db.session.add(membership)
-
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
+        _db_add(membership)
+        _db_flush_or_commit(commit)
 
         return membership
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
@@ -935,8 +1644,12 @@ def grant_project_role(
     overrides: Optional[Dict[str, Any]] = None,
     permissions: Optional[Dict[str, Any]] = None,
     commit: bool = False,
+    allow_owner: bool = False,
 ) -> Any:
     try:
+        if ProjectMembership is None or db is None:
+            raise RuntimeError("ProjectMembership/db unavailable")
+
         if project is None:
             raise ValueError("project required")
 
@@ -950,6 +1663,9 @@ def grant_project_role(
             raise ValueError("user_id required")
 
         clean_role = normalize_role(role)
+        if clean_role == ROLE_OWNER and not allow_owner:
+            clean_role = ROLE_ADMIN
+
         clean_permissions = _safe_dict(permissions or overrides)
 
         membership = ProjectMembership.query.filter_by(
@@ -964,29 +1680,76 @@ def grant_project_role(
                 role=clean_role,
                 created_by_user_id=actor_user_id,
                 permissions=clean_permissions,
+                allow_owner=allow_owner,
             )
         else:
             if hasattr(membership, "apply_role"):
                 try:
                     membership.apply_role(clean_role, permissions=clean_permissions)
                 except TypeError:
-                    apply_role_to_membership(membership, clean_role, permissions=clean_permissions)
+                    apply_role_to_membership(
+                        membership,
+                        clean_role,
+                        permissions=clean_permissions,
+                        allow_owner=allow_owner,
+                    )
             else:
-                apply_role_to_membership(membership, clean_role, permissions=clean_permissions)
+                apply_role_to_membership(
+                    membership,
+                    clean_role,
+                    permissions=clean_permissions,
+                    allow_owner=allow_owner,
+                )
 
-        db.session.add(membership)
-
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
+        _db_add(membership)
+        _db_flush_or_commit(commit)
 
         return membership
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
+
+
+def can_revoke_project_membership(
+    project: Any,
+    *,
+    user_id: int,
+    actor_user_id: Optional[int] = None,
+) -> Tuple[bool, str]:
+    try:
+        uid = _safe_int(user_id, 0)
+        actor_uid = _safe_int(actor_user_id, 0)
+        project_id, _ = project_identity(project)
+
+        if project is None or not project_id:
+            return False, "project_required"
+
+        if uid <= 0:
+            return False, "user_id_required"
+
+        if is_project_owner(project, uid):
+            return False, "cannot_revoke_owner"
+
+        membership = get_project_membership(project, uid, include_inactive=True)
+        if membership is None:
+            return False, "membership_not_found"
+
+        role = normalize_role(getattr(membership, "role", ROLE_VIEWER))
+        perms = membership_permissions(membership)
+        target_is_manager = role in MANAGER_ROLES or _safe_bool(perms.get(PERMISSION_MANAGE), False)
+
+        if target_is_manager and active_manager_count(project, exclude_user_id=uid) <= 0:
+            return False, "cannot_remove_last_manager"
+
+        if actor_uid and actor_uid == uid:
+            return False, "cannot_revoke_self"
+
+        return True, "ok"
+
+    except Exception as exc:
+        return False, exc.__class__.__name__
 
 
 def revoke_project_membership(
@@ -998,6 +1761,9 @@ def revoke_project_membership(
     commit: bool = False,
 ) -> bool:
     try:
+        if ProjectMembership is None or db is None:
+            return False
+
         if project is None:
             return False
 
@@ -1007,13 +1773,19 @@ def revoke_project_membership(
         if uid <= 0 or not project_id:
             return False
 
-        if is_project_owner(project, uid):
+        allowed, reason = can_revoke_project_membership(
+            project,
+            user_id=uid,
+            actor_user_id=actor_user_id,
+        )
+
+        if not allowed:
             raise PermissionDenied(
-                "cannot revoke current owner membership",
-                permission=PERMISSION_TRANSFER,
+                reason,
+                permission=PERMISSION_MANAGE,
                 project_id=public_id or project_id,
                 user_id=actor_user_id,
-                code="cannot_revoke_owner",
+                code=reason,
             )
 
         membership = ProjectMembership.query.filter_by(
@@ -1028,26 +1800,28 @@ def revoke_project_membership(
             db.session.delete(membership)
         else:
             if hasattr(membership, "revoke"):
-                membership.revoke(user_id=actor_user_id, reason="revoked")
+                try:
+                    membership.revoke(user_id=actor_user_id, reason="revoked")
+                except TypeError:
+                    membership.revoke(actor_user_id)
             else:
                 membership.status = "revoked"
                 if hasattr(membership, "revoked_at"):
                     membership.revoked_at = utcnow()
                 if hasattr(membership, "revoked_by_user_id"):
                     membership.revoked_by_user_id = _safe_int(actor_user_id, 0) or None
+                if hasattr(membership, "revoke_reason"):
+                    membership.revoke_reason = "revoked"
 
-            db.session.add(membership)
+            _db_add(membership)
 
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
+        _db_flush_or_commit(commit)
 
         return True
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
@@ -1060,6 +1834,9 @@ def transfer_project_ownership(
     commit: bool = False,
 ) -> Any:
     try:
+        if db is None:
+            raise RuntimeError("db unavailable")
+
         if project is None:
             raise ValueError("project required")
 
@@ -1092,20 +1869,17 @@ def transfer_project_ownership(
                 role=normalize_role(old_owner_role, ROLE_ADMIN),
                 actor_user_id=actor_user_id,
                 commit=False,
+                allow_owner=False,
             )
 
-        db.session.add(project)
-
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
+        _db_add(project)
+        _db_flush_or_commit(commit)
 
         return project
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
@@ -1115,12 +1889,28 @@ def transfer_project_ownership(
 
 def filter_viewable_projects(projects: Iterable[Any], user_id: Optional[int] = None) -> List[Any]:
     try:
-        uid = current_user_id(user_id)
         result: List[Any] = []
 
         for project in list(projects or []):
             try:
-                if can_view_project(project, uid):
+                if can_view_project(project, user_id):
+                    result.append(project)
+            except Exception:
+                continue
+
+        return result
+
+    except Exception:
+        return []
+
+
+def filter_manageable_projects(projects: Iterable[Any], user_id: Optional[int] = None) -> List[Any]:
+    try:
+        result: List[Any] = []
+
+        for project in list(projects or []):
+            try:
+                if can_manage_project(project, user_id):
                     result.append(project)
             except Exception:
                 continue
@@ -1135,20 +1925,15 @@ def serialize_project_permissions(project: Any, user_id: Optional[int] = None) -
     try:
         return get_project_permission_result(project, user_id=user_id).to_dict()
     except Exception:
-        uid = current_user_id(user_id)
+        uid = actor_user_id(user_id)
         project_id, public_id = project_identity(project)
 
-        return PermissionResult(
+        return _permission_result_from_base(
             user_id=uid,
             project_id=project_id,
             project_public_id=public_id,
             role=ROLE_VIEWER,
-            can_view=False,
-            can_edit=False,
-            can_manage=False,
-            can_delete=False,
-            can_transfer=False,
-            can_embed=False,
+            base_permissions={},
             source="serialize_error",
         ).to_dict()
 
@@ -1166,21 +1951,52 @@ def serialize_membership(membership: Any, *, include_private: bool = False) -> D
 
         role = normalize_role(getattr(membership, "role", ROLE_VIEWER))
         permissions = membership_permissions(membership)
+        settings_permissions = derive_settings_permissions(permissions, role)
 
-        return {
+        data = {
             "id": getattr(membership, "id", None),
             "project_id": getattr(membership, "project_id", None),
             "user_id": getattr(membership, "user_id", None),
             "role": role,
-            "permissions": permissions,
+            "permissions": {
+                **permissions,
+                **settings_permissions,
+            },
+            "base_permissions": permissions,
+            "settings_permissions": settings_permissions,
             "can_view": permissions[PERMISSION_VIEW],
             "can_edit": permissions[PERMISSION_EDIT],
             "can_manage": permissions[PERMISSION_MANAGE],
             "can_delete": permissions[PERMISSION_DELETE],
             "can_transfer": permissions[PERMISSION_TRANSFER],
             "can_embed": permissions[PERMISSION_EMBED],
+            "can_view_settings": settings_permissions[PERMISSION_VIEW_SETTINGS],
+            "can_manage_settings": settings_permissions[PERMISSION_MANAGE_SETTINGS],
+            "can_view_team": settings_permissions[PERMISSION_VIEW_TEAM],
+            "can_manage_team": settings_permissions[PERMISSION_MANAGE_TEAM],
+            "can_view_admin": settings_permissions[PERMISSION_VIEW_ADMIN],
             "status": getattr(membership, "status", None),
+            "active": membership_is_active(membership),
         }
+
+        if include_private:
+            for key in [
+                "invited_by_user_id",
+                "accepted_at",
+                "revoked_at",
+                "revoked_by_user_id",
+                "created_at",
+                "updated_at",
+            ]:
+                try:
+                    value = getattr(membership, key, None)
+                    if hasattr(value, "isoformat"):
+                        value = value.isoformat()
+                    data[key] = value
+                except Exception:
+                    pass
+
+        return data
 
     except Exception:
         return {}
@@ -1188,7 +2004,7 @@ def serialize_membership(membership: Any, *, include_private: bool = False) -> D
 
 def list_project_memberships(project: Any, *, include_inactive: bool = False) -> List[Any]:
     try:
-        if project is None:
+        if project is None or ProjectMembership is None:
             return []
 
         project_id, _ = project_identity(project)
@@ -1198,10 +2014,13 @@ def list_project_memberships(project: Any, *, include_inactive: bool = False) ->
 
         query = ProjectMembership.query.filter_by(project_id=project_id)
 
-        if not include_inactive:
-            query = query.filter_by(status="active")
+        if not include_inactive and hasattr(ProjectMembership, "status"):
+            query = query.filter(ProjectMembership.status.in_(list(ACTIVE_MEMBERSHIP_STATUSES)))
 
-        return list(query.order_by(ProjectMembership.created_at.asc()).all())
+        try:
+            return list(query.order_by(ProjectMembership.created_at.asc()).all())
+        except Exception:
+            return list(query.all())
 
     except Exception as exc:
         _log_warning("list_project_memberships failed: %s", exc.__class__.__name__)
@@ -1227,33 +2046,44 @@ def get_permission_service_status() -> Dict[str, Any]:
         counts: Dict[str, Any] = {}
 
         try:
-            counts["users"] = AppUser.query.count()
+            counts["users"] = AppUser.query.count() if AppUser is not None else None
         except Exception:
             counts["users"] = None
 
         try:
-            counts["projects"] = Project.query.count()
+            counts["projects"] = Project.query.count() if Project is not None else None
         except Exception:
             counts["projects"] = None
 
         try:
-            counts["memberships"] = ProjectMembership.query.count()
+            counts["memberships"] = ProjectMembership.query.count() if ProjectMembership is not None else None
         except Exception:
             counts["memberships"] = None
+
+        actor_context = get_actor_context()
 
         return {
             "ok": True,
             "service": "project_permissions",
-            "phase": "placeholder-user-project-permissions",
+            "phase": "auth-demo-aware-project-permissions",
             "roles": sorted(VALID_PROJECT_ROLES),
             "permissions": sorted(VALID_PROJECT_PERMISSIONS),
+            "base_permissions": sorted(BASE_PROJECT_PERMISSIONS),
+            "settings_permissions": sorted(SETTINGS_PERMISSIONS),
             "models": {
                 "AppUser": AppUser is not None,
                 "Project": Project is not None,
                 "ProjectMembership": ProjectMembership is not None,
             },
             "counts": counts,
-            "current_user_id": current_user_id(),
+            "current_user_id": actor_user_id(),
+            "actor_context": actor_context,
+            "notes": {
+                "settings_visibility": "Projektsettings/Team/Admin sind nur für manage/admin/owner sichtbar.",
+                "demo_mode": "Demo-User dürfen keine persistenten Projektänderungen durchführen.",
+                "public_view": "Public/unlisted erzeugt nur view-Recht, keine Settings-Rechte.",
+                "user_creation": "Dieser Service erzeugt keine AppUser.",
+            },
         }
 
     except Exception as exc:
@@ -1267,6 +2097,10 @@ def get_permission_service_status() -> Dict[str, Any]:
         }
 
 
+# ─────────────────────────────────────────────────────────────
+# Public exports
+# ─────────────────────────────────────────────────────────────
+
 __all__ = [
     "ROLE_OWNER",
     "ROLE_ADMIN",
@@ -1278,43 +2112,71 @@ __all__ = [
     "PERMISSION_DELETE",
     "PERMISSION_TRANSFER",
     "PERMISSION_EMBED",
+    "PERMISSION_VIEW_SETTINGS",
+    "PERMISSION_MANAGE_SETTINGS",
+    "PERMISSION_VIEW_TEAM",
+    "PERMISSION_MANAGE_TEAM",
+    "PERMISSION_VIEW_ADMIN",
     "VALID_PROJECT_ROLES",
     "VALID_PROJECT_PERMISSIONS",
+    "BASE_PROJECT_PERMISSIONS",
+    "SETTINGS_PERMISSIONS",
     "ROLE_PERMISSION_DEFAULTS",
     "PermissionDenied",
     "PermissionResult",
-    "normalize_role",
-    "normalize_permission",
-    "role_permission_defaults",
-    "permission_attr",
-    "normalize_permission_overrides",
-    "current_user_id",
-    "project_identity",
-    "is_project_deleted",
-    "is_project_public",
-    "is_project_owner",
-    "membership_is_active",
-    "get_project_membership",
-    "membership_permissions",
-    "get_project_permission_result",
-    "has_project_permission",
-    "can_view_project",
-    "can_edit_project",
-    "can_manage_project",
-    "can_delete_project",
-    "can_transfer_project",
-    "can_embed_project",
-    "require_project_permission",
+    "active_manager_count",
+    "actor_can_persist",
+    "actor_is_authenticated",
+    "actor_is_demo",
+    "actor_user_id",
     "apply_role_to_membership",
     "build_membership_for_role",
+    "can_delete_project",
+    "can_edit_project",
+    "can_embed_project",
+    "can_manage_project",
+    "can_manage_project_settings",
+    "can_manage_project_team",
+    "can_revoke_project_membership",
+    "can_transfer_project",
+    "can_view_project",
+    "can_view_project_admin",
+    "can_view_project_settings",
+    "can_view_project_team",
+    "current_user_id",
+    "derive_settings_permissions",
     "ensure_owner_membership",
-    "grant_project_role",
-    "revoke_project_membership",
-    "transfer_project_ownership",
+    "filter_manageable_projects",
     "filter_viewable_projects",
-    "serialize_project_permissions",
-    "serialize_membership",
-    "list_project_memberships",
-    "list_project_membership_dicts",
+    "get_actor_context",
     "get_permission_service_status",
+    "get_project_membership",
+    "get_project_permission_result",
+    "grant_project_role",
+    "has_project_permission",
+    "is_project_deleted",
+    "is_project_owner",
+    "is_project_public",
+    "is_project_publicly_viewable",
+    "is_project_unlisted",
+    "list_project_membership_dicts",
+    "list_project_memberships",
+    "membership_is_active",
+    "membership_permissions",
+    "normalize_permission",
+    "normalize_permission_overrides",
+    "normalize_role",
+    "normalize_visibility",
+    "permission_attr",
+    "project_identity",
+    "project_public_view_permissions",
+    "project_visibility",
+    "require_project_permission",
+    "require_project_settings_permission",
+    "require_project_team_permission",
+    "revoke_project_membership",
+    "role_permission_defaults",
+    "serialize_membership",
+    "serialize_project_permissions",
+    "transfer_project_ownership",
 ]

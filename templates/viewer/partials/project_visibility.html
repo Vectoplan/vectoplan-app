@@ -1,0 +1,188 @@
+<!-- services/vectoplan-app/templates/viewer/partials/project_visibility.html -->
+{#
+  VECTOPLAN Project Visibility Partial
+
+  Zweck:
+  - Ersetzt das alte Sichtbarkeits-Dropdown durch drei Auswahlkarten.
+  - Sichtbare Optionen:
+      private  = Privat
+      unlisted = Nicht gelistet / Linkfreigabe
+      public   = Öffentlich
+  - shared wird bewusst nicht mehr als eigene Sichtbarkeit angeboten.
+    Teilen erfolgt künftig über Team/Mitglieder/Einladungen.
+  - is_public wird nicht mehr separat angezeigt, sondern serverseitig aus
+    visibility abgeleitet.
+  - Veröffentlichung einzelner Workspace-Reiter wird in project_publication.html
+    geregelt, nicht hier.
+
+  Erwartete optionale Variablen:
+  - project
+  - current_project
+  - _project
+  - can_edit
+  - _can_edit
+  - demo_mode
+  - _demo_mode
+
+  Robustheitsregel:
+  - Partial funktioniert auch ohne vorbereitete Parent-Variablen.
+#}
+
+{% set _visibility_project_raw = _project|default(project|default(current_project|default({}, true), true), true) %}
+{% set _visibility_project = _visibility_project_raw if _visibility_project_raw is mapping else {} %}
+
+{% set _visibility_raw = _visibility_project.get('visibility', 'private') %}
+{% set _visibility = 'private' %}
+{% if _visibility_raw in ['public', 'öffentlich', 'oeffentlich', 'open'] %}
+  {% set _visibility = 'public' %}
+{% elif _visibility_raw in ['unlisted', 'not_listed', 'nicht_gelistet', 'link', 'link_shared'] %}
+  {% set _visibility = 'unlisted' %}
+{% else %}
+  {% set _visibility = 'private' %}
+{% endif %}
+
+{% set _visibility_can_edit_raw = _can_edit|default(can_edit|default(true, true), true) %}
+{% set _visibility_can_edit = true if _visibility_can_edit_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _visibility_demo_raw = _demo_mode|default(demo_mode|default(_visibility_project.get('demo_mode', _visibility_project.get('demoMode', false)), true), true) %}
+{% set _visibility_demo_mode = true if _visibility_demo_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+<section
+  class="vp-project-card vp-project-card--visibility"
+  aria-labelledby="projectVisibilityTitle"
+  data-project-visibility-card
+  data-current-visibility="{{ _visibility|e }}"
+>
+  <header class="vp-project-card__header">
+    <div>
+      <h2 id="projectVisibilityTitle" class="vp-project-card__title">
+        Sichtbarkeit
+      </h2>
+
+      <p class="vp-project-card__text">
+        Lege fest, ob das Projekt privat bleibt, per Link erreichbar ist oder öffentlich sichtbar sein darf.
+      </p>
+    </div>
+
+
+  </header>
+
+  {% if _visibility_demo_mode %}
+    <div class="vp-project-inline-note vp-project-inline-note--demo" data-project-visibility-demo-note>
+      <strong>Demo-Modus:</strong>
+      Die Sichtbarkeit wird in der Demo nicht dauerhaft gespeichert.
+    </div>
+  {% endif %}
+
+  <input
+    type="hidden"
+    id="projectVisibility"
+    name="visibility"
+    value="{{ _visibility|e }}"
+    data-project-visibility
+  >
+
+  <div
+    class="vp-project-choice-grid vp-project-choice-grid--three"
+    role="radiogroup"
+    aria-labelledby="projectVisibilityTitle"
+    data-project-visibility-options
+  >
+    <button
+      type="button"
+      class="vp-project-choice-card {% if _visibility == 'private' %}is-selected{% endif %}"
+      role="radio"
+      aria-checked="{{ 'true' if _visibility == 'private' else 'false' }}"
+      data-project-visibility-option
+      data-value="private"
+      {% if not _visibility_can_edit %}disabled{% endif %}
+    >
+      <span class="vp-project-choice-card__header">
+        <span class="vp-project-choice-card__icon" aria-hidden="true">
+          🔒
+        </span>
+        <span class="vp-project-choice-card__title">
+          Privat
+        </span>
+      </span>
+
+      <span class="vp-project-choice-card__text">
+        Nur Projektmitglieder mit Berechtigung können das Projekt sehen.
+      </span>
+
+
+    </button>
+
+    <button
+      type="button"
+      class="vp-project-choice-card {% if _visibility == 'unlisted' %}is-selected{% endif %}"
+      role="radio"
+      aria-checked="{{ 'true' if _visibility == 'unlisted' else 'false' }}"
+      data-project-visibility-option
+      data-value="unlisted"
+      {% if not _visibility_can_edit %}disabled{% endif %}
+    >
+      <span class="vp-project-choice-card__header">
+        <span class="vp-project-choice-card__icon" aria-hidden="true">
+          🔗
+        </span>
+        <span class="vp-project-choice-card__title">
+          Nicht gelistet
+        </span>
+      </span>
+
+      <span class="vp-project-choice-card__text">
+        Das Projekt wird nicht öffentlich gelistet, kann aber über freigegebene Links oder veröffentlichte Reiter erreichbar sein.
+      </span>
+
+
+    </button>
+
+    <button
+      type="button"
+      class="vp-project-choice-card {% if _visibility == 'public' %}is-selected{% endif %}"
+      role="radio"
+      aria-checked="{{ 'true' if _visibility == 'public' else 'false' }}"
+      data-project-visibility-option
+      data-value="public"
+      {% if not _visibility_can_edit %}disabled{% endif %}
+    >
+      <span class="vp-project-choice-card__header">
+        <span class="vp-project-choice-card__icon" aria-hidden="true">
+          🌐
+        </span>
+        <span class="vp-project-choice-card__title">
+          Öffentlich
+        </span>
+      </span>
+
+      <span class="vp-project-choice-card__text">
+        Das Projekt darf öffentlich sichtbar sein. Welche Reiter tatsächlich sichtbar sind, wird separat über Veröffentlichung gesteuert.
+      </span>
+
+
+    </button>
+  </div>
+
+
+
+
+  <noscript>
+    <div class="vp-project-field">
+      <label class="vp-project-label" for="projectVisibilityFallback">
+        Sichtbarkeit
+      </label>
+
+      <select
+        id="projectVisibilityFallback"
+        class="vp-project-select"
+        name="visibility"
+        {% if not _visibility_can_edit %}disabled{% endif %}
+      >
+        <option value="private" {% if _visibility == 'private' %}selected{% endif %}>Privat</option>
+        <option value="unlisted" {% if _visibility == 'unlisted' %}selected{% endif %}>Nicht gelistet</option>
+        <option value="public" {% if _visibility == 'public' %}selected{% endif %}>Öffentlich</option>
+      </select>
+    </div>
+  </noscript>
+</section>
