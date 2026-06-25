@@ -2,27 +2,26 @@
 from __future__ import annotations
 
 """
-VECTOPLAN project UI routes.
+VECTOPLAN project UI shell routes.
 
 Zweck:
-- Projektgeführte UI-Einstiege für vectoplan-app.
-- Root-URL http://localhost:5103/ rendert die App-Shell.
-- Projekt-URL http://localhost:5103/project=<project_public_id> rendert dieselbe Shell
-  mit ausgewähltem Projekt.
-- http://localhost:5103/project=new öffnet die Projekterstellung.
-- Workspace startet im Modus "Projekt".
-- Map/3D/2D/LV werden erst nach Projekt-Konfiguration freigeschaltet.
-- Chunk-Kontext wird aus dem App-Projekt in Shell, Workspace und context.json
-  durchgereicht.
+- Root-URL / rendert die App-Shell.
+- /project=<project_public_id> rendert dieselbe App-Shell mit ausgewähltem Projekt.
+- /project=new rendert die Shell mit Projekterstellung als initialem Workspace.
+- Die eigentliche Projekt-Workspace-Seite wird über routes.viewer bereitgestellt:
+    /ui/project/<project_id>/project
+    /ui/project/<project_id>/<workspace>
+    /ui/project/<project_id>/context.json
+- Diese Datei bleibt Shell-/Kompatibilitätsschicht.
 
 Wichtig:
 - vectoplan-app besitzt hier nur Projekt-Metadaten und UI-Kontext.
-- Chunk-, Editor-, 2D-, Map- und LV-Daten bleiben in ihren Microservices.
-- Chunk-Provisioning selbst läuft über services.project_service und
-  routes/projects_api.py, nicht in Templates.
+- Chunk-, Editor-, 2D-, Map- und LV-Fachdaten bleiben in ihren Microservices.
+- Diese Datei erzeugt keine echten Benutzeraccounts.
+- Im Demo-Kontext werden keine persistenten Conversations erzeugt.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import quote
 
 from flask import (
@@ -37,32 +36,103 @@ from flask import (
 )
 from werkzeug.wrappers import Response
 
-from extensions import db
-from models import Conversation
+try:
+    from extensions import db
+except Exception:  # pragma: no cover
+    db = None  # type: ignore
 
-from services.current_user import (
-    ensure_default_user,
-    get_current_user_context,
-    get_current_user_id,
-)
+try:
+    from models import Conversation
+except Exception:  # pragma: no cover
+    Conversation = None  # type: ignore
 
-from services.project_permissions import (
-    PERMISSION_VIEW,
-    PermissionDenied,
-    require_project_permission,
-    serialize_project_permissions,
-)
+try:
+    from services.current_user import (
+        ensure_default_user,
+        get_current_user_context,
+        get_current_user_id_optional,
+        get_current_user_status,
+    )
+except Exception:  # pragma: no cover
+    ensure_default_user = None  # type: ignore
+    get_current_user_status = None  # type: ignore
 
-from services.project_service import (
-    build_project_paths,
-    get_or_create_project_conversation,
-    list_project_sidebar_items,
-    project_public_url,
-    project_workspace_path,
-    resolve_project,
-    serialize_project,
-    serialize_project_sidebar_item,
-)
+    def get_current_user_id_optional() -> Optional[int]:  # type: ignore
+        return 1
+
+    def get_current_user_context(*args: Any, **kwargs: Any) -> Dict[str, Any]:  # type: ignore
+        return {
+            "id": 1,
+            "user_id": 1,
+            "authenticated": True,
+            "demo_mode": False,
+            "persistent": True,
+            "source": "fallback",
+        }
+
+
+try:
+    from services.project_permissions import (
+        PERMISSION_VIEW,
+        PermissionDenied,
+        require_project_permission,
+        serialize_project_permissions,
+    )
+except Exception:  # pragma: no cover
+    PERMISSION_VIEW = "view"  # type: ignore
+    serialize_project_permissions = None  # type: ignore
+
+    class PermissionDenied(RuntimeError):  # type: ignore
+        def __init__(
+            self,
+            message: str = "permission denied",
+            *,
+            code: str = "permission_denied",
+            status_code: int = 403,
+        ) -> None:
+            super().__init__(message)
+            self.message = message
+            self.code = code
+            self.status_code = status_code
+
+        def to_dict(self) -> Dict[str, Any]:
+            return {
+                "ok": False,
+                "error": self.message,
+                "code": self.code,
+                "status_code": self.status_code,
+            }
+
+    def require_project_permission(*args: Any, **kwargs: Any) -> bool:  # type: ignore
+        return True
+
+
+try:
+    from services.project_service import (
+        build_project_paths,
+        get_or_create_project_conversation,
+        list_project_sidebar_items,
+        project_public_url,
+        project_workspace_path,
+        resolve_project,
+        serialize_project,
+        serialize_project_sidebar_item,
+    )
+except Exception:  # pragma: no cover
+    build_project_paths = None  # type: ignore
+    get_or_create_project_conversation = None  # type: ignore
+    list_project_sidebar_items = None  # type: ignore
+    project_public_url = None  # type: ignore
+    project_workspace_path = None  # type: ignore
+    resolve_project = None  # type: ignore
+    serialize_project = None  # type: ignore
+    serialize_project_sidebar_item = None  # type: ignore
+
+
+try:
+    from services.project_publication_service import get_project_publication
+except Exception:  # pragma: no cover
+    get_project_publication = None  # type: ignore
 
 
 bp = Blueprint("ui_projects", __name__)
@@ -91,12 +161,24 @@ def _safe_str(value: Any, default: str = "", max_len: int = 240) -> str:
         return default
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or isinstance(value, bool):
+            return default
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
 def _safe_bool(value: Any, default: bool = False) -> bool:
     try:
         if isinstance(value, bool):
             return value
 
-        text = str(value if value is not None else "").strip().lower()
+        if isinstance(value, (int, float)):
+            return bool(value)
+
+        text = _safe_str(value, "", 40).lower()
 
         if text in {"1", "true", "yes", "y", "on", "ja", "enabled"}:
             return True
@@ -112,7 +194,18 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
 
 def _safe_dict(value: Any) -> Dict[str, Any]:
     try:
-        return dict(value) if isinstance(value, dict) else {}
+        if isinstance(value, dict):
+            return dict(value)
+
+        if isinstance(value, Mapping):
+            return dict(value)
+
+        if hasattr(value, "to_dict") and callable(value.to_dict):
+            data = value.to_dict()
+            return dict(data) if isinstance(data, Mapping) else {}
+
+        return {}
+
     except Exception:
         return {}
 
@@ -122,64 +215,6 @@ def _safe_quote(value: Any) -> str:
         return quote(str(value), safe="")
     except Exception:
         return ""
-
-
-def _first_non_empty(*values: Any) -> str:
-    try:
-        for value in values:
-            if isinstance(value, bool):
-                return "1" if value else "0"
-
-            text = str(value if value is not None else "").strip()
-            if text:
-                return text
-    except Exception:
-        pass
-
-    return ""
-
-
-def _config_bool(name: str, default: bool = False) -> bool:
-    try:
-        return _safe_bool(current_app.config.get(name, default), default)
-    except Exception:
-        return default
-
-
-def _config_str(name: str, default: str = "", max_len: int = 4000) -> str:
-    try:
-        return _safe_str(current_app.config.get(name, default), default, max_len)
-    except Exception:
-        return default
-
-
-def _safe_status(value: Any, default: str = "pending") -> str:
-    try:
-        text = _safe_str(value, "", 40).lower().replace("-", "_").replace(" ", "_")
-
-        aliases = {
-            "ok": "ready",
-            "active": "ready",
-            "linked": "ready",
-            "created": "ready",
-            "provisioned": "ready",
-            "failed": "error",
-            "failure": "error",
-            "unavailable": "error",
-            "waiting": "pending",
-            "queued": "pending",
-            "off": "disabled",
-        }
-
-        text = aliases.get(text, text)
-
-        if text in {"ready", "pending", "error", "disabled"}:
-            return text
-
-        return default
-
-    except Exception:
-        return default
 
 
 def _log_warning(message: str, *args: Any) -> None:
@@ -206,230 +241,6 @@ def _url_for_safe(endpoint: str, fallback: str, **values: Any) -> str:
         return fallback
 
 
-# ─────────────────────────────────────────────────────────────
-# Chunk context helpers
-# ─────────────────────────────────────────────────────────────
-
-def _new_chunk_payload() -> Dict[str, Any]:
-    return {
-        "status": "pending",
-        "ready": False,
-        "chunk_project_id": None,
-        "chunkProjectId": None,
-        "chunk_universe_id": None,
-        "chunkUniverseId": None,
-        "chunk_world_id": None,
-        "chunkWorldId": None,
-        "route_hints": {},
-        "routeHints": {},
-        "error": {},
-    }
-
-
-def _extract_chunk_context_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        data = _safe_dict(payload)
-        chunk = _safe_dict(data.get("chunk"))
-        service_refs = _safe_dict(data.get("service_refs") or data.get("serviceRefs"))
-        service_chunk = _safe_dict(service_refs.get("chunk"))
-        metadata = _safe_dict(data.get("metadata"))
-        metadata_chunk = _safe_dict(metadata.get("chunk"))
-
-        chunk_project_id = _first_non_empty(
-            data.get("chunk_project_id"),
-            data.get("chunkProjectId"),
-            chunk.get("chunk_project_id"),
-            chunk.get("chunkProjectId"),
-            service_chunk.get("chunk_project_id"),
-            service_chunk.get("chunkProjectId"),
-            metadata_chunk.get("chunk_project_id"),
-            metadata_chunk.get("chunkProjectId"),
-        ) or None
-
-        chunk_universe_id = _first_non_empty(
-            data.get("chunk_universe_id"),
-            data.get("chunkUniverseId"),
-            chunk.get("chunk_universe_id"),
-            chunk.get("chunkUniverseId"),
-            service_chunk.get("chunk_universe_id"),
-            service_chunk.get("chunkUniverseId"),
-            metadata_chunk.get("chunk_universe_id"),
-            metadata_chunk.get("chunkUniverseId"),
-        ) or None
-
-        chunk_world_id = _first_non_empty(
-            data.get("chunk_world_id"),
-            data.get("chunkWorldId"),
-            chunk.get("chunk_world_id"),
-            chunk.get("chunkWorldId"),
-            service_chunk.get("chunk_world_id"),
-            service_chunk.get("chunkWorldId"),
-            metadata_chunk.get("chunk_world_id"),
-            metadata_chunk.get("chunkWorldId"),
-        ) or None
-
-        status = _safe_status(
-            _first_non_empty(
-                data.get("chunk_status"),
-                data.get("chunkStatus"),
-                chunk.get("status"),
-                chunk.get("chunk_status"),
-                chunk.get("chunkStatus"),
-                service_chunk.get("status"),
-                metadata_chunk.get("status"),
-            ),
-            "ready" if chunk_project_id and chunk_world_id else "pending",
-        )
-
-        route_hints = (
-            _safe_dict(data.get("chunk_route_hints"))
-            or _safe_dict(data.get("chunkRouteHints"))
-            or _safe_dict(chunk.get("route_hints"))
-            or _safe_dict(chunk.get("routeHints"))
-            or _safe_dict(service_chunk.get("route_hints"))
-            or _safe_dict(service_chunk.get("routeHints"))
-            or _safe_dict(metadata_chunk.get("route_hints"))
-            or _safe_dict(metadata_chunk.get("routeHints"))
-        )
-
-        explicit_ready = _first_non_empty(
-            data.get("chunk_ready"),
-            data.get("chunkReady"),
-            chunk.get("ready"),
-            chunk.get("chunk_ready"),
-            chunk.get("chunkReady"),
-            service_chunk.get("ready"),
-            metadata_chunk.get("ready"),
-        )
-
-        ready = _safe_bool(
-            explicit_ready,
-            bool(chunk_project_id and chunk_world_id and status == "ready"),
-        )
-
-        if not chunk_project_id or not chunk_world_id:
-            ready = False
-
-        if ready and status not in {"error", "disabled"}:
-            status = "ready"
-
-        error = (
-            _safe_dict(data.get("chunk_last_error"))
-            or _safe_dict(data.get("chunkLastError"))
-            or _safe_dict(chunk.get("error"))
-            or _safe_dict(service_chunk.get("error"))
-            or _safe_dict(metadata_chunk.get("error"))
-        )
-
-        return {
-            "status": status,
-            "ready": ready,
-            "chunk_project_id": chunk_project_id,
-            "chunkProjectId": chunk_project_id,
-            "chunk_universe_id": chunk_universe_id,
-            "chunkUniverseId": chunk_universe_id,
-            "chunk_world_id": chunk_world_id,
-            "chunkWorldId": chunk_world_id,
-            "route_hints": route_hints,
-            "routeHints": route_hints,
-            "error": error,
-        }
-
-    except Exception:
-        return _new_chunk_payload()
-
-
-def _project_chunk_context(project: Optional[Any]) -> Dict[str, Any]:
-    if project is None:
-        return _new_chunk_payload()
-
-    try:
-        direct_payload = {
-            "chunk_project_id": getattr(project, "chunk_project_id", None),
-            "chunk_universe_id": getattr(project, "chunk_universe_id", None),
-            "chunk_world_id": getattr(project, "chunk_world_id", None),
-            "chunk_status": getattr(project, "chunk_status", None),
-            "chunk_ready": getattr(project, "chunk_ready", None),
-            "chunk_route_hints": getattr(project, "chunk_route_hints", None),
-            "chunk_last_error": getattr(project, "chunk_last_error", None),
-            "service_refs": getattr(project, "service_refs", None),
-            "metadata": getattr(project, "metadata_json", None),
-        }
-
-        context = _extract_chunk_context_from_payload(direct_payload)
-
-        if context.get("chunk_project_id") and context.get("chunk_world_id"):
-            return context
-
-    except Exception:
-        pass
-
-    try:
-        if hasattr(project, "to_dict"):
-            payload = project.to_dict(include_private=True, include_refs=True)
-            return _extract_chunk_context_from_payload(payload)
-    except Exception:
-        pass
-
-    return _new_chunk_payload()
-
-
-def _should_try_chunk_retry(project: Optional[Any]) -> bool:
-    try:
-        if project is None:
-            return False
-
-        if bool(getattr(project, "is_deleted", False)):
-            return False
-
-        if not _config_bool("VECTOPLAN_CHUNK_PROVISION_RETRY_ON_WORKSPACE_OPEN", True):
-            return False
-
-        if request.args.get("skip_chunk_retry"):
-            return False
-
-        if not (
-            request.args.get("ensure_chunk")
-            or request.args.get("retry_chunk")
-            or request.args.get("ensureChunk")
-            or request.args.get("retryChunk")
-        ):
-            return False
-
-        context = _project_chunk_context(project)
-        return not bool(context.get("chunk_project_id") and context.get("chunk_world_id"))
-
-    except Exception:
-        return False
-
-
-def _try_ensure_chunk_for_project(project: Optional[Any]) -> None:
-    """
-    Best-effort manual chunk provisioning retry.
-
-    This only runs when the request explicitly asks for ensure_chunk/retry_chunk.
-    Normal shell rendering should not block on a remote service.
-    """
-    if not _should_try_chunk_retry(project):
-        return
-
-    try:
-        from services.project_service import ensure_project_chunk_link
-
-        ensure_project_chunk_link(
-            project,
-            user_id=get_current_user_id(),
-            force=False,
-            commit=True,
-        )
-    except Exception as exc:
-        _log_warning("chunk ensure from project UI failed: %s", exc.__class__.__name__)
-
-
-# ─────────────────────────────────────────────────────────────
-# Response / security helpers
-# ─────────────────────────────────────────────────────────────
-
 def _is_dev() -> bool:
     try:
         env = str(current_app.config.get("FLASK_ENV", "") or "").lower()
@@ -439,23 +250,78 @@ def _is_dev() -> bool:
         return False
 
 
-def _finalize_json_response(resp: Response, *, no_store: bool = True) -> Response:
+# ─────────────────────────────────────────────────────────────
+# Auth / user helpers
+# ─────────────────────────────────────────────────────────────
+
+def _current_user_payload(*, ensure: bool = False) -> Dict[str, Any]:
     try:
-        resp.headers.setdefault("Referrer-Policy", "no-referrer")
-        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    except Exception:
-        pass
+        context = get_current_user_context(ensure=ensure)
 
+        if hasattr(context, "to_dict"):
+            return _safe_dict(context.to_dict())
+
+        return _safe_dict(context)
+
+    except Exception:
+        user_id = _current_user_id_optional()
+        return {
+            "id": user_id,
+            "user_id": user_id,
+            "authenticated": bool(user_id),
+            "demo_mode": False,
+            "persistent": bool(user_id),
+            "source": "ui_projects_fallback",
+        }
+
+
+def _current_user_id_optional() -> Optional[int]:
     try:
-        if no_store or _is_dev():
-            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-            resp.headers.setdefault("Pragma", "no-cache")
-            resp.headers.setdefault("Expires", "0")
+        value = get_current_user_id_optional()
+        parsed = _safe_int(value, 0)
+        return parsed if parsed > 0 else None
     except Exception:
-        pass
+        return None
 
-    return resp
 
+def _is_demo_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
+    data = _safe_dict(current_user) if current_user is not None else _current_user_payload(ensure=False)
+    return _safe_bool(data.get("demo_mode") or data.get("demoMode") or data.get("is_demo"), False)
+
+
+def _is_persistent_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
+    data = _safe_dict(current_user) if current_user is not None else _current_user_payload(ensure=False)
+
+    return _safe_bool(
+        data.get("persistent"),
+        bool(data.get("user_id") or data.get("id")) and not _is_demo_context(data),
+    )
+
+
+@bp.before_request
+def _ui_projects_before_request() -> None:
+    """
+    Keep dev placeholder behavior, but do not create local users in demo mode.
+    """
+    try:
+        current_user = _current_user_payload(ensure=False)
+
+        if _is_demo_context(current_user):
+            return
+
+        if not _is_persistent_context(current_user):
+            return
+
+        if ensure_default_user is not None:
+            ensure_default_user()
+
+    except Exception as exc:
+        _log_warning("ensure_default_user before project UI failed: %s", exc.__class__.__name__)
+
+
+# ─────────────────────────────────────────────────────────────
+# Response / security helpers
+# ─────────────────────────────────────────────────────────────
 
 def _workspace_csp_header_value() -> str:
     try:
@@ -539,6 +405,24 @@ def _workspace_csp_header_value() -> str:
         )
 
 
+def _finalize_json_response(resp: Response, *, no_store: bool = True) -> Response:
+    try:
+        resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    except Exception:
+        pass
+
+    try:
+        if no_store or _is_dev():
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            resp.headers.setdefault("Pragma", "no-cache")
+            resp.headers.setdefault("Expires", "0")
+    except Exception:
+        pass
+
+    return resp
+
+
 def _finalize_html_response(
     resp: Response,
     *,
@@ -580,11 +464,11 @@ def _finalize_html_response(
     return resp
 
 
-def _json_response(payload: Dict[str, Any], status: int = 200):
+def _json_response(payload: Dict[str, Any], status: int = 200) -> Response:
     try:
         resp = jsonify(payload)
         resp.status_code = int(status)
-        return _finalize_json_response(resp, no_store=True), status
+        return _finalize_json_response(resp, no_store=True)
 
     except Exception:
         fallback = jsonify(
@@ -595,7 +479,7 @@ def _json_response(payload: Dict[str, Any], status: int = 200):
             }
         )
         fallback.status_code = 500
-        return _finalize_json_response(fallback, no_store=True), 500
+        return _finalize_json_response(fallback, no_store=True)
 
 
 def _json_error(
@@ -604,11 +488,13 @@ def _json_error(
     *,
     code: str = "error",
     extra: Optional[Dict[str, Any]] = None,
-):
+) -> Response:
     payload: Dict[str, Any] = {
         "ok": False,
         "error": message,
+        "message": message,
         "code": code,
+        "status_code": status,
     }
 
     if extra:
@@ -617,12 +503,12 @@ def _json_error(
     return _json_response(payload, status)
 
 
-def _exception_response(message: str, exc: Exception, *, code: str = "internal_error"):
+def _exception_response(message: str, exc: Exception, *, code: str = "internal_error") -> Response:
     _log_exception(message, exc)
     return _json_error(str(exc), 500, code=code)
 
 
-def _permission_error_response(exc: PermissionDenied):
+def _permission_error_response(exc: PermissionDenied) -> Response:
     try:
         return _json_response(exc.to_dict(), exc.status_code)
     except Exception:
@@ -630,115 +516,15 @@ def _permission_error_response(exc: PermissionDenied):
 
 
 # ─────────────────────────────────────────────────────────────
-# Conversation / project helpers
+# Project / conversation helpers
 # ─────────────────────────────────────────────────────────────
 
-def _new_conversation(
-    *,
-    title: str = "Projekt-Shell",
-    project: Optional[Any] = None,
-    project_id: Optional[str] = None,
-    commit: bool = True,
-) -> Conversation:
-    conv = Conversation()
-
+def _is_new_project_identifier(value: Any) -> bool:
     try:
-        conv.title = _safe_str(title, "Projekt-Shell", 255)
-
-        resolved_project_id = project_id
-
-        if resolved_project_id is None and project is not None:
-            resolved_project_id = str(getattr(project, "id", "") or "")
-
-        if resolved_project_id:
-            conv.project_id = _safe_str(resolved_project_id, "", 120) or None
-
-        if project is not None and hasattr(conv, "owner_user_id"):
-            conv.owner_user_id = getattr(project, "owner_user_id", None)
-
-        if hasattr(conv, "transcript"):
-            conv.transcript = []
-
-        if hasattr(conv, "state"):
-            conv.state = {}
-
-        if hasattr(conv, "status"):
-            conv.status = "active"
-
-        if hasattr(conv, "metadata_json"):
-            conv.metadata_json = {
-                "source": "routes.ui.projects",
-                "shell": project is None,
-            }
-
-        if hasattr(conv, "normalize"):
-            conv.normalize()
-
-        db.session.add(conv)
-
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
-
-        return conv
-
+        text = _safe_str(value, "", 80).lower()
+        return text in {"", "new", "create", "neu", "projekt-neu", "project-new"}
     except Exception:
-        if commit:
-            db.session.rollback()
-        raise
-
-
-def _get_or_create_shell_conversation() -> Conversation:
-    try:
-        conv = (
-            Conversation.query
-            .filter_by(project_id="__project_shell__")
-            .order_by(Conversation.created_at.desc())
-            .first()
-        )
-
-        if conv is not None:
-            return conv
-
-        return _new_conversation(
-            title="Projekt-Shell",
-            project_id="__project_shell__",
-            commit=True,
-        )
-
-    except Exception:
-        try:
-            db.session.rollback()
-        except Exception:
-            pass
-
-        return _new_conversation(
-            title="Projekt-Shell",
-            project_id="__project_shell__",
-            commit=True,
-        )
-
-
-def _ensure_project_conversation(project: Optional[Any]) -> Conversation:
-    try:
-        if project is None:
-            return _get_or_create_shell_conversation()
-
-        conv = get_or_create_project_conversation(project, commit=True)
-
-        if conv is not None:
-            return conv
-
-        return _get_or_create_shell_conversation()
-
-    except Exception:
-        try:
-            db.session.rollback()
-        except Exception:
-            pass
-
-        return _get_or_create_shell_conversation()
+        return False
 
 
 def _current_project_identifier_from_request() -> str:
@@ -761,32 +547,231 @@ def _current_project_identifier_from_request() -> str:
         return ""
 
 
-def _is_new_project_identifier(value: Any) -> bool:
-    try:
-        text = _safe_str(value, "", 80).lower()
-        return text in {"", "new", "create", "neu", "projekt-neu", "project-new"}
-    except Exception:
-        return False
-
-
 def _load_selected_project(project_identifier: Optional[str]) -> Optional[Any]:
     try:
         if _is_new_project_identifier(project_identifier):
             return None
 
-        project = resolve_project(project_identifier)
+        if resolve_project is None:
+            return None
 
-        if project is not None:
-            _try_ensure_chunk_for_project(project)
-
-        return project
+        return resolve_project(project_identifier)
 
     except Exception:
         return None
 
 
-def _new_project_payload() -> Dict[str, Any]:
-    chunk = _new_chunk_payload()
+def _project_public_id(project: Optional[Any], fallback: str = "new") -> str:
+    try:
+        if project is None:
+            return fallback
+
+        return (
+            _safe_str(getattr(project, "public_id", None), "", 160)
+            or _safe_str(getattr(project, "publicId", None), "", 160)
+            or _safe_str(getattr(project, "id", None), fallback, 160)
+        )
+
+    except Exception:
+        return fallback
+
+
+def _new_conversation(
+    *,
+    title: str = "Projekt-Shell",
+    project: Optional[Any] = None,
+    project_id: Optional[str] = None,
+    user_id: Optional[int] = None,
+    commit: bool = True,
+) -> Any:
+    if Conversation is None or db is None:
+        return {"id": "local-shell", "title": title, "project_id": project_id}
+
+    conv = Conversation()
+
+    try:
+        conv.title = _safe_str(title, "Projekt-Shell", 255)
+
+        resolved_project_id = project_id
+
+        if resolved_project_id is None and project is not None:
+            resolved_project_id = str(getattr(project, "id", "") or "")
+
+        if resolved_project_id:
+            conv.project_id = _safe_str(resolved_project_id, "", 120) or None
+
+        if user_id and hasattr(conv, "owner_user_id"):
+            conv.owner_user_id = user_id
+        elif project is not None and hasattr(conv, "owner_user_id"):
+            conv.owner_user_id = getattr(project, "owner_user_id", None)
+
+        if hasattr(conv, "transcript"):
+            conv.transcript = []
+
+        if hasattr(conv, "state"):
+            conv.state = {}
+
+        if hasattr(conv, "status"):
+            conv.status = "active"
+
+        if hasattr(conv, "metadata_json"):
+            conv.metadata_json = {
+                "source": "routes.ui.projects",
+                "shell": project is None,
+                "project_public_id": _project_public_id(project, ""),
+            }
+
+        if hasattr(conv, "normalize"):
+            conv.normalize()
+
+        db.session.add(conv)
+
+        if commit:
+            db.session.commit()
+        else:
+            db.session.flush()
+
+        return conv
+
+    except Exception:
+        if commit:
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+        raise
+
+
+def _get_or_create_shell_conversation(user_id: Optional[int]) -> Any:
+    if Conversation is None or db is None:
+        return {"id": "local-shell", "title": "Projekt-Shell", "project_id": "__project_shell__"}
+
+    try:
+        conv = (
+            Conversation.query
+            .filter_by(project_id="__project_shell__")
+            .order_by(Conversation.created_at.desc())
+            .first()
+        )
+
+        if conv is not None:
+            return conv
+
+        return _new_conversation(
+            title="Projekt-Shell",
+            project_id="__project_shell__",
+            user_id=user_id,
+            commit=True,
+        )
+
+    except Exception:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
+        return _new_conversation(
+            title="Projekt-Shell",
+            project_id="__project_shell__",
+            user_id=user_id,
+            commit=True,
+        )
+
+
+def _ensure_project_conversation(project: Optional[Any], *, current_user: Mapping[str, Any]) -> Any:
+    user_id = _current_user_id_optional()
+
+    if not _is_persistent_context(current_user):
+        return {
+            "id": "demo",
+            "title": "Demo-Projekt-Shell",
+            "project_id": _project_public_id(project, "new"),
+        }
+
+    try:
+        if project is None:
+            return _get_or_create_shell_conversation(user_id)
+
+        if get_or_create_project_conversation is not None:
+            conv = get_or_create_project_conversation(project, commit=True)
+            if conv is not None:
+                return conv
+
+        return _get_or_create_shell_conversation(user_id)
+
+    except Exception:
+        try:
+            if db is not None:
+                db.session.rollback()
+        except Exception:
+            pass
+
+        return _get_or_create_shell_conversation(user_id)
+
+
+def _conversation_id(conversation: Any) -> str:
+    try:
+        if isinstance(conversation, Mapping):
+            return _safe_str(conversation.get("id"), "demo", 120)
+
+        return _safe_str(getattr(conversation, "id", None), "demo", 120)
+    except Exception:
+        return "demo"
+
+
+# ─────────────────────────────────────────────────────────────
+# Project payload helpers
+# ─────────────────────────────────────────────────────────────
+
+def _new_publication_payload() -> Dict[str, Any]:
+    return {
+        "visibility": "private",
+        "publication_enabled": False,
+        "published_workspaces": {
+            "project": False,
+            "map": False,
+            "editor3d": False,
+            "cad2d": False,
+            "lv": False,
+            "versions": False,
+        },
+        "publishedWorkspaces": {
+            "project": False,
+            "map": False,
+            "editor3d": False,
+            "cad2d": False,
+            "lv": False,
+            "versions": False,
+        },
+        "effective_published_workspaces": {
+            "project": False,
+            "map": False,
+            "editor3d": False,
+            "cad2d": False,
+            "lv": False,
+            "versions": False,
+        },
+        "effectivePublishedWorkspaces": {
+            "project": False,
+            "map": False,
+            "editor3d": False,
+            "cad2d": False,
+            "lv": False,
+            "versions": False,
+        },
+        "require_auth": True,
+        "requireAuth": True,
+        "require_project_permission": True,
+        "requireProjectPermission": True,
+    }
+
+
+def _new_project_payload(current_user: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    user = _safe_dict(current_user) if current_user is not None else _current_user_payload(ensure=False)
+    demo_mode = _is_demo_context(user)
+    persistent = _is_persistent_context(user)
+    can_edit = bool(persistent and not demo_mode)
+    can_manage = bool(can_edit)
 
     return {
         "isNew": True,
@@ -794,6 +779,7 @@ def _new_project_payload() -> Dict[str, Any]:
         "id": None,
         "project_id": None,
         "public_id": "new",
+        "publicId": "new",
         "projectPublicId": "new",
         "appProjectPublicId": "new",
         "name": "",
@@ -801,170 +787,395 @@ def _new_project_payload() -> Dict[str, Any]:
         "displayName": "Neues Projekt",
         "description": "",
         "address_text": "",
+        "addressText": "",
         "address": {
             "text": "",
-            "street": "",
-            "house_number": "",
-            "postal_code": "",
-            "city": "",
-            "region": "",
-            "country": "DE",
-            "latitude": None,
-            "longitude": None,
-            "coordinate_srid": "EPSG:4326",
         },
-        "street": "",
-        "house_number": "",
-        "postal_code": "",
-        "city": "",
-        "region": "",
-        "country": "DE",
-        "latitude": None,
-        "longitude": None,
-        "coordinate_srid": "EPSG:4326",
-        "coordinates": {
-            "lat": None,
-            "lng": None,
-            "latitude": None,
-            "longitude": None,
-            "srid": "EPSG:4326",
-        },
-        "chunk": chunk,
-        "chunk_ready": False,
-        "chunkReady": False,
-        "chunk_status": "pending",
-        "chunkStatus": "pending",
-        "chunk_project_id": None,
-        "chunkProjectId": None,
-        "chunk_universe_id": None,
-        "chunkUniverseId": None,
-        "chunk_world_id": None,
-        "chunkWorldId": None,
-        "chunk_route_hints": {},
-        "chunkRouteHints": {},
-        "plan2d_id": None,
-        "plan2dId": None,
-        "lv_id": None,
-        "lvId": None,
         "visibility": "private",
         "is_public": False,
+        "isPublic": False,
         "setup_status": "draft",
         "setupStatus": "draft",
         "is_configured": False,
         "isConfigured": False,
         "status": "draft",
+        "demo_mode": demo_mode,
+        "demoMode": demo_mode,
+        "publication": _new_publication_payload(),
+        "members": [],
+        "invitations": [],
         "url": "/project=new",
         "href": "/project=new",
         "paths": {
-            "projectPagePath": "/ui/project/new",
-            "projectUrl": "/ui/project/new",
+            "projectPagePath": "/ui/project/new/project",
+            "projectUrl": "/ui/project/new/project",
             "projectPublicUrl": "/project=new",
-            "chunkContextPath": "",
-            "chunkEnsurePath": "",
-            "chunkRetryPath": "",
+            "contextPath": "/ui/project/new/context.json",
         },
         "access": {
-            "role": "owner",
+            "role": "owner" if can_manage else "viewer",
             "source": "new_project",
             "permissions": {
                 "view": True,
-                "edit": True,
-                "manage": True,
-                "delete": True,
-                "transfer": True,
-                "embed": True,
+                "edit": can_edit,
+                "manage": can_manage,
+                "delete": False,
+                "transfer": False,
+                "embed": can_manage,
+                "view_settings": can_manage,
+                "manage_settings": can_manage,
+                "view_team": can_manage,
+                "manage_team": can_manage,
+                "view_admin": can_manage,
             },
             "can_view": True,
-            "can_edit": True,
-            "can_manage": True,
-            "can_delete": True,
-            "can_transfer": True,
-            "can_embed": True,
-            "is_owner": True,
+            "can_edit": can_edit,
+            "can_manage": can_manage,
+            "can_delete": False,
+            "can_transfer": False,
+            "can_embed": can_manage,
+            "can_view_settings": can_manage,
+            "can_manage_settings": can_manage,
+            "can_view_team": can_manage,
+            "can_manage_team": can_manage,
+            "can_view_admin": can_manage,
+            "is_owner": can_manage,
         },
     }
 
 
-def _project_payload_for_template(project: Optional[Any], *, user_id: int, is_new: bool = False) -> Dict[str, Any]:
+def _serialize_permissions(project: Any, user_id: Optional[int]) -> Dict[str, Any]:
     try:
-        if project is None:
-            return _new_project_payload()
+        if serialize_project_permissions is not None:
+            return _safe_dict(serialize_project_permissions(project, user_id=user_id))
+    except Exception:
+        pass
 
-        payload = serialize_project(
+    return {
+        "can_view": False,
+        "can_edit": False,
+        "can_manage": False,
+        "permissions": {},
+        "source": "permission_serializer_unavailable",
+    }
+
+
+def _can_manage_project(project: Any, user_id: Optional[int]) -> bool:
+    access = _serialize_permissions(project, user_id)
+    permissions = _safe_dict(access.get("permissions"))
+
+    return _safe_bool(
+        access.get("can_manage")
+        or permissions.get("manage")
+        or permissions.get("manage_settings"),
+        False,
+    )
+
+
+def _serialize_project_safe(project: Any, *, user_id: Optional[int]) -> Dict[str, Any]:
+    if serialize_project is None:
+        return {
+            "id": getattr(project, "id", None),
+            "public_id": getattr(project, "public_id", None),
+            "publicId": getattr(project, "public_id", None),
+            "name": getattr(project, "name", ""),
+            "display_name": getattr(project, "name", ""),
+            "displayName": getattr(project, "name", ""),
+            "description": getattr(project, "description", ""),
+            "address_text": getattr(project, "address_text", ""),
+            "addressText": getattr(project, "address_text", ""),
+            "address": {"text": getattr(project, "address_text", "")},
+            "visibility": getattr(project, "visibility", "private"),
+            "setup_status": getattr(project, "setup_status", "draft"),
+            "setupStatus": getattr(project, "setup_status", "draft"),
+            "is_configured": bool(getattr(project, "is_configured", False)),
+            "isConfigured": bool(getattr(project, "is_configured", False)),
+            "access": _serialize_permissions(project, user_id),
+        }
+
+    include_private = _can_manage_project(project, user_id)
+
+    try:
+        return _safe_dict(
+            serialize_project(
+                project,
+                user_id=user_id,
+                include_permissions=True,
+                include_members=include_private,
+                include_service_links=include_private,
+                include_versions=True,
+                include_embed_policy=include_private,
+                include_publication=True,
+            )
+        )
+    except TypeError:
+        try:
+            return _safe_dict(
+                serialize_project(
+                    project,
+                    user_id=user_id,
+                    include_permissions=True,
+                    include_members=include_private,
+                    include_service_links=include_private,
+                    include_versions=True,
+                    include_embed_policy=include_private,
+                )
+            )
+        except TypeError:
+            return _safe_dict(serialize_project(project, user_id=user_id))
+
+
+def _attach_publication(project: Any, payload: Dict[str, Any], user_id: Optional[int]) -> Dict[str, Any]:
+    try:
+        if get_project_publication is None:
+            payload.setdefault("publication", _new_publication_payload())
+            return payload
+
+        publication_result = get_project_publication(
             project,
-            user_id=user_id,
-            include_permissions=True,
-            include_members=False,
-            include_service_links=True,
-            include_versions=False,
-            include_embed_policy=False,
+            actor_user_id=user_id,
+            include_private=_can_manage_project(project, user_id),
+            for_public=not bool(user_id),
+            use_cache=False,
         )
 
-        chunk = _project_chunk_context(project)
+        publication = _safe_dict(publication_result.get("publication"))
+
+        if publication:
+            payload["publication"] = publication
+        else:
+            payload.setdefault("publication", _new_publication_payload())
+
+        return payload
+
+    except Exception:
+        payload.setdefault("publication", _new_publication_payload())
+        return payload
+
+
+def _project_payload_for_template(
+    project: Optional[Any],
+    *,
+    current_user: Mapping[str, Any],
+    is_new: bool = False,
+) -> Dict[str, Any]:
+    user_id = _current_user_id_optional()
+
+    if project is None:
+        return _new_project_payload(current_user)
+
+    try:
+        payload = _serialize_project_safe(project, user_id=user_id)
+
+        if not payload.get("access"):
+            payload["access"] = _serialize_permissions(project, user_id)
+
+        payload = _attach_publication(project, payload, user_id)
+
+        public_id = _project_public_id(project, "new")
+        paths = _project_paths(public_id)
+
+        existing_paths = _safe_dict(payload.get("paths"))
+        existing_paths.update({key: value for key, value in paths.items() if value})
+        payload["paths"] = existing_paths
 
         payload["isNew"] = False
         payload["is_new"] = False
-        payload["chunk"] = chunk
-        payload["chunk_ready"] = chunk.get("ready")
-        payload["chunkReady"] = chunk.get("ready")
-        payload["chunk_status"] = chunk.get("status")
-        payload["chunkStatus"] = chunk.get("status")
-        payload["chunk_project_id"] = chunk.get("chunk_project_id")
-        payload["chunkProjectId"] = chunk.get("chunk_project_id")
-        payload["chunk_universe_id"] = chunk.get("chunk_universe_id")
-        payload["chunkUniverseId"] = chunk.get("chunk_universe_id")
-        payload["chunk_world_id"] = chunk.get("chunk_world_id")
-        payload["chunkWorldId"] = chunk.get("chunk_world_id")
-        payload["chunk_route_hints"] = chunk.get("route_hints") or {}
-        payload["chunkRouteHints"] = chunk.get("route_hints") or {}
-
-        paths = _safe_dict(payload.get("paths"))
-        public_id = _safe_str(getattr(project, "public_id", None), "", 120)
-
-        if public_id:
-            paths.setdefault("chunkContextPath", f"/v1/projects/{_safe_quote(public_id)}/chunk")
-            paths.setdefault("chunkEnsurePath", f"/v1/projects/{_safe_quote(public_id)}/chunk/ensure")
-            paths.setdefault("chunkRetryPath", f"/v1/projects/{_safe_quote(public_id)}/chunk/retry")
-
-        payload["paths"] = paths
+        payload["public_id"] = payload.get("public_id") or public_id
+        payload["publicId"] = payload.get("publicId") or public_id
+        payload["projectPublicId"] = public_id
+        payload["appProjectPublicId"] = public_id
+        payload["demo_mode"] = _is_demo_context(current_user)
+        payload["demoMode"] = _is_demo_context(current_user)
+        payload["url"] = f"/project={_safe_quote(public_id)}"
+        payload["href"] = f"/project={_safe_quote(public_id)}"
 
         return payload
 
     except Exception:
         if is_new:
-            return _new_project_payload()
+            return _new_project_payload(current_user)
 
         return {
             "isNew": False,
             "is_new": False,
             "public_id": "",
+            "publicId": "",
             "name": "",
             "setup_status": "draft",
             "is_configured": False,
-            "chunk": _new_chunk_payload(),
-            "chunk_ready": False,
-            "chunkReady": False,
+            "publication": _new_publication_payload(),
+            "access": {
+                "can_view": False,
+                "can_edit": False,
+                "can_manage": False,
+                "permissions": {},
+            },
             "url": "/project=new",
             "href": "/project=new",
+        }
+
+
+# ─────────────────────────────────────────────────────────────
+# Shell context helpers
+# ─────────────────────────────────────────────────────────────
+
+def _project_paths(public_id: str) -> Dict[str, str]:
+    public_id = _safe_str(public_id, "new", 160)
+    public_id_q = _safe_quote(public_id)
+
+    if not public_id or public_id == "new":
+        return {
+            "projectPagePath": "/ui/project/new/project",
+            "projectUrl": "/ui/project/new/project",
+            "projectPublicUrl": "/project=new",
+            "contextPath": "/ui/project/new/context.json",
+            "editorPagePath": "",
+            "initialEditorUrl": "",
+            "mapPagePath": "",
+            "cad2dPagePath": "",
+            "lvPagePath": "",
+            "versionsPagePath": "",
+            "adminPagePath": "",
+            "stateGetPath": "",
+            "statePutPath": "",
+        }
+
+    return {
+        "projectPagePath": f"/ui/project/{public_id_q}/project",
+        "projectUrl": f"/ui/project/{public_id_q}/project",
+        "projectPublicUrl": f"/project={public_id_q}",
+        "contextPath": f"/ui/project/{public_id_q}/context.json",
+        "editorPagePath": f"/ui/project/{public_id_q}/editor3d",
+        "initialEditorUrl": f"/ui/project/{public_id_q}/editor3d",
+        "mapPagePath": f"/ui/project/{public_id_q}/map",
+        "cad2dPagePath": f"/ui/project/{public_id_q}/cad2d",
+        "lvPagePath": f"/ui/project/{public_id_q}/lv",
+        "versionsPagePath": f"/ui/project/{public_id_q}/versions",
+        "adminPagePath": f"/ui/project/{public_id_q}/admin",
+        "publicationPath": f"/v1/projects/{public_id_q}/publication",
+        "membersPath": f"/v1/projects/{public_id_q}/members",
+        "invitationsPath": f"/v1/projects/{public_id_q}/invitations",
+        "apiPath": f"/v1/projects/{public_id_q}",
+        "stateGetPath": "",
+        "statePutPath": "",
+    }
+
+
+def _workspace_context_for_project(
+    *,
+    project: Optional[Any],
+    project_payload: Mapping[str, Any],
+    conversation: Any,
+    current_user: Mapping[str, Any],
+    is_new: bool,
+) -> Dict[str, Any]:
+    try:
+        chat_id = _conversation_id(conversation)
+        chat_id_q = _safe_quote(chat_id)
+
+        public_id = _safe_str(
+            project_payload.get("public_id")
+            or project_payload.get("publicId")
+            or _project_public_id(project, "new"),
+            "new",
+            160,
+        )
+
+        paths = _project_paths(public_id)
+
+        if _is_persistent_context(current_user) and chat_id and chat_id != "demo":
+            paths["stateGetPath"] = f"/v1/chats/{chat_id_q}/viewer/selection"
+            paths["statePutPath"] = f"/v1/chats/{chat_id_q}/viewer/selection"
+
+        existing_paths = _safe_dict(project_payload.get("paths"))
+        existing_paths.update({key: value for key, value in paths.items() if value})
+
+        return {
+            "chat_id": chat_id,
+            "project_id": project_payload.get("id") or project_payload.get("project_id"),
+            "project_public_id": public_id,
+            "app_project_public_id": public_id,
+            "default_mode": "project",
+            "workspace_mode": "project",
+            "project_url": existing_paths.get("projectPagePath") or paths["projectPagePath"],
+            "project_public_url": existing_paths.get("projectPublicUrl") or paths["projectPublicUrl"],
+            "project_configured": _safe_bool(
+                project_payload.get("is_configured") or project_payload.get("isConfigured"),
+                False,
+            ),
+            "is_new": bool(is_new),
+            "editor_url": existing_paths.get("editorPagePath", ""),
+            "viewer_url": existing_paths.get("projectPagePath") or paths["projectPagePath"],
+            "map_url": existing_paths.get("mapPagePath", ""),
+            "cad2d_url": existing_paths.get("cad2dPagePath", ""),
+            "lv_url": existing_paths.get("lvPagePath", ""),
+            "versions_url": existing_paths.get("versionsPagePath", ""),
+            "admin_url": existing_paths.get("adminPagePath", ""),
+            "paths": existing_paths,
+            "demo_mode": _is_demo_context(current_user),
+            "persistent": _is_persistent_context(current_user),
+        }
+
+    except Exception:
+        return {
+            "chat_id": _conversation_id(conversation),
+            "project_public_id": "new",
+            "app_project_public_id": "new",
+            "default_mode": "project",
+            "workspace_mode": "project",
+            "project_url": "/ui/project/new/project",
+            "project_public_url": "/project=new",
+            "project_configured": False,
+            "is_new": True,
+            "editor_url": "",
+            "viewer_url": "/ui/project/new/project",
+            "map_url": "",
+            "paths": _project_paths("new"),
+            "demo_mode": _is_demo_context(current_user),
+            "persistent": _is_persistent_context(current_user),
         }
 
 
 def _project_sidebar_context(
     *,
     selected_project: Optional[Any],
-    conversation: Conversation,
-    user_id: int,
+    conversation: Any,
+    current_user: Mapping[str, Any],
 ) -> Dict[str, Any]:
     try:
-        items = list_project_sidebar_items(
-            user_id=user_id,
-            include_public=True,
-            limit=200,
-        )
+        user_id = _current_user_id_optional()
+        chat_id = _conversation_id(conversation)
+        selected_public_id = _project_public_id(selected_project, "new")
 
-        selected_public_id = _safe_str(getattr(selected_project, "public_id", None), "", 120)
-        selected_conversation_id = _safe_str(getattr(selected_project, "conversation_id", None), "", 80)
-        selected_chunk = _project_chunk_context(selected_project)
+        if not user_id or not _is_persistent_context(current_user):
+            return {
+                "enabled": True,
+                "currentChatId": chat_id,
+                "currentProjectId": selected_public_id,
+                "current_project_id": selected_public_id,
+                "currentTitle": getattr(selected_project, "name", None) if selected_project is not None else "Neues Projekt",
+                "currentSubtitle": getattr(selected_project, "address_text", None) if selected_project is not None else "Projekt definieren",
+                "defaultCollapsed": False,
+                "defaultWidth": 280,
+                "minWidth": 220,
+                "maxWidth": 420,
+                "collapsedWidth": 64,
+                "storageKey": "vectoplan.projectSidebar.v1",
+                "routeBase": "/",
+                "apiPath": "/v1/projects/sidebar",
+                "items": [],
+                "demo_mode": _is_demo_context(current_user),
+            }
+
+        items = []
+
+        if list_project_sidebar_items is not None:
+            items = list_project_sidebar_items(
+                user_id=user_id,
+                include_public=True,
+                limit=200,
+            ) or []
 
         enriched: List[Dict[str, Any]] = []
 
@@ -973,6 +1184,7 @@ def _project_sidebar_context(
                 current_item = dict(item or {})
                 public_id = (
                     _safe_str(current_item.get("public_id"), "", 120)
+                    or _safe_str(current_item.get("publicId"), "", 120)
                     or _safe_str(current_item.get("projectId"), "", 120)
                     or _safe_str(current_item.get("id"), "", 120)
                 )
@@ -982,10 +1194,10 @@ def _project_sidebar_context(
                     current_item["is_active"] = True
 
                 if not current_item.get("href") and public_id:
-                    current_item["href"] = f"/project={public_id}"
+                    current_item["href"] = f"/project={_safe_quote(public_id)}"
 
-                if not current_item.get("chatId") and current_item.get("conversation_id"):
-                    current_item["chatId"] = current_item.get("conversation_id")
+                if not current_item.get("project_url") and public_id:
+                    current_item["project_url"] = f"/project={_safe_quote(public_id)}"
 
                 enriched.append(current_item)
 
@@ -994,13 +1206,11 @@ def _project_sidebar_context(
 
         return {
             "enabled": True,
-            "currentChatId": selected_conversation_id or getattr(conversation, "id", ""),
+            "currentChatId": chat_id,
             "currentProjectId": selected_public_id,
             "current_project_id": selected_public_id,
-            "currentChunk": selected_chunk,
-            "current_chunk": selected_chunk,
-            "currentTitle": getattr(selected_project, "name", None) or "Neues Projekt",
-            "currentSubtitle": getattr(selected_project, "address_text", None) or "Projekt definieren",
+            "currentTitle": getattr(selected_project, "name", None) if selected_project is not None else "Neues Projekt",
+            "currentSubtitle": getattr(selected_project, "address_text", None) if selected_project is not None else "Projekt definieren",
             "defaultCollapsed": False,
             "defaultWidth": 280,
             "minWidth": 220,
@@ -1010,12 +1220,13 @@ def _project_sidebar_context(
             "routeBase": "/",
             "apiPath": "/v1/projects/sidebar",
             "items": enriched,
+            "demo_mode": _is_demo_context(current_user),
         }
 
     except Exception:
         return {
             "enabled": True,
-            "currentChatId": getattr(conversation, "id", ""),
+            "currentChatId": _conversation_id(conversation),
             "currentProjectId": "",
             "currentTitle": "Projekt",
             "currentSubtitle": "Projekt definieren",
@@ -1023,140 +1234,18 @@ def _project_sidebar_context(
         }
 
 
-def _workspace_context_for_project(
-    *,
-    project: Optional[Any],
-    conversation: Conversation,
-    is_new: bool,
-) -> Dict[str, Any]:
+def _assert_project_view_allowed(project: Any, current_user: Mapping[str, Any]) -> None:
     try:
-        chat_id = _safe_str(getattr(conversation, "id", ""), "", 120)
-        chat_id_q = _safe_quote(chat_id)
-        chunk = _project_chunk_context(project)
+        user_id = _current_user_id_optional()
 
-        if project is not None:
-            public_id = _safe_str(getattr(project, "public_id", ""), "", 120)
-            public_id_q = _safe_quote(public_id)
-            project_paths = build_project_paths(project)
-            project_page_path = project_paths.get("projectPagePath") or project_workspace_path(project)
-            project_public = project_paths.get("projectPublicUrl") or project_public_url(project)
-            configured = bool(getattr(project, "is_configured", False))
-
-            editor_url = project_paths.get("editorPagePath") or f"/ui/project/{public_id_q}/editor"
-            map_url = project_paths.get("mapPagePath") or f"/ui/project/{public_id_q}/map"
-            cad2d_url = project_paths.get("cad2dPagePath") or f"/ui/project/{public_id_q}/cad2d"
-            lv_url = project_paths.get("lvPagePath") or f"/ui/project/{public_id_q}/lv"
-            admin_url = project_paths.get("adminPagePath") or f"/ui/project/{public_id_q}/admin"
-            plan2d_json = project_paths.get("plan2dJsonPath") or f"/ui/project/{public_id_q}/plan2d.json"
-            cad_embed_json = project_paths.get("cadEmbedJsonPath") or f"/ui/project/{public_id_q}/cad-embed.json"
-            chunk_context_path = f"/v1/projects/{public_id_q}/chunk"
-            chunk_ensure_path = f"/v1/projects/{public_id_q}/chunk/ensure"
-            chunk_retry_path = f"/v1/projects/{public_id_q}/chunk/retry"
-        else:
-            public_id = "new"
-            project_paths = {}
-            project_page_path = "/ui/project/new"
-            project_public = "/project=new"
-            configured = False
-
-            editor_url = ""
-            map_url = ""
-            cad2d_url = ""
-            lv_url = ""
-            admin_url = ""
-            plan2d_json = ""
-            cad_embed_json = ""
-            chunk_context_path = ""
-            chunk_ensure_path = ""
-            chunk_retry_path = ""
-
-        paths = {
-            "projectPagePath": project_page_path,
-            "projectUrl": project_page_path,
-            "projectPublicUrl": project_public,
-            "editorPagePath": editor_url,
-            "initialEditorUrl": editor_url,
-            "viewerJsonPath": f"/ui/chat/{chat_id_q}/viewer.json" if chat_id else "",
-            "versionsPath": f"/ui/chat/{chat_id_q}/versions.json" if chat_id else "",
-            "mapPagePath": map_url,
-            "plan2dJsonPath": plan2d_json,
-            "cad2dPagePath": cad2d_url,
-            "cadEmbedJsonPath": cad_embed_json,
-            "adminPagePath": admin_url,
-            "lvPagePath": lv_url,
-            "chunkContextPath": chunk_context_path,
-            "chunkEnsurePath": chunk_ensure_path,
-            "chunkRetryPath": chunk_retry_path,
-            "uploadPath": f"/ui/chat/{chat_id_q}/upload" if chat_id else "",
-            "stateGetPath": f"/v1/chats/{chat_id_q}/viewer/selection" if chat_id else "",
-            "statePutPath": f"/v1/chats/{chat_id_q}/viewer/selection" if chat_id else "",
-        }
-
-        for key, value in dict(project_paths or {}).items():
-            if key not in paths or not paths.get(key):
-                paths[key] = value
-
-        return {
-            "chat_id": chat_id,
-            "project_id": getattr(project, "id", None),
-            "project_public_id": public_id,
-            "app_project_public_id": public_id,
-            "default_mode": "project",
-            "workspace_mode": "project",
-            "project_url": project_page_path,
-            "project_public_url": project_public,
-            "project_configured": configured,
-            "is_new": bool(is_new),
-            "editor_url": editor_url,
-            "viewer_url": editor_url,
-            "map_url": map_url,
-            "cad2d_url": cad2d_url,
-            "lv_url": lv_url,
-            "admin_url": admin_url,
-            "chunk": chunk,
-            "chunk_ready": chunk.get("ready"),
-            "chunkReady": chunk.get("ready"),
-            "chunk_status": chunk.get("status"),
-            "chunkStatus": chunk.get("status"),
-            "chunk_project_id": chunk.get("chunk_project_id"),
-            "chunkProjectId": chunk.get("chunk_project_id"),
-            "chunk_universe_id": chunk.get("chunk_universe_id"),
-            "chunkUniverseId": chunk.get("chunk_universe_id"),
-            "chunk_world_id": chunk.get("chunk_world_id"),
-            "chunkWorldId": chunk.get("chunk_world_id"),
-            "chunk_route_hints": chunk.get("route_hints") or {},
-            "chunkRouteHints": chunk.get("route_hints") or {},
-            "paths": paths,
-        }
-
-    except Exception:
-        chat_id = _safe_str(getattr(conversation, "id", ""), "", 120)
-        chat_id_q = _safe_quote(chat_id)
-
-        return {
-            "chat_id": chat_id,
-            "project_public_id": "new",
-            "app_project_public_id": "new",
-            "default_mode": "project",
-            "workspace_mode": "project",
-            "project_url": "/ui/project/new",
-            "project_public_url": "/project=new",
-            "project_configured": False,
-            "editor_url": "",
-            "viewer_url": "",
-            "map_url": "",
-            "chunk": _new_chunk_payload(),
-            "chunk_ready": False,
-            "chunkReady": False,
-            "paths": {
-                "projectPagePath": "/ui/project/new",
-                "projectUrl": "/ui/project/new",
-                "projectPublicUrl": "/project=new",
-                "viewerJsonPath": f"/ui/chat/{chat_id_q}/viewer.json" if chat_id else "",
-                "stateGetPath": f"/v1/chats/{chat_id_q}/viewer/selection" if chat_id else "",
-                "statePutPath": f"/v1/chats/{chat_id_q}/viewer/selection" if chat_id else "",
-            },
-        }
+        require_project_permission(
+            project,
+            PERMISSION_VIEW,
+            user_id,
+            allow_public_view=True,
+        )
+    except TypeError:
+        require_project_permission(project, PERMISSION_VIEW, _current_user_id_optional())
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1170,23 +1259,24 @@ def _render_project_shell(
     status_code: int = 200,
 ) -> Response:
     try:
-        ensure_default_user()
-    except Exception:
-        pass
+        current_user = _current_user_payload(ensure=False)
 
-    try:
-        user_id = get_current_user_id()
-        conversation = _ensure_project_conversation(selected_project)
+        if selected_project is not None:
+            _assert_project_view_allowed(selected_project, current_user)
+
+        conversation = _ensure_project_conversation(selected_project, current_user=current_user)
 
         project_payload = _project_payload_for_template(
             selected_project,
-            user_id=user_id,
+            current_user=current_user,
             is_new=is_new,
         )
 
         workspace = _workspace_context_for_project(
             project=selected_project,
+            project_payload=project_payload,
             conversation=conversation,
+            current_user=current_user,
             is_new=is_new,
         )
 
@@ -1195,18 +1285,23 @@ def _render_project_shell(
         project_sidebar = _project_sidebar_context(
             selected_project=selected_project,
             conversation=conversation,
-            user_id=user_id,
+            current_user=current_user,
         )
 
         resp = make_response(
             render_template(
                 "chat_viewer.html",
-                chat_id=conversation.id,
-                viewer_url=workspace.get("viewer_url") or "",
+                chat_id=workspace.get("chat_id") or "demo",
+                viewer_url=workspace.get("project_url") or "",
+                project_url=workspace.get("project_url") or "",
                 editor_url=workspace.get("editor_url") or "",
                 initial_editor_url=workspace.get("editor_url") or "",
                 map_url=workspace.get("map_url") or "",
                 initial_map_url=workspace.get("map_url") or "",
+                cad2d_url=workspace.get("cad2d_url") or "",
+                lv_url=workspace.get("lv_url") or "",
+                versions_url=workspace.get("versions_url") or "",
+                admin_url=workspace.get("admin_url") or "",
                 default_mode="project",
                 workspace_mode="project",
                 workspace=workspace,
@@ -1214,12 +1309,18 @@ def _render_project_shell(
                 project=project_payload,
                 current_project=project_payload,
                 project_sidebar=project_sidebar,
-                current_user=get_current_user_context(ensure=True).to_dict(),
+                current_user=current_user,
+                auth=current_user,
+                auth_context=current_user,
+                demo_mode=_is_demo_context(current_user),
             ),
             status_code,
         )
 
         return _finalize_html_response(resp, no_store=False, workspace_shell=True)
+
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
 
     except Exception as exc:
         _log_exception("render project shell failed", exc)
@@ -1234,102 +1335,12 @@ def _render_project_shell(
         return _finalize_json_response(resp, no_store=True)
 
 
-def _render_project_workspace(
-    *,
-    selected_project: Optional[Any],
-    is_new: bool = False,
-    status_code: int = 200,
-) -> Response:
-    try:
-        user_id = get_current_user_id()
-        project_payload = _project_payload_for_template(
-            selected_project,
-            user_id=user_id,
-            is_new=is_new,
-        )
-
-        resp = make_response(
-            render_template(
-                "viewer/project.html",
-                project=project_payload,
-                current_project=project_payload,
-                current_user=get_current_user_context(ensure=True).to_dict(),
-                is_new=bool(is_new),
-            ),
-            status_code,
-        )
-
-        return _finalize_html_response(resp, no_store=False, allow_embed=True)
-
-    except Exception as exc:
-        _log_exception("render project workspace failed", exc)
-        resp = jsonify(
-            {
-                "ok": False,
-                "error": f"project workspace render failed: {exc}",
-                "code": "project_workspace_render_failed",
-            }
-        )
-        resp.status_code = 500
-        return _finalize_json_response(resp, no_store=True)
-
-
-def _render_placeholder_workspace(
-    *,
-    title: str,
-    message: str,
-    project: Optional[Any] = None,
-    status_code: int = 200,
-) -> Response:
-    try:
-        html = render_template(
-            "viewer/project.html",
-            project=_project_payload_for_template(
-                project,
-                user_id=get_current_user_id(),
-                is_new=project is None,
-            ),
-            current_project=_project_payload_for_template(
-                project,
-                user_id=get_current_user_id(),
-                is_new=project is None,
-            ),
-            current_user=get_current_user_context(ensure=True).to_dict(),
-            is_new=project is None,
-            placeholder={
-                "title": title,
-                "message": message,
-            },
-        )
-        resp = make_response(html, status_code)
-        return _finalize_html_response(resp, no_store=False, allow_embed=True)
-
-    except Exception:
-        resp = jsonify(
-            {
-                "ok": True,
-                "title": title,
-                "message": message,
-            }
-        )
-        resp.status_code = status_code
-        return _finalize_json_response(resp, no_store=True)
-
-
 # ─────────────────────────────────────────────────────────────
 # Root / project shell routes
 # ─────────────────────────────────────────────────────────────
 
-@bp.before_request
-def _ui_projects_before_request():
-    try:
-        ensure_default_user()
-    except Exception as exc:
-        _log_warning("ensure_default_user before project UI failed: %s", exc.__class__.__name__)
-
-
 @bp.get("/")
-def project_root():
+def project_root() -> Response:
     try:
         project_id = _current_project_identifier_from_request()
 
@@ -1346,7 +1357,7 @@ def project_root():
 
 
 @bp.get("/project=<project_id>")
-def project_by_equals(project_id: str):
+def project_by_equals(project_id: str) -> Response:
     try:
         if _is_new_project_identifier(project_id):
             return _render_project_shell(selected_project=None, is_new=True)
@@ -1361,9 +1372,6 @@ def project_by_equals(project_id: str):
                 extra={"project_id": project_id},
             )
 
-        user_id = get_current_user_id()
-        require_project_permission(project, PERMISSION_VIEW, user_id, allow_public_view=True)
-
         return _render_project_shell(selected_project=project, is_new=False)
 
     except PermissionDenied as exc:
@@ -1374,7 +1382,7 @@ def project_by_equals(project_id: str):
 
 
 @bp.get("/project/<project_id>")
-def project_by_path(project_id: str):
+def project_by_path(project_id: str) -> Response:
     try:
         return redirect(f"/project={_safe_quote(project_id)}", code=302)
     except Exception:
@@ -1382,7 +1390,7 @@ def project_by_path(project_id: str):
 
 
 @bp.get("/projects")
-def projects_list_page():
+def projects_list_page() -> Response:
     try:
         return _render_project_shell(selected_project=None, is_new=True)
     except Exception as exc:
@@ -1390,178 +1398,42 @@ def projects_list_page():
 
 
 # ─────────────────────────────────────────────────────────────
-# Workspace iframe routes
+# Lightweight JSON helpers for UI shell
 # ─────────────────────────────────────────────────────────────
 
-@bp.get("/ui/project/new")
-def project_new_workspace():
+@bp.get("/ui/projects/sidebar.json")
+def ui_projects_sidebar_json() -> Response:
     try:
-        return _render_project_workspace(selected_project=None, is_new=True)
-    except Exception as exc:
-        return _exception_response("project_new_workspace failed", exc, code="project_new_workspace_failed")
+        current_user = _current_user_payload(ensure=False)
+        user_id = _current_user_id_optional()
 
-
-@bp.get("/ui/project/<project_id>/project")
-def project_edit_workspace(project_id: str):
-    try:
-        if _is_new_project_identifier(project_id):
-            return _render_project_workspace(selected_project=None, is_new=True)
-
-        project = _load_selected_project(project_id)
-
-        if project is None:
-            return _json_error(
-                "project not found",
-                404,
-                code="project_not_found",
-                extra={"project_id": project_id},
-            )
-
-        user_id = get_current_user_id()
-        require_project_permission(project, PERMISSION_VIEW, user_id, allow_public_view=True)
-
-        return _render_project_workspace(selected_project=project, is_new=False)
-
-    except PermissionDenied as exc:
-        return _permission_error_response(exc)
-
-    except Exception as exc:
-        return _exception_response("project_edit_workspace failed", exc, code="project_workspace_failed")
-
-
-@bp.get("/ui/project/<project_id>/admin")
-def project_admin_workspace(project_id: str):
-    try:
-        project = _load_selected_project(project_id)
-
-        if project is None:
-            return _json_error("project not found", 404, code="project_not_found")
-
-        user_id = get_current_user_id()
-        require_project_permission(project, "manage", user_id, allow_public_view=False)
-
-        return _render_placeholder_workspace(
-            title="Projektverwaltung",
-            message="Die Projektverwaltung wird in einem späteren Schritt ergänzt.",
-            project=project,
-            status_code=200,
-        )
-
-    except PermissionDenied as exc:
-        return _permission_error_response(exc)
-
-    except Exception as exc:
-        return _exception_response("project_admin_workspace failed", exc, code="project_admin_failed")
-
-
-@bp.get("/ui/project/<project_id>/lv")
-def project_lv_workspace(project_id: str):
-    try:
-        project = _load_selected_project(project_id)
-
-        if project is None:
-            return _json_error("project not found", 404, code="project_not_found")
-
-        user_id = get_current_user_id()
-        require_project_permission(project, PERMISSION_VIEW, user_id, allow_public_view=True)
-
-        if not bool(getattr(project, "is_configured", False)):
-            return _json_error(
-                "project is not configured",
-                409,
-                code="project_not_configured",
-                extra={"project_id": project_id},
-            )
-
-        return _render_placeholder_workspace(
-            title="Leistungsverzeichnis",
-            message="Das LV-Modul ist noch nicht angebunden.",
-            project=project,
-            status_code=200,
-        )
-
-    except PermissionDenied as exc:
-        return _permission_error_response(exc)
-
-    except Exception as exc:
-        return _exception_response("project_lv_workspace failed", exc, code="project_lv_failed")
-
-
-# ─────────────────────────────────────────────────────────────
-# Lightweight JSON helpers for UI
-# ─────────────────────────────────────────────────────────────
-
-@bp.get("/ui/project/<project_id>/context.json")
-def project_context_json(project_id: str):
-    try:
-        user_id = get_current_user_id()
-
-        if _is_new_project_identifier(project_id):
-            payload = _project_payload_for_template(None, user_id=user_id, is_new=True)
-            shell_conv = _get_or_create_shell_conversation()
-
+        if not user_id or not _is_persistent_context(current_user):
             return _json_response(
                 {
                     "ok": True,
-                    "project": payload,
-                    "is_new": True,
-                    "workspace": _workspace_context_for_project(
-                        project=None,
-                        conversation=shell_conv,
-                        is_new=True,
-                    ),
+                    "user_id": user_id,
+                    "demo_mode": _is_demo_context(current_user),
+                    "items": [],
+                    "sidebar_items": [],
+                    "total": 0,
                 },
                 200,
             )
 
-        project = _load_selected_project(project_id)
+        items = []
 
-        if project is None:
-            return _json_error(
-                "project not found",
-                404,
-                code="project_not_found",
-                extra={"project_id": project_id},
-            )
-
-        require_project_permission(project, PERMISSION_VIEW, user_id, allow_public_view=True)
-
-        conversation = _ensure_project_conversation(project)
-        workspace = _workspace_context_for_project(
-            project=project,
-            conversation=conversation,
-            is_new=False,
-        )
-
-        return _json_response(
-            {
-                "ok": True,
-                "project": _project_payload_for_template(project, user_id=user_id, is_new=False),
-                "sidebar_item": serialize_project_sidebar_item(project, user_id=user_id),
-                "workspace": workspace,
-                "chunk": workspace.get("chunk") or _project_chunk_context(project),
-                "access": serialize_project_permissions(project, user_id=user_id),
-            },
-            200,
-        )
-
-    except PermissionDenied as exc:
-        return _permission_error_response(exc)
-
-    except Exception as exc:
-        return _exception_response("project_context_json failed", exc, code="project_context_failed")
-
-
-@bp.get("/ui/projects/sidebar.json")
-def ui_projects_sidebar_json():
-    try:
-        user_id = get_current_user_id()
-        items = list_project_sidebar_items(user_id=user_id, include_public=True, limit=200)
+        if list_project_sidebar_items is not None:
+            items = list_project_sidebar_items(
+                user_id=user_id,
+                include_public=True,
+                limit=200,
+            ) or []
 
         return _json_response(
             {
                 "ok": True,
                 "user_id": user_id,
+                "demo_mode": _is_demo_context(current_user),
                 "items": items,
                 "sidebar_items": items,
                 "total": len(items),
@@ -1573,12 +1445,38 @@ def ui_projects_sidebar_json():
         return _exception_response("ui_projects_sidebar_json failed", exc, code="ui_sidebar_failed")
 
 
+@bp.get("/ui/projects/status.json")
+def ui_projects_status_json() -> Response:
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "service": "ui_projects",
+        "purpose": "project_shell_and_compatibility_routes",
+        "routes": {
+            "root": "/",
+            "project_shell": "/project=<project_public_id>",
+            "new_project_shell": "/project=new",
+            "sidebar": "/ui/projects/sidebar.json",
+            "viewer_workspace": "/ui/project/<project_id>/project",
+            "viewer_context": "/ui/project/<project_id>/context.json",
+        },
+        "current_user": _current_user_payload(ensure=False),
+    }
+
+    try:
+        if get_current_user_status is not None:
+            payload["current_user_status"] = get_current_user_status()
+    except Exception:
+        pass
+
+    return _json_response(payload, 200)
+
+
 # ─────────────────────────────────────────────────────────────
 # Redirect helpers
 # ─────────────────────────────────────────────────────────────
 
 @bp.get("/ui/project")
-def ui_project_root_redirect():
+def ui_project_root_redirect() -> Response:
     try:
         project_id = _current_project_identifier_from_request()
 
@@ -1592,7 +1490,7 @@ def ui_project_root_redirect():
 
 
 @bp.get("/ui/projects")
-def ui_projects_root_redirect():
+def ui_projects_root_redirect() -> Response:
     try:
         return redirect("/", code=302)
     except Exception:
@@ -1603,4 +1501,12 @@ __all__ = [
     "bp",
     "ui_projects_bp",
     "projects_ui_bp",
+    "project_root",
+    "project_by_equals",
+    "project_by_path",
+    "projects_list_page",
+    "ui_projects_sidebar_json",
+    "ui_projects_status_json",
+    "ui_project_root_redirect",
+    "ui_projects_root_redirect",
 ]

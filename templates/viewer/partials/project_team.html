@@ -1,0 +1,452 @@
+<!-- services/vectoplan-app/templates/viewer/partials/project_team.html -->
+{#
+  VECTOPLAN Project Team Partial
+
+  Zweck:
+  - Team-, Mitglieder- und Einladungsbereich im Projektformular.
+  - Zeigt bestehende Projektmitglieder mit Rollen und effektiven Rechten.
+  - Ermöglicht Einladungen per E-Mail.
+  - Wichtig: vectoplan-app erzeugt keine echten Useraccounts.
+  - Eine Einladung darf nur an eine im späteren Auth-/Registrierungsdienst
+    registrierte E-Mail-Adresse gehen.
+  - Nicht registrierte E-Mails werden serverseitig abgelehnt.
+  - Pending-Einladungen werden separat von Mitgliedschaften angezeigt.
+  - Owner/Admin/Manager können Rollen ändern und Mitglieder entfernen.
+  - Unberechtigte User sehen diesen Bereich nicht oder nur als gesperrten Hinweis.
+
+  Erwartete optionale Variablen:
+  - project
+  - current_project
+  - _project
+  - current_user
+  - _current_user
+  - can_edit
+  - _can_edit
+  - can_manage
+  - _can_manage
+  - is_new
+  - _is_new
+  - demo_mode
+  - _demo_mode
+
+  Erwartete optionale Projektfelder:
+  - project.members
+  - project.invitations
+  - project.access
+  - project.public_id / project.publicId / project.id
+
+  API-Ziele:
+  - GET    /v1/projects/<project_id>/members
+  - GET    /v1/projects/<project_id>/invitations
+  - POST   /v1/projects/<project_id>/invitations
+  - PATCH  /v1/projects/<project_id>/members/<user_id>
+  - DELETE /v1/projects/<project_id>/members/<user_id>
+  - DELETE /v1/projects/<project_id>/invitations/<invitation_id>
+
+  Robustheitsregel:
+  - Bei Dicts immer .get(...) verwenden.
+  - Partial darf auch rendern, wenn members/invitations noch nicht vorgeladen sind.
+#}
+
+{% set _team_project_raw = _project|default(project|default(current_project|default({}, true), true), true) %}
+{% set _team_project = _team_project_raw if _team_project_raw is mapping else {} %}
+
+{% set _team_current_user_raw = _current_user|default(current_user|default({}, true), true) %}
+{% set _team_current_user = _team_current_user_raw if _team_current_user_raw is mapping else {} %}
+
+{% set _team_access_raw = _team_project.get('access', {}) %}
+{% set _team_access = _team_access_raw if _team_access_raw is mapping else {} %}
+
+{% set _team_permissions_raw = _team_access.get('permissions', {}) %}
+{% set _team_permissions = _team_permissions_raw if _team_permissions_raw is mapping else {} %}
+
+{% set _team_members_raw = _team_project.get('members', _team_project.get('team', [])) %}
+{% set _team_members = _team_members_raw if _team_members_raw is sequence and _team_members_raw is not string else [] %}
+
+{% set _team_invitations_raw = _team_project.get('invitations', _team_project.get('pending_invitations', _team_project.get('pendingInvitations', []))) %}
+{% set _team_invitations = _team_invitations_raw if _team_invitations_raw is sequence and _team_invitations_raw is not string else [] %}
+
+{% set _team_project_id = _team_project.get('id', '') %}
+{% set _team_project_public_id = _team_project.get('public_id', _team_project.get('publicId', _team_project_id)) %}
+
+{% set _team_can_edit_raw = _can_edit|default(can_edit|default(_team_access.get('can_edit', _team_permissions.get('edit', true)), true), true) %}
+{% set _team_can_edit = true if _team_can_edit_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _team_can_manage_raw = _can_manage|default(can_manage|default(_team_access.get('can_manage', _team_permissions.get('manage', false)), true), true) %}
+{% set _team_can_manage = true if _team_can_manage_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _team_is_new_raw = _is_new|default(is_new|default(_team_project.get('is_new', _team_project.get('isNew', false)), true), true) %}
+{% set _team_is_new = true if _team_is_new_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _team_demo_raw = _demo_mode|default(demo_mode|default(_team_project.get('demo_mode', _team_project.get('demoMode', false)), true), true) %}
+{% set _team_demo_mode = true if _team_demo_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _team_form_enabled = true if _team_can_edit and _team_can_manage and not _team_is_new and not _team_demo_mode else false %}
+
+{% set _members_path = '/v1/projects/' ~ _team_project_public_id ~ '/members' if _team_project_public_id and _team_project_public_id != 'new' else '' %}
+{% set _invitations_path = '/v1/projects/' ~ _team_project_public_id ~ '/invitations' if _team_project_public_id and _team_project_public_id != 'new' else '' %}
+
+<section
+  class="vp-project-card vp-project-card--team"
+  aria-labelledby="projectTeamTitle"
+  data-project-team-card
+  data-project-public-id="{{ _team_project_public_id|e }}"
+  data-project-is-new="{{ 'true' if _team_is_new else 'false' }}"
+  data-project-can-manage="{{ 'true' if _team_can_manage else 'false' }}"
+  data-project-demo-mode="{{ 'true' if _team_demo_mode else 'false' }}"
+  data-members-url="{{ _members_path|e }}"
+  data-invitations-url="{{ _invitations_path|e }}"
+>
+  <header class="vp-project-card__header">
+    <div>
+      <h2 id="projectTeamTitle" class="vp-project-card__title">
+        Team und Rechte
+      </h2>
+
+      <p class="vp-project-card__text">
+        Verwalte, wer Zugriff auf dieses Projekt hat. Neue Personen werden per registrierter E-Mail-Adresse eingeladen.
+      </p>
+    </div>
+
+
+  </header>
+
+
+  {% if _team_can_manage %}
+    <section
+      class="vp-project-team-invite"
+      aria-labelledby="projectTeamInviteTitle"
+      data-project-team-invite
+    >
+      <h3 id="projectTeamInviteTitle" class="vp-project-subtitle">
+        Person einladen
+      </h3>
+
+      <div class="vp-project-team-invite__grid">
+        <div class="vp-project-field">
+          <label class="vp-project-label" for="projectInviteEmail">
+            E-Mail-Adresse
+          </label>
+
+          <input
+            id="projectInviteEmail"
+            class="vp-project-input"
+            name="invite_email"
+            type="email"
+            inputmode="email"
+            autocomplete="email"
+            maxlength="320"
+            placeholder="name@example.com"
+            data-project-team-invite-email
+            {% if not _team_form_enabled %}disabled{% endif %}
+          >
+
+          <p class="vp-project-help">
+            Die Adresse muss bereits im externen Registrierungs-/Anmeldesystem existieren.
+          </p>
+        </div>
+
+        <div class="vp-project-field">
+          <label class="vp-project-label" for="projectInviteRole">
+            Rolle
+          </label>
+
+          <select
+            id="projectInviteRole"
+            class="vp-project-select"
+            name="invite_role"
+            data-project-team-invite-role
+            {% if not _team_form_enabled %}disabled{% endif %}
+          >
+            <option value="viewer">Viewer | Ansehen</option>
+            <option value="editor" selected>Editor | Bearbeiten</option>
+            <option value="admin">Admin | Projekt verwalten</option>
+          </select>
+
+
+        </div>
+
+        <div class="vp-project-field vp-project-field--actions">
+          <button
+            type="button"
+            class="vp-project-btn vp-project-btn--primary"
+            data-project-team-invite-submit
+            {% if not _team_form_enabled %}disabled{% endif %}
+          >
+            Einladung senden
+          </button>
+        </div>
+      </div>
+
+      <div
+        class="vp-project-team-message"
+        data-project-team-message
+        role="status"
+        aria-live="polite"
+        hidden
+      ></div>
+    </section>
+  {% endif %}
+
+  {% if _team_can_manage %}
+    <section
+      class="vp-project-team-members"
+      aria-labelledby="projectMembersTitle"
+      data-project-team-members-section
+    >
+      <div class="vp-project-section-header">
+        <div>
+          <h3 id="projectMembersTitle" class="vp-project-subtitle">
+            Mitglieder
+          </h3>
+
+
+        </div>
+
+
+      </div>
+
+      <div
+        class="vp-project-team-list"
+        data-project-team-members
+        aria-live="polite"
+      >
+        {% if _team_members|length > 0 %}
+          {% for member in _team_members %}
+            {% set _member = member if member is mapping else {} %}
+            {% set _member_user_raw = _member.get('user', {}) %}
+            {% set _member_user = _member_user_raw if _member_user_raw is mapping else {} %}
+            {% set _member_permissions_raw = _member.get('permissions', {}) %}
+            {% set _member_permissions = _member_permissions_raw if _member_permissions_raw is mapping else {} %}
+
+            {% set _member_user_id = _member.get('user_id', _member.get('userId', _member_user.get('id', ''))) %}
+            {% set _member_display_name = _member_user.get('display_name', _member_user.get('displayName', _member.get('display_name', _member.get('displayName', 'Unbekannter Benutzer')))) %}
+            {% set _member_email = _member_user.get('email', _member.get('email', '')) %}
+            {% set _member_role = _member.get('role', 'viewer') %}
+            {% set _member_status = _member.get('status', 'active') %}
+
+            {% set _member_can_view = true if _member.get('can_view', _member_permissions.get('view', false)) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+            {% set _member_can_edit = true if _member.get('can_edit', _member_permissions.get('edit', false)) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+            {% set _member_can_manage = true if _member.get('can_manage', _member_permissions.get('manage', false)) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+            {% set _member_can_delete = true if _member.get('can_delete', _member_permissions.get('delete', false)) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+            {% set _member_can_embed = true if _member.get('can_embed', _member_permissions.get('embed', false)) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+            <article
+              class="vp-project-team-row"
+              data-project-team-member
+              data-user-id="{{ _member_user_id|e }}"
+              data-role="{{ _member_role|e }}"
+              data-status="{{ _member_status|e }}"
+            >
+              <div class="vp-project-team-row__identity">
+                <div class="vp-project-avatar" aria-hidden="true">
+                  {{ (_member_display_name|string)[:1]|upper }}
+                </div>
+
+                <div>
+                  <h4 class="vp-project-team-row__name">
+                    {{ _member_display_name }}
+                  </h4>
+
+                  <p class="vp-project-team-row__meta">
+                    {% if _member_email %}
+                      {{ _member_email }}
+                    {% else %}
+                      User-ID: {{ _member_user_id }}
+                    {% endif %}
+                  </p>
+                </div>
+              </div>
+
+              <div class="vp-project-team-row__role">
+                <label class="vp-project-sr-only" for="projectMemberRole{{ _member_user_id }}">
+                  Rolle für {{ _member_display_name }}
+                </label>
+
+                <select
+                  id="projectMemberRole{{ _member_user_id }}"
+                  class="vp-project-select vp-project-select--compact"
+                  data-project-team-member-role
+                  data-user-id="{{ _member_user_id|e }}"
+                  {% if not _team_form_enabled or _member_role == 'owner' %}disabled{% endif %}
+                >
+                  <option value="viewer" {% if _member_role == 'viewer' %}selected{% endif %}>Viewer</option>
+                  <option value="editor" {% if _member_role == 'editor' %}selected{% endif %}>Editor</option>
+                  <option value="admin" {% if _member_role == 'admin' %}selected{% endif %}>Admin</option>
+                  {% if _member_role == 'owner' %}
+                    <option value="owner" selected>Owner</option>
+                  {% endif %}
+                </select>
+              </div>
+
+              <div class="vp-project-team-row__permissions" aria-label="Effektive Rechte">
+                {% if _member_can_view %}
+                  <span class="vp-project-permission-chip">Ansehen</span>
+                {% endif %}
+                {% if _member_can_edit %}
+                  <span class="vp-project-permission-chip">Bearbeiten</span>
+                {% endif %}
+                {% if _member_can_manage %}
+                  <span class="vp-project-permission-chip">Verwalten</span>
+                {% endif %}
+                {% if _member_can_delete %}
+                  <span class="vp-project-permission-chip">Löschen</span>
+                {% endif %}
+                {% if _member_can_embed %}
+                  <span class="vp-project-permission-chip">Einbetten</span>
+                {% endif %}
+              </div>
+
+              <div class="vp-project-team-row__actions">
+                <button
+                  type="button"
+                  class="vp-project-btn vp-project-btn--ghost"
+                  data-project-team-member-save
+                  data-user-id="{{ _member_user_id|e }}"
+                  {% if not _team_form_enabled or _member_role == 'owner' %}disabled{% endif %}
+                >
+                  Rolle speichern
+                </button>
+
+                <button
+                  type="button"
+                  class="vp-project-btn vp-project-btn--danger"
+                  data-project-team-member-remove
+                  data-user-id="{{ _member_user_id|e }}"
+                  {% if not _team_form_enabled or _member_role == 'owner' %}disabled{% endif %}
+                >
+                  Entfernen
+                </button>
+              </div>
+            </article>
+          {% endfor %}
+        {% else %}
+          <div class="vp-project-empty" data-project-team-members-empty>
+            <p>
+              Noch keine zusätzlichen Mitglieder geladen.
+            </p>
+            <p class="vp-project-help">
+              Der Owner wird serverseitig als Projektmitglied geführt. Die Liste kann über „Aktualisieren“ geladen werden.
+            </p>
+          </div>
+        {% endif %}
+      </div>
+    </section>
+
+    <section
+      class="vp-project-team-invitations"
+      aria-labelledby="projectInvitationsTitle"
+      data-project-team-invitations-section
+    >
+      <div class="vp-project-section-header">
+        <div>
+          <h3 id="projectInvitationsTitle" class="vp-project-subtitle">
+            Ausstehende Einladungen
+          </h3>
+
+          <p class="vp-project-help">
+            Einladungen bleiben ausstehend, bis der eingeladene registrierte Account sie annimmt.
+          </p>
+        </div>
+      </div>
+
+      <div
+        class="vp-project-team-list vp-project-team-list--invitations"
+        data-project-team-invitations
+        aria-live="polite"
+      >
+        {% if _team_invitations|length > 0 %}
+          {% for invitation in _team_invitations %}
+            {% set _inv = invitation if invitation is mapping else {} %}
+            {% set _inv_id = _inv.get('public_id', _inv.get('id', _inv.get('invitation_id', _inv.get('invitationId', '')))) %}
+            {% set _inv_email = _inv.get('email', '') %}
+            {% set _inv_role = _inv.get('role', 'viewer') %}
+            {% set _inv_status = _inv.get('status', 'pending') %}
+            {% set _inv_expires_at = _inv.get('expires_at', _inv.get('expiresAt', '')) %}
+
+            <article
+              class="vp-project-team-row vp-project-team-row--invitation"
+              data-project-team-invitation
+              data-invitation-id="{{ _inv_id|e }}"
+              data-role="{{ _inv_role|e }}"
+              data-status="{{ _inv_status|e }}"
+            >
+              <div class="vp-project-team-row__identity">
+                <div class="vp-project-avatar vp-project-avatar--pending" aria-hidden="true">
+                  @
+                </div>
+
+                <div>
+                  <h4 class="vp-project-team-row__name">
+                    {{ _inv_email if _inv_email else 'Ausstehende Einladung' }}
+                  </h4>
+
+                  <p class="vp-project-team-row__meta">
+                    Status: {{ _inv_status }}
+                    {% if _inv_expires_at %}
+                      · gültig bis {{ _inv_expires_at }}
+                    {% endif %}
+                  </p>
+                </div>
+              </div>
+
+              <div class="vp-project-team-row__role">
+                <span class="vp-project-role-chip">
+                  {{ _inv_role }}
+                </span>
+              </div>
+
+              <div class="vp-project-team-row__permissions">
+                <span class="vp-project-permission-chip vp-project-permission-chip--pending">
+                  wartet auf Annahme
+                </span>
+              </div>
+
+              <div class="vp-project-team-row__actions">
+                <button
+                  type="button"
+                  class="vp-project-btn vp-project-btn--danger"
+                  data-project-team-invitation-revoke
+                  data-invitation-id="{{ _inv_id|e }}"
+                  {% if not _team_form_enabled %}disabled{% endif %}
+                >
+                  Widerrufen
+                </button>
+              </div>
+            </article>
+          {% endfor %}
+        {% else %}
+          <div class="vp-project-empty" data-project-team-invitations-empty>
+            <p>
+              Keine ausstehenden Einladungen.
+            </p>
+          </div>
+        {% endif %}
+      </div>
+    </section>
+  {% endif %}
+
+
+
+  <script type="application/json" data-project-team-initial-json>
+    {
+      "project_public_id": {{ _team_project_public_id|tojson }},
+      "project_id": {{ _team_project_id|tojson }},
+      "can_manage": {{ _team_can_manage|tojson }},
+      "can_edit": {{ _team_can_edit|tojson }},
+      "is_new": {{ _team_is_new|tojson }},
+      "demo_mode": {{ _team_demo_mode|tojson }},
+      "members_url": {{ _members_path|tojson }},
+      "invitations_url": {{ _invitations_path|tojson }},
+      "members": {{ _team_members|tojson }},
+      "invitations": {{ _team_invitations|tojson }},
+      "current_user": {{ _team_current_user|tojson }}
+    }
+  </script>
+
+  <noscript>
+    <p class="vp-project-help">
+      JavaScript ist erforderlich, um Einladungen, Rollenänderungen und Mitgliederentfernung direkt aus diesem Formular zu verwalten.
+    </p>
+  </noscript>
+</section>

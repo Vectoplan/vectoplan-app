@@ -4,14 +4,37 @@ VECTOPLAN project service.
 
 Zweck:
 - Zentrale Projektverwaltungslogik für vectoplan-app.
-- Nutzt die modularen Models ohne Alt-Kompatibilitäts-Mapping im DB-Layer.
-- Erstellt Projekte inklusive Conversation, Owner-Membership und Embed-Policy.
-- Verwaltet Metadaten, Adresse, Koordinaten, Sichtbarkeit, Soft Delete,
-  Besitzübertragung, Service-Links und zentrale Version-Links.
+- Erstellt und aktualisiert App-Projekte.
+- Verwaltet Projekt-Stammdaten, einfache Adressbox, Sichtbarkeit, Soft Delete,
+  Besitzübertragung, Service-Links, zentrale Version-Links und Chunk-Referenzen.
 - Verknüpft App-Projekte serverseitig mit vectoplan-chunk-Projekten.
+- Bleibt kompatibel mit dem aktuellen Dev-User id=1.
+- Unterstützt den vorbereiteten Auth-/Demo-Kontext.
+- Erzeugt KEINE echten Benutzeraccounts.
+
+Aktueller Projektformular-Zielzustand:
+- Sichtbar im UI:
+    name
+    description
+    address_text
+    visibility = private | unlisted | public
+- Nicht mehr sichtbar im normalen Projektformular:
+    street
+    house_number
+    postal_code
+    city
+    region
+    country
+    latitude
+    longitude
+    coordinate_srid
+    Systemreferenzen
+- Diese technischen/strukturierten Felder bleiben im Model erhalten, damit der
+  spätere Geocoder sie setzen kann.
 
 Wichtig:
-- vectoplan-app verwaltet Projekt-Metadaten, Rechte und Workspace-Shell.
+- vectoplan-app verwaltet Projekt-Metadaten, Rechte, Sichtbarkeit,
+  Veröffentlichungen und Workspace-Shell.
 - vectoplan-chunk verwaltet Chunk-Projekt, Universe, WorldInstance, Snapshots,
   Command Logs und Chunk Events.
 - Externe Microservices werden in vectoplan-app nur referenziert.
@@ -22,7 +45,7 @@ Wichtig:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 try:
     from flask import current_app, has_app_context
@@ -32,49 +55,191 @@ except Exception:  # pragma: no cover
     def has_app_context() -> bool:  # type: ignore
         return False
 
+
 try:
     from sqlalchemy import or_
 except Exception:  # pragma: no cover
     or_ = None  # type: ignore
 
-from extensions import db
-from models import (
-    AppUser,
-    Conversation,
-    Project,
-    ProjectAuditEvent,
-    ProjectEmbedPolicy,
-    ProjectMembership,
-    ProjectServiceLink,
-    ProjectVersion,
-    build_embed_policy as model_build_embed_policy,
-    build_membership as model_build_membership,
-    create_project_version as model_create_project_version,
-    ensure_owner_membership as model_ensure_owner_membership,
-    get_project_membership as model_get_project_membership,
-    normalize_resource_type as model_normalize_resource_type,
-    normalize_service as model_normalize_service,
-    normalize_version_kind as model_normalize_version_kind,
-    normalize_version_status as model_normalize_version_status,
-    record_project_audit_event as model_record_project_audit_event,
-    safe_bool as model_safe_bool,
-    safe_dict as model_safe_dict,
-    safe_float as model_safe_float,
-    safe_int as model_safe_int,
-    safe_list as model_safe_list,
-    safe_str as model_safe_str,
-    serialize_embed_policy as model_serialize_embed_policy,
-    serialize_membership as model_serialize_membership,
-    serialize_project_version as model_serialize_project_version,
-    serialize_service_link as model_serialize_service_link,
-    utcnow as model_utcnow,
-)
 
-from services.current_user import (
-    ensure_default_user,
-    get_current_user_id_from_g_or_default,
-    get_default_user_id,
-)
+try:
+    from extensions import db
+except Exception as exc:  # pragma: no cover
+    raise RuntimeError("project_service requires extensions.db") from exc
+
+
+try:
+    from models import (
+        AppUser,
+        Conversation,
+        Project,
+        ProjectAuditEvent,
+        ProjectEmbedPolicy,
+        ProjectMembership,
+        ProjectServiceLink,
+        ProjectVersion,
+        build_embed_policy as model_build_embed_policy,
+        build_membership as model_build_membership,
+        create_project_version as model_create_project_version,
+        ensure_owner_membership as model_ensure_owner_membership,
+        get_project_membership as model_get_project_membership,
+        normalize_resource_type as model_normalize_resource_type,
+        normalize_service as model_normalize_service,
+        normalize_version_kind as model_normalize_version_kind,
+        normalize_version_status as model_normalize_version_status,
+        record_project_audit_event as model_record_project_audit_event,
+        safe_bool as model_safe_bool,
+        safe_dict as model_safe_dict,
+        safe_float as model_safe_float,
+        safe_int as model_safe_int,
+        safe_list as model_safe_list,
+        safe_str as model_safe_str,
+        serialize_embed_policy as model_serialize_embed_policy,
+        serialize_membership as model_serialize_membership,
+        serialize_project_version as model_serialize_project_version,
+        serialize_service_link as model_serialize_service_link,
+        utcnow as model_utcnow,
+    )
+except Exception as exc:  # pragma: no cover
+    raise RuntimeError("project_service requires modular models package") from exc
+
+
+try:
+    from services.current_user import (
+        ensure_default_user,
+        get_current_user_context,
+        get_current_user_id_from_g_or_default,
+        get_current_user_id_optional,
+        get_default_user_id,
+        require_persistent_current_user,
+        serialize_current_user,
+    )
+except Exception:  # pragma: no cover
+    ensure_default_user = None  # type: ignore
+    serialize_current_user = None  # type: ignore
+
+    def get_current_user_id_from_g_or_default() -> int:  # type: ignore
+        return 1
+
+    def get_current_user_id_optional() -> Optional[int]:  # type: ignore
+        return 1
+
+    def get_default_user_id() -> int:  # type: ignore
+        return 1
+
+    def get_current_user_context(*args: Any, **kwargs: Any) -> Any:  # type: ignore
+        return {
+            "user_id": 1,
+            "id": 1,
+            "authenticated": True,
+            "demo_mode": False,
+            "persistent": True,
+            "source": "fallback",
+        }
+
+    def require_persistent_current_user() -> Any:  # type: ignore
+        return get_current_user_context()
+
+
+try:
+    from services.project_permissions import (
+        PERMISSION_DELETE,
+        PERMISSION_EDIT,
+        PERMISSION_EMBED,
+        PERMISSION_MANAGE,
+        PERMISSION_TRANSFER,
+        PERMISSION_VIEW,
+        PermissionDenied,
+        can_manage_project,
+        can_view_project,
+        get_project_permission_result as permissions_get_project_permission_result,
+        grant_project_role as permissions_grant_project_role,
+        normalize_role as permissions_normalize_role,
+        require_project_permission as permissions_require_project_permission,
+        revoke_project_membership as permissions_revoke_project_membership,
+        serialize_membership as permissions_serialize_membership,
+        serialize_project_permissions as permissions_serialize_project_permissions,
+        transfer_project_ownership as permissions_transfer_project_ownership,
+    )
+except Exception:  # pragma: no cover
+    PERMISSION_VIEW = "view"
+    PERMISSION_EDIT = "edit"
+    PERMISSION_MANAGE = "manage"
+    PERMISSION_DELETE = "delete"
+    PERMISSION_TRANSFER = "transfer"
+    PERMISSION_EMBED = "embed"
+
+    class PermissionDenied(Exception):  # type: ignore
+        def __init__(
+            self,
+            message: str = "missing project permission",
+            *,
+            code: str = "project_permission_denied",
+            status_code: int = 403,
+            permission: str = "",
+            project_id: Any = None,
+            user_id: Any = None,
+        ) -> None:
+            super().__init__(message)
+            self.message = message
+            self.code = code
+            self.status_code = status_code
+            self.permission = permission
+            self.project_id = project_id
+            self.user_id = user_id
+
+        def to_dict(self) -> Dict[str, Any]:
+            return {
+                "ok": False,
+                "code": self.code,
+                "error": self.message,
+                "message": self.message,
+                "permission": self.permission,
+                "project_id": self.project_id,
+                "user_id": self.user_id,
+                "status_code": self.status_code,
+            }
+
+    permissions_get_project_permission_result = None  # type: ignore
+    permissions_require_project_permission = None  # type: ignore
+    permissions_serialize_project_permissions = None  # type: ignore
+    permissions_serialize_membership = None  # type: ignore
+    permissions_grant_project_role = None  # type: ignore
+    permissions_revoke_project_membership = None  # type: ignore
+    permissions_transfer_project_ownership = None  # type: ignore
+    permissions_normalize_role = None  # type: ignore
+    can_view_project = None  # type: ignore
+    can_manage_project = None  # type: ignore
+
+
+try:
+    from services.project_publication_service import (
+        VISIBILITY_PRIVATE as PUB_VISIBILITY_PRIVATE,
+        VISIBILITY_PUBLIC as PUB_VISIBILITY_PUBLIC,
+        VISIBILITY_UNLISTED as PUB_VISIBILITY_UNLISTED,
+        get_project_publication,
+        normalize_publication_visibility,
+        set_project_visibility as publication_set_project_visibility,
+        update_project_publication,
+    )
+except Exception:  # pragma: no cover
+    PUB_VISIBILITY_PRIVATE = "private"
+    PUB_VISIBILITY_PUBLIC = "public"
+    PUB_VISIBILITY_UNLISTED = "unlisted"
+    get_project_publication = None  # type: ignore
+    update_project_publication = None  # type: ignore
+    publication_set_project_visibility = None  # type: ignore
+
+    def normalize_publication_visibility(value: Any, default: str = "private") -> str:  # type: ignore
+        text = str(value or default).strip().lower().replace("-", "_")
+        if text in {"private", "privat", "shared"}:
+            return "private"
+        if text in {"unlisted", "not_listed", "nicht_gelistet", "link"}:
+            return "unlisted"
+        if text in {"public", "öffentlich", "oeffentlich", "open"}:
+            return "public"
+        return default
+
 
 try:
     from services.chunk_client import (
@@ -123,6 +288,12 @@ DEFAULT_PROJECT_NAME = "Neues Projekt"
 DEFAULT_ADDRESS_COUNTRY = "DE"
 DEFAULT_COORDINATE_SRID = "EPSG:4326"
 
+GEOCODE_STATUS_NONE = "none"
+GEOCODE_STATUS_PENDING = "pending"
+GEOCODE_STATUS_STALE = "stale"
+GEOCODE_STATUS_RESOLVED = "resolved"
+GEOCODE_STATUS_FAILED = "failed"
+
 SERVICE_CHUNK = "chunk"
 SERVICE_EDITOR = "editor3d"
 SERVICE_OPENLAYER = "openlayer"
@@ -143,13 +314,6 @@ ROLE_OWNER = "owner"
 ROLE_ADMIN = "admin"
 ROLE_EDITOR = "editor"
 ROLE_VIEWER = "viewer"
-
-PERMISSION_VIEW = "view"
-PERMISSION_EDIT = "edit"
-PERMISSION_MANAGE = "manage"
-PERMISSION_DELETE = "delete"
-PERMISSION_TRANSFER = "transfer"
-PERMISSION_EMBED = "embed"
 
 CHUNK_STATUS_DISABLED = "disabled"
 CHUNK_STATUS_PENDING = "pending"
@@ -174,6 +338,7 @@ class ProjectOperationResult:
         body = dict(self.payload or {})
         body.setdefault("ok", bool(self.ok))
         body.setdefault("code", self.code)
+        body.setdefault("status_code", self.status_code)
 
         if self.project is not None and "project" not in body:
             try:
@@ -183,6 +348,7 @@ class ProjectOperationResult:
 
         if self.error:
             body["error"] = self.error
+            body.setdefault("message", self.error)
 
         return body
 
@@ -195,6 +361,11 @@ class ProjectPermissionResult:
     can_delete: bool = False
     can_transfer: bool = False
     can_embed: bool = False
+    can_view_settings: bool = False
+    can_manage_settings: bool = False
+    can_view_team: bool = False
+    can_manage_team: bool = False
+    can_view_admin: bool = False
     role: str = ROLE_VIEWER
     source: str = "none"
 
@@ -207,6 +378,11 @@ class ProjectPermissionResult:
             PERMISSION_DELETE: bool(self.can_delete),
             PERMISSION_TRANSFER: bool(self.can_transfer),
             PERMISSION_EMBED: bool(self.can_embed),
+            "view_settings": bool(self.can_view_settings),
+            "manage_settings": bool(self.can_manage_settings),
+            "view_team": bool(self.can_view_team),
+            "manage_team": bool(self.can_manage_team),
+            "view_admin": bool(self.can_view_admin),
         }
 
     def can(self, permission: str) -> bool:
@@ -223,30 +399,11 @@ class ProjectPermissionResult:
             "can_delete": self.can_delete,
             "can_transfer": self.can_transfer,
             "can_embed": self.can_embed,
-        }
-
-
-class PermissionDenied(Exception):
-    def __init__(
-        self,
-        message: str = "missing project permission",
-        *,
-        code: str = "project_permission_denied",
-        status_code: int = 403,
-        permission: str = "",
-    ) -> None:
-        super().__init__(message)
-        self.message = message
-        self.code = code
-        self.status_code = status_code
-        self.permission = permission
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "ok": False,
-            "code": self.code,
-            "error": self.message,
-            "permission": self.permission,
+            "can_view_settings": self.can_view_settings,
+            "can_manage_settings": self.can_manage_settings,
+            "can_view_team": self.can_view_team,
+            "can_manage_team": self.can_manage_team,
+            "can_view_admin": self.can_view_admin,
         }
 
 
@@ -254,46 +411,100 @@ class PermissionDenied(Exception):
 # Safe helpers
 # ─────────────────────────────────────────────────────────────
 
-def _utcnow():
+def _utcnow() -> Any:
     try:
         return model_utcnow()
     except Exception:
         from datetime import datetime
-
         return datetime.utcnow()
 
 
 def _safe_str(value: Any, default: str = "", max_len: int = 240) -> str:
-    return model_safe_str(value, default, max_len)
+    try:
+        return model_safe_str(value, default, max_len)
+    except Exception:
+        try:
+            text = str(value if value is not None else default).strip()
+            if not text:
+                text = default
+            return text[:max_len] if max_len > 0 else text
+        except Exception:
+            return default
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return model_safe_int(value, default)
     except Exception:
-        return default
+        try:
+            if value is None or isinstance(value, bool):
+                return default
+            return int(str(value).strip())
+        except Exception:
+            return default
 
 
 def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     try:
         return model_safe_float(value, default)
     except Exception:
-        return default
+        try:
+            if value is None or value == "":
+                return default
+            return float(str(value).strip().replace(",", "."))
+        except Exception:
+            return default
 
 
 def _safe_bool(value: Any, default: bool = False) -> bool:
     try:
         return model_safe_bool(value, default)
     except Exception:
-        return default
+        try:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            text = str(value if value is not None else "").strip().lower()
+            if text in {"1", "true", "yes", "y", "on", "ja"}:
+                return True
+            if text in {"0", "false", "no", "n", "off", "nein"}:
+                return False
+            return default
+        except Exception:
+            return default
 
 
 def _safe_dict(value: Any) -> Dict[str, Any]:
-    return model_safe_dict(value)
+    try:
+        return model_safe_dict(value)
+    except Exception:
+        try:
+            if isinstance(value, dict):
+                return dict(value)
+            if isinstance(value, Mapping):
+                return dict(value)
+            if hasattr(value, "to_dict") and callable(value.to_dict):
+                return dict(value.to_dict())
+            return {}
+        except Exception:
+            return {}
 
 
 def _safe_list(value: Any) -> List[Any]:
-    return model_safe_list(value)
+    try:
+        return model_safe_list(value)
+    except Exception:
+        try:
+            if isinstance(value, list):
+                return value
+            if isinstance(value, tuple):
+                return list(value)
+            if isinstance(value, set):
+                return list(value)
+            return []
+        except Exception:
+            return []
 
 
 def _iso(value: Any) -> Optional[str]:
@@ -301,7 +512,7 @@ def _iso(value: Any) -> Optional[str]:
         if value is None:
             return None
         if hasattr(value, "isoformat"):
-            return value.isoformat() + "Z"
+            return value.isoformat()
         return str(value)
     except Exception:
         return None
@@ -310,7 +521,9 @@ def _iso(value: Any) -> Optional[str]:
 def _config_value(name: str, default: Any = None) -> Any:
     try:
         if has_app_context() and current_app is not None:
-            return current_app.config.get(name, default)
+            value = current_app.config.get(name, default)
+            if value is not None:
+                return value
     except Exception:
         pass
 
@@ -355,20 +568,31 @@ def _normalize_slug(value: Any, default: str = "item", max_len: int = 80) -> str
 
 def _normalize_visibility(value: Any, default: str = PROJECT_VISIBILITY_PRIVATE) -> str:
     try:
-        text = _normalize_slug(value, default, 40)
-
-        if text in {
-            PROJECT_VISIBILITY_PRIVATE,
-            PROJECT_VISIBILITY_PUBLIC,
-            PROJECT_VISIBILITY_UNLISTED,
-            PROJECT_VISIBILITY_SHARED,
-        }:
-            return text
+        normalized = normalize_publication_visibility(value, default)
+        if normalized in {PROJECT_VISIBILITY_PRIVATE, PROJECT_VISIBILITY_UNLISTED, PROJECT_VISIBILITY_PUBLIC}:
+            return normalized
 
         return default
-
     except Exception:
-        return default
+        try:
+            text = _normalize_slug(value, default, 40)
+            aliases = {
+                "private": PROJECT_VISIBILITY_PRIVATE,
+                "privat": PROJECT_VISIBILITY_PRIVATE,
+                "shared": PROJECT_VISIBILITY_PRIVATE,
+                "geteilt": PROJECT_VISIBILITY_PRIVATE,
+                "unlisted": PROJECT_VISIBILITY_UNLISTED,
+                "not_listed": PROJECT_VISIBILITY_UNLISTED,
+                "nicht_gelistet": PROJECT_VISIBILITY_UNLISTED,
+                "link": PROJECT_VISIBILITY_UNLISTED,
+                "public": PROJECT_VISIBILITY_PUBLIC,
+                "öffentlich": PROJECT_VISIBILITY_PUBLIC,
+                "oeffentlich": PROJECT_VISIBILITY_PUBLIC,
+                "open": PROJECT_VISIBILITY_PUBLIC,
+            }
+            return aliases.get(text, default)
+        except Exception:
+            return default
 
 
 def _normalize_status(value: Any, default: str = PROJECT_STATUS_ACTIVE) -> str:
@@ -430,6 +654,27 @@ def _log_exception(message: str, exc: Optional[Exception] = None) -> None:
         pass
 
 
+def _db_add(obj: Any) -> None:
+    try:
+        db.session.add(obj)
+    except Exception:
+        pass
+
+
+def _db_flush_or_commit(commit: bool = True) -> None:
+    if commit:
+        db.session.commit()
+    else:
+        db.session.flush()
+
+
+def _db_rollback_safely() -> None:
+    try:
+        db.session.rollback()
+    except Exception:
+        pass
+
+
 def _project_public_id(project: Any) -> str:
     try:
         return _safe_str(getattr(project, "public_id", None), "", 160) or _safe_str(getattr(project, "id", None), "", 160)
@@ -459,12 +704,239 @@ def _merge_project_metadata(project: Any, values: Dict[str, Any]) -> Dict[str, A
     return metadata
 
 
+def _payload_has(source: Mapping[str, Any], *keys: str) -> bool:
+    try:
+        return any(key in source for key in keys)
+    except Exception:
+        return False
+
+
+# ─────────────────────────────────────────────────────────────
+# Auth / current user helpers
+# ─────────────────────────────────────────────────────────────
+
+def get_current_user_id(user_id: Optional[int] = None) -> int:
+    """
+    Legacy-kompatibler Resolver.
+
+    Für neue Demo-/Auth-sensible Logik besser:
+    - get_actor_user_id_optional()
+    - require_persistent_actor()
+    """
+    try:
+        parsed = _safe_int(user_id, 0)
+        if parsed > 0:
+            return parsed
+
+        optional = get_current_user_id_optional()
+        if optional:
+            return _safe_int(optional, get_default_user_id())
+
+        return _safe_int(get_current_user_id_from_g_or_default(), get_default_user_id())
+
+    except Exception:
+        return 1
+
+
+def get_actor_context(user_id: Optional[int] = None) -> Dict[str, Any]:
+    if user_id is not None:
+        uid = _safe_int(user_id, 0) or None
+        return {
+            "user_id": uid,
+            "id": uid,
+            "authenticated": bool(uid),
+            "demo_mode": False,
+            "persistent": bool(uid),
+            "source": "explicit_user_id",
+        }
+
+    try:
+        context = get_current_user_context(ensure=False)
+        data = _safe_dict(context)
+        if not data and hasattr(context, "to_dict"):
+            data = _safe_dict(context.to_dict())
+        return data
+    except Exception:
+        uid = get_current_user_id()
+        return {
+            "user_id": uid,
+            "id": uid,
+            "authenticated": bool(uid),
+            "demo_mode": False,
+            "persistent": bool(uid),
+            "source": "fallback",
+        }
+
+
+def get_actor_user_id_optional(user_id: Optional[int] = None) -> Optional[int]:
+    try:
+        if user_id is not None:
+            parsed = _safe_int(user_id, 0)
+            return parsed if parsed > 0 else None
+
+        context = get_actor_context()
+        parsed = _safe_int(context.get("user_id") or context.get("id"), 0)
+        return parsed if parsed > 0 else None
+    except Exception:
+        return None
+
+
+def actor_is_demo(user_id: Optional[int] = None) -> bool:
+    try:
+        if user_id is not None:
+            return False
+        context = get_actor_context()
+        return _safe_bool(context.get("demo_mode") or context.get("is_demo"), False)
+    except Exception:
+        return False
+
+
+def actor_can_persist(user_id: Optional[int] = None) -> bool:
+    try:
+        if user_id is not None:
+            return True
+        context = get_actor_context()
+        return _safe_bool(
+            context.get("persistent"),
+            default=bool(get_actor_user_id_optional()) and not actor_is_demo(),
+        )
+    except Exception:
+        return False
+
+
+def require_persistent_actor(user_id: Optional[int] = None) -> int:
+    """
+    Erzwingt einen persistenten lokalen User-Kontext.
+
+    Demo-Modus:
+      abgelehnt.
+
+    Externer Auth-User ohne lokalen AppUser-Link:
+      abgelehnt.
+
+    Aktueller Dev-Modus:
+      user_id=1 bleibt erlaubt.
+    """
+    try:
+        if user_id is not None:
+            parsed = _safe_int(user_id, 0)
+            if parsed > 0:
+                return parsed
+
+        context = get_actor_context()
+
+        if _safe_bool(context.get("demo_mode") or context.get("is_demo"), False):
+            raise PermissionDenied(
+                "Im Demo-Modus können Projekte nicht dauerhaft gespeichert werden.",
+                code="demo_mode_not_allowed",
+                status_code=403,
+                permission=PERMISSION_EDIT,
+            )
+
+        if not _safe_bool(context.get("authenticated") or context.get("is_authenticated"), bool(context.get("user_id"))):
+            raise PermissionDenied(
+                "Für diese Projektaktion ist Login erforderlich.",
+                code="authentication_required",
+                status_code=401,
+                permission=PERMISSION_EDIT,
+            )
+
+        if not _safe_bool(context.get("persistent"), bool(context.get("user_id"))):
+            raise PermissionDenied(
+                "Für diese Projektaktion ist eine lokale AppUser-Verknüpfung erforderlich.",
+                code="persistent_user_required",
+                status_code=403,
+                permission=PERMISSION_EDIT,
+            )
+
+        uid = _safe_int(context.get("user_id") or context.get("id"), 0)
+        if uid <= 0:
+            raise PermissionDenied(
+                "Für diese Projektaktion ist ein lokaler AppUser erforderlich.",
+                code="local_user_link_required",
+                status_code=403,
+                permission=PERMISSION_EDIT,
+            )
+
+        return uid
+
+    except PermissionDenied:
+        raise
+    except Exception as exc:
+        raise PermissionDenied(
+            str(exc),
+            code="current_user_unavailable",
+            status_code=403,
+            permission=PERMISSION_EDIT,
+        )
+
+
+def ensure_project_user() -> Any:
+    """
+    Stellt den aktuellen Dev-Placeholder-User sicher.
+
+    Keine echte Userregistrierung.
+    Im Demo-Modus wird kein User erzeugt.
+    """
+    if actor_is_demo():
+        return None
+
+    if not actor_can_persist():
+        return None
+
+    try:
+        if ensure_default_user is not None:
+            return ensure_default_user()
+    except Exception:
+        return None
+
+    return None
+
+
 # ─────────────────────────────────────────────────────────────
 # Permission helpers
 # ─────────────────────────────────────────────────────────────
 
+def normalize_role(value: Any, default: str = ROLE_VIEWER) -> str:
+    try:
+        if permissions_normalize_role is not None:
+            return permissions_normalize_role(value, default)
+    except Exception:
+        pass
+
+    clean = _normalize_slug(value, default, 40)
+    return clean if clean in {ROLE_OWNER, ROLE_ADMIN, ROLE_EDITOR, ROLE_VIEWER} else default
+
+
+def _normalize_permission(value: Any, default: str = PERMISSION_VIEW) -> str:
+    clean = _normalize_slug(value, default, 40)
+    aliases = {
+        "read": PERMISSION_VIEW,
+        "write": PERMISSION_EDIT,
+        "admin": PERMISSION_MANAGE,
+        "remove": PERMISSION_DELETE,
+        "iframe": PERMISSION_EMBED,
+        "settings": "manage_settings",
+        "team": "manage_team",
+    }
+    clean = aliases.get(clean, clean)
+    return clean if clean in {
+        PERMISSION_VIEW,
+        PERMISSION_EDIT,
+        PERMISSION_MANAGE,
+        PERMISSION_DELETE,
+        PERMISSION_TRANSFER,
+        PERMISSION_EMBED,
+        "view_settings",
+        "manage_settings",
+        "view_team",
+        "manage_team",
+        "view_admin",
+    } else default
+
+
 def _role_permissions(role: str) -> Dict[str, bool]:
-    clean = _normalize_slug(role, ROLE_VIEWER, 40)
+    clean = normalize_role(role)
 
     if clean == ROLE_OWNER:
         return {
@@ -506,67 +978,40 @@ def _role_permissions(role: str) -> Dict[str, bool]:
     }
 
 
-def normalize_role(value: Any, default: str = ROLE_VIEWER) -> str:
-    clean = _normalize_slug(value, default, 40)
-    return clean if clean in {ROLE_OWNER, ROLE_ADMIN, ROLE_EDITOR, ROLE_VIEWER} else default
-
-
-def _normalize_permission(value: Any, default: str = PERMISSION_VIEW) -> str:
-    clean = _normalize_slug(value, default, 40)
-    aliases = {
-        "read": PERMISSION_VIEW,
-        "write": PERMISSION_EDIT,
-        "admin": PERMISSION_MANAGE,
-        "remove": PERMISSION_DELETE,
-        "iframe": PERMISSION_EMBED,
-    }
-    clean = aliases.get(clean, clean)
-    return clean if clean in {
-        PERMISSION_VIEW,
-        PERMISSION_EDIT,
-        PERMISSION_MANAGE,
-        PERMISSION_DELETE,
-        PERMISSION_TRANSFER,
-        PERMISSION_EMBED,
-    } else default
-
-
-def get_current_user_id(user_id: Optional[int] = None) -> int:
-    try:
-        parsed = _safe_int(user_id, 0)
-        if parsed > 0:
-            return parsed
-
-        return _safe_int(get_current_user_id_from_g_or_default(), get_default_user_id())
-
-    except Exception:
-        return 1
-
-
-def ensure_project_user() -> Any:
-    return ensure_default_user()
-
-
-def _get_membership(project: Any, user_id: int) -> Optional[Any]:
-    try:
-        project_id = _safe_int(getattr(project, "id", None), 0)
-        uid = _safe_int(user_id, 0)
-
-        if not project_id or not uid:
-            return None
-
-        return ProjectMembership.query.filter_by(project_id=project_id, user_id=uid).one_or_none()
-
-    except Exception:
-        return None
-
-
 def get_project_permission_result(
     project: Any,
     *,
     user_id: Optional[int] = None,
     allow_public_view: bool = True,
 ) -> ProjectPermissionResult:
+    try:
+        if permissions_get_project_permission_result is not None:
+            result = permissions_get_project_permission_result(
+                project,
+                user_id=user_id,
+                allow_public_view=allow_public_view,
+            )
+            data = result.to_dict() if hasattr(result, "to_dict") else _safe_dict(result)
+            permissions = _safe_dict(data.get("permissions"))
+
+            return ProjectPermissionResult(
+                can_view=_safe_bool(data.get("can_view", permissions.get(PERMISSION_VIEW)), False),
+                can_edit=_safe_bool(data.get("can_edit", permissions.get(PERMISSION_EDIT)), False),
+                can_manage=_safe_bool(data.get("can_manage", permissions.get(PERMISSION_MANAGE)), False),
+                can_delete=_safe_bool(data.get("can_delete", permissions.get(PERMISSION_DELETE)), False),
+                can_transfer=_safe_bool(data.get("can_transfer", permissions.get(PERMISSION_TRANSFER)), False),
+                can_embed=_safe_bool(data.get("can_embed", permissions.get(PERMISSION_EMBED)), False),
+                can_view_settings=_safe_bool(data.get("can_view_settings", permissions.get("view_settings")), False),
+                can_manage_settings=_safe_bool(data.get("can_manage_settings", permissions.get("manage_settings")), False),
+                can_view_team=_safe_bool(data.get("can_view_team", permissions.get("view_team")), False),
+                can_manage_team=_safe_bool(data.get("can_manage_team", permissions.get("manage_team")), False),
+                can_view_admin=_safe_bool(data.get("can_view_admin", permissions.get("view_admin")), False),
+                role=_safe_str(data.get("role"), ROLE_VIEWER, 40),
+                source=_safe_str(data.get("source"), "permissions_service", 80),
+            )
+    except Exception:
+        pass
+
     try:
         if project is None:
             return ProjectPermissionResult()
@@ -583,8 +1028,13 @@ def get_project_permission_result(
                 can_delete=permissions[PERMISSION_DELETE],
                 can_transfer=permissions[PERMISSION_TRANSFER],
                 can_embed=permissions[PERMISSION_EMBED],
+                can_view_settings=True,
+                can_manage_settings=True,
+                can_view_team=True,
+                can_manage_team=True,
+                can_view_admin=True,
                 role=ROLE_OWNER,
-                source="owner",
+                source="owner_fallback",
             )
 
         membership = _get_membership(project, uid)
@@ -597,24 +1047,32 @@ def get_project_permission_result(
 
             if is_active:
                 role = normalize_role(getattr(membership, "role", ROLE_VIEWER))
+                can_manage = bool(getattr(membership, "can_manage", False)) or role in {ROLE_OWNER, ROLE_ADMIN}
                 return ProjectPermissionResult(
                     can_view=bool(getattr(membership, "can_view", False)),
                     can_edit=bool(getattr(membership, "can_edit", False)),
-                    can_manage=bool(getattr(membership, "can_manage", False)),
+                    can_manage=can_manage,
                     can_delete=bool(getattr(membership, "can_delete", False)),
                     can_transfer=bool(getattr(membership, "can_transfer", False)),
                     can_embed=bool(getattr(membership, "can_embed", False)),
+                    can_view_settings=can_manage,
+                    can_manage_settings=can_manage,
+                    can_view_team=can_manage,
+                    can_manage_team=can_manage,
+                    can_view_admin=can_manage,
                     role=role,
-                    source="membership",
+                    source="membership_fallback",
                 )
 
-        is_public = bool(getattr(project, "is_public", False)) or getattr(project, "visibility", "") == PROJECT_VISIBILITY_PUBLIC
+        visibility = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
+        is_public = bool(getattr(project, "is_public", False)) or visibility == PROJECT_VISIBILITY_PUBLIC
+        is_unlisted = visibility == PROJECT_VISIBILITY_UNLISTED
 
-        if allow_public_view and is_public:
+        if allow_public_view and (is_public or is_unlisted):
             return ProjectPermissionResult(
                 can_view=True,
                 role=ROLE_VIEWER,
-                source="public",
+                source="public_fallback" if is_public else "unlisted_fallback",
             )
 
         return ProjectPermissionResult()
@@ -624,6 +1082,12 @@ def get_project_permission_result(
 
 
 def serialize_project_permissions(project: Any, *, user_id: Optional[int] = None) -> Dict[str, Any]:
+    try:
+        if permissions_serialize_project_permissions is not None:
+            return _safe_dict(permissions_serialize_project_permissions(project, user_id=user_id))
+    except Exception:
+        pass
+
     try:
         result = get_project_permission_result(project, user_id=user_id)
         return result.to_dict()
@@ -639,6 +1103,25 @@ def require_project_permission(
     allow_public_view: bool = False,
 ) -> ProjectPermissionResult:
     clean_permission = _normalize_permission(permission)
+
+    try:
+        if permissions_require_project_permission is not None:
+            permissions_require_project_permission(
+                project,
+                clean_permission,
+                user_id=user_id,
+                allow_public_view=allow_public_view,
+            )
+            return get_project_permission_result(
+                project,
+                user_id=user_id,
+                allow_public_view=allow_public_view,
+            )
+    except PermissionDenied:
+        raise
+    except Exception:
+        pass
+
     result = get_project_permission_result(
         project,
         user_id=user_id,
@@ -649,9 +1132,25 @@ def require_project_permission(
         raise PermissionDenied(
             f"missing project permission: {clean_permission}",
             permission=clean_permission,
+            status_code=403,
+            code="project_permission_denied",
         )
 
     return result
+
+
+def _get_membership(project: Any, user_id: int) -> Optional[Any]:
+    try:
+        project_id = _safe_int(getattr(project, "id", None), 0)
+        uid = _safe_int(user_id, 0)
+
+        if not project_id or not uid:
+            return None
+
+        return ProjectMembership.query.filter_by(project_id=project_id, user_id=uid).one_or_none()
+
+    except Exception:
+        return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -733,6 +1232,225 @@ def build_project_paths(project: Any) -> Dict[str, str]:
             "projectUrl": "/ui/project/new",
             "projectPublicUrl": "/project=new",
         }
+
+
+# ─────────────────────────────────────────────────────────────
+# Address / geocoder helpers
+# ─────────────────────────────────────────────────────────────
+
+def build_address_text_from_parts(project_or_payload: Any) -> str:
+    try:
+        if isinstance(project_or_payload, Mapping):
+            data = _safe_dict(project_or_payload)
+            street = _safe_str(data.get("street") or data.get("address_street"), "", 255)
+            house_number = _safe_str(data.get("house_number") or data.get("address_house_number"), "", 80)
+            postal_code = _safe_str(data.get("postal_code") or data.get("address_postal_code"), "", 40)
+            city = _safe_str(data.get("city") or data.get("address_city"), "", 160)
+            region = _safe_str(data.get("region") or data.get("address_region"), "", 160)
+            country = _safe_str(data.get("country") or data.get("address_country"), "", 160)
+        else:
+            street = _safe_str(getattr(project_or_payload, "street", None), "", 255)
+            house_number = _safe_str(getattr(project_or_payload, "house_number", None), "", 80)
+            postal_code = _safe_str(getattr(project_or_payload, "postal_code", None), "", 40)
+            city = _safe_str(getattr(project_or_payload, "city", None), "", 160)
+            region = _safe_str(getattr(project_or_payload, "region", None), "", 160)
+            country = _safe_str(getattr(project_or_payload, "country", None), "", 160)
+
+        line1 = " ".join(part for part in [street, house_number] if part).strip()
+        line2 = " ".join(part for part in [postal_code, city] if part).strip()
+        parts = [part for part in [line1, line2, region, country] if part]
+        return ", ".join(parts).strip()
+    except Exception:
+        return ""
+
+
+def get_project_address_text(project: Any, *, allow_structured_fallback: bool = True) -> str:
+    try:
+        direct = _safe_str(getattr(project, "address_text", None), "", 2000)
+        if direct:
+            return direct
+
+        if allow_structured_fallback:
+            return build_address_text_from_parts(project)
+
+        return ""
+    except Exception:
+        return ""
+
+
+def _project_has_minimum_definition(project: Any) -> bool:
+    """
+    Neues fachliches Minimum:
+    - Projektname
+    - eine nutzbare Adressbox/address_text
+
+    Legacy-Fallback:
+    - bestehende Projekte mit alten strukturierten Adressfeldern gelten weiterhin
+      als definiert, damit alte Daten nicht unbeabsichtigt zurückfallen.
+    """
+    try:
+        has_name = bool(_safe_str(getattr(project, "name", None), "", 255))
+        has_address_text = bool(_safe_str(getattr(project, "address_text", None), "", 2000))
+
+        if has_name and has_address_text:
+            return True
+
+        legacy_address = build_address_text_from_parts(project)
+        return bool(has_name and legacy_address)
+
+    except Exception:
+        return False
+
+
+def _geocode_status_from_project(project: Any) -> str:
+    try:
+        metadata = _get_project_metadata(project)
+        geocode = _safe_dict(metadata.get("geocode"))
+        return _safe_str(geocode.get("status"), GEOCODE_STATUS_NONE, 40)
+    except Exception:
+        return GEOCODE_STATUS_NONE
+
+
+def _mark_geocode_pending_or_stale(
+    project: Any,
+    *,
+    old_address_text: Optional[str],
+    new_address_text: Optional[str],
+    source: str,
+) -> None:
+    try:
+        old_value = _safe_str(old_address_text, "", 2000)
+        new_value = _safe_str(new_address_text, "", 2000)
+
+        if not new_value:
+            return
+
+        metadata = _get_project_metadata(project)
+        geocode = _safe_dict(metadata.get("geocode"))
+
+        if not old_value:
+            status = GEOCODE_STATUS_PENDING
+        elif old_value != new_value:
+            status = GEOCODE_STATUS_STALE
+        else:
+            status = _safe_str(geocode.get("status"), GEOCODE_STATUS_PENDING, 40)
+
+        geocode.update(
+            {
+                "status": status,
+                "source": source,
+                "address_text": new_value,
+                "updated_at": _iso(_utcnow()),
+                "note": "Geocoder is not connected yet. Structured address and coordinates are intentionally preserved.",
+            }
+        )
+
+        metadata["geocode"] = geocode
+        _set_project_metadata(project, metadata)
+    except Exception:
+        pass
+
+
+def _structured_address_payload_from_geocoder(source: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Extrahiert strukturierte Adress-/Koordinatenfelder nur aus expliziten
+    Geocoder-/Backend-Payloads.
+
+    Dadurch werden die Felder nicht mehr aus dem normalen Projektformular
+    erwartet, bleiben aber für spätere Geocoder-Anbindung nutzbar.
+    """
+    payload: Dict[str, Any] = {}
+    data = _safe_dict(source)
+
+    geocoder = (
+        _safe_dict(data.get("geocoder"))
+        or _safe_dict(data.get("geocode"))
+        or _safe_dict(data.get("geocoded"))
+        or _safe_dict(data.get("address_components"))
+        or _safe_dict(data.get("structured_address"))
+    )
+
+    address = _safe_dict(data.get("address"))
+    coordinates = _safe_dict(data.get("coordinates") or data.get("location") or geocoder.get("coordinates"))
+
+    # Explizite Geocoder-Daten bevorzugen.
+    candidates = {
+        "street": geocoder.get("street") or geocoder.get("road") or geocoder.get("address_street"),
+        "house_number": geocoder.get("house_number") or geocoder.get("houseNumber") or geocoder.get("address_house_number"),
+        "postal_code": geocoder.get("postal_code") or geocoder.get("postcode") or geocoder.get("zip") or geocoder.get("address_postal_code"),
+        "city": geocoder.get("city") or geocoder.get("town") or geocoder.get("village") or geocoder.get("municipality") or geocoder.get("address_city"),
+        "region": geocoder.get("region") or geocoder.get("state") or geocoder.get("bundesland") or geocoder.get("address_region"),
+        "country": geocoder.get("country") or geocoder.get("country_code") or geocoder.get("address_country"),
+    }
+
+    # Backward-compatible: wenn ein explizites address-Objekt mit Feldern kommt,
+    # darf es ebenfalls übernommen werden. Das normale UI sendet künftig nur
+    # address_text.
+    if isinstance(data.get("address"), Mapping):
+        candidates.update(
+            {
+                "street": candidates["street"] or address.get("street"),
+                "house_number": candidates["house_number"] or address.get("house_number"),
+                "postal_code": candidates["postal_code"] or address.get("postal_code"),
+                "city": candidates["city"] or address.get("city"),
+                "region": candidates["region"] or address.get("region"),
+                "country": candidates["country"] or address.get("country"),
+            }
+        )
+
+    for key, value in candidates.items():
+        if value is not None:
+            max_len = 80 if key == "house_number" else 40 if key == "postal_code" else 160
+            if key == "street":
+                max_len = 255
+            payload[key] = _safe_str(value, "", max_len) or None
+
+    lat_value = (
+        geocoder.get("latitude")
+        if geocoder.get("latitude") is not None
+        else geocoder.get("lat")
+        if geocoder.get("lat") is not None
+        else coordinates.get("latitude")
+        if coordinates.get("latitude") is not None
+        else coordinates.get("lat")
+    )
+    lon_value = (
+        geocoder.get("longitude")
+        if geocoder.get("longitude") is not None
+        else geocoder.get("lng")
+        if geocoder.get("lng") is not None
+        else geocoder.get("lon")
+        if geocoder.get("lon") is not None
+        else coordinates.get("longitude")
+        if coordinates.get("longitude") is not None
+        else coordinates.get("lng")
+        if coordinates.get("lng") is not None
+        else coordinates.get("lon")
+    )
+
+    if lat_value is not None:
+        payload["latitude"] = _safe_float(lat_value, None)
+    if lon_value is not None:
+        payload["longitude"] = _safe_float(lon_value, None)
+
+    srid = (
+        geocoder.get("coordinate_srid")
+        or geocoder.get("srid")
+        or coordinates.get("srid")
+        or coordinates.get("coordinate_srid")
+    )
+    if srid is not None:
+        payload["coordinate_srid"] = _safe_str(srid, DEFAULT_COORDINATE_SRID, 40) or DEFAULT_COORDINATE_SRID
+
+    if payload:
+        payload["geocode_status"] = _safe_str(
+            geocoder.get("status") or data.get("geocode_status"),
+            GEOCODE_STATUS_RESOLVED if (payload.get("latitude") is not None and payload.get("longitude") is not None) else GEOCODE_STATUS_PENDING,
+            40,
+        )
+        payload["geocode_payload"] = geocoder
+
+    return payload
 
 
 # ─────────────────────────────────────────────────────────────
@@ -904,12 +1622,6 @@ def _internal_upsert_project_service_link(
     status: str = "active",
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Any:
-    """
-    Internal unchecked service-link upsert.
-
-    This avoids permission checks because it is used from trusted project
-    creation/provisioning flows that already operate on the current project.
-    """
     if project is None:
         raise ValueError("project required")
 
@@ -1073,18 +1785,6 @@ def ensure_project_chunk_link(
     force: bool = False,
     commit: bool = True,
 ) -> ProjectOperationResult:
-    """
-    Ensure a chunk-side project/universe/world exists for this app project.
-
-    This function:
-    - calls vectoplan-chunk through services.chunk_client,
-    - stores chunk_project_id / chunk_world_id on the app Project,
-    - updates service_refs,
-    - upserts ProjectServiceLink rows,
-    - records audit events.
-
-    It does not write directly into the chunk database.
-    """
     try:
         if project is None:
             return ProjectOperationResult(
@@ -1094,7 +1794,7 @@ def ensure_project_chunk_link(
                 error="project required",
             )
 
-        uid = get_current_user_id(user_id)
+        uid = require_persistent_actor(user_id)
 
         if not _chunk_provisioning_enabled():
             _set_project_chunk_status(project, status=CHUNK_STATUS_DISABLED)
@@ -1112,10 +1812,7 @@ def ensure_project_chunk_link(
                 commit=False,
             )
 
-            if commit:
-                db.session.commit()
-            else:
-                db.session.flush()
+            _db_flush_or_commit(commit)
 
             return ProjectOperationResult(
                 ok=True,
@@ -1142,11 +1839,7 @@ def ensure_project_chunk_link(
 
             _upsert_chunk_service_links_from_refs(project, refs=_project_chunk_refs(project), user_id=uid)
             db.session.add(project)
-
-            if commit:
-                db.session.commit()
-            else:
-                db.session.flush()
+            _db_flush_or_commit(commit)
 
             return ProjectOperationResult(
                 ok=True,
@@ -1180,10 +1873,7 @@ def ensure_project_chunk_link(
                 commit=False,
             )
 
-            if commit:
-                db.session.commit()
-            else:
-                db.session.flush()
+            _db_flush_or_commit(commit)
 
             if _chunk_provisioning_required():
                 raise RuntimeError(error["message"])
@@ -1248,10 +1938,7 @@ def ensure_project_chunk_link(
                 commit=False,
             )
 
-            if commit:
-                db.session.commit()
-            else:
-                db.session.flush()
+            _db_flush_or_commit(commit)
 
             return ProjectOperationResult(
                 ok=True,
@@ -1292,10 +1979,7 @@ def ensure_project_chunk_link(
             commit=False,
         )
 
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
+        _db_flush_or_commit(commit)
 
         if _chunk_provisioning_required():
             raise RuntimeError(_safe_str(error.get("message"), "chunk provisioning failed"))
@@ -1313,12 +1997,14 @@ def ensure_project_chunk_link(
             error=_safe_str(error.get("message"), "chunk provisioning failed"),
         )
 
+    except PermissionDenied:
+        if commit:
+            _db_rollback_safely()
+        raise
+
     except Exception as exc:
         if commit:
-            try:
-                db.session.rollback()
-            except Exception:
-                pass
+            _db_rollback_safely()
 
         _log_exception("ensure_project_chunk_link failed", exc)
 
@@ -1349,7 +2035,6 @@ def retry_project_chunk_link(
     user_id: Optional[int] = None,
     commit: bool = True,
 ) -> ProjectOperationResult:
-    """Force retry of app-project -> chunk-project provisioning."""
     return ensure_project_chunk_link(
         project,
         user_id=user_id,
@@ -1384,6 +2069,9 @@ def get_project_by_id(project_id: Any, *, include_deleted: bool = False) -> Opti
         if not include_deleted and bool(getattr(project, "is_deleted", False)):
             return None
 
+        if not include_deleted and _safe_str(getattr(project, "status", ""), "", 40) == PROJECT_STATUS_DELETED:
+            return None
+
         return project
 
     except Exception as exc:
@@ -1411,6 +2099,9 @@ def get_project_by_public_id(public_id: Any, *, include_deleted: bool = False) -
         if not include_deleted and bool(getattr(project, "is_deleted", False)):
             return None
 
+        if not include_deleted and _safe_str(getattr(project, "status", ""), "", 40) == PROJECT_STATUS_DELETED:
+            return None
+
         return project
 
     except Exception as exc:
@@ -1433,6 +2124,9 @@ def get_project_by_conversation_id(conversation_id: Any, *, include_deleted: boo
         if not include_deleted and bool(getattr(project, "is_deleted", False)):
             return None
 
+        if not include_deleted and _safe_str(getattr(project, "status", ""), "", 40) == PROJECT_STATUS_DELETED:
+            return None
+
         return project
 
     except Exception as exc:
@@ -1442,6 +2136,21 @@ def get_project_by_conversation_id(conversation_id: Any, *, include_deleted: boo
 
 def resolve_project(identifier: Any, *, include_deleted: bool = False) -> Optional[Any]:
     try:
+        if identifier is None:
+            return None
+
+        try:
+            if isinstance(identifier, Project):
+                return identifier
+        except Exception:
+            pass
+
+        try:
+            if hasattr(identifier, "id") and hasattr(identifier, "public_id"):
+                return identifier
+        except Exception:
+            pass
+
         value = _safe_str(identifier, "", 160)
 
         if not value or value.lower() in {"new", "create", "neu"}:
@@ -1471,6 +2180,7 @@ def serialize_project(
     include_service_links: bool = False,
     include_versions: bool = False,
     include_embed_policy: bool = False,
+    include_publication: bool = True,
 ) -> Dict[str, Any]:
     try:
         if project is None:
@@ -1501,7 +2211,36 @@ def serialize_project(
                 "status": getattr(project, "status", None),
             }
 
+        address_text = get_project_address_text(project, allow_structured_fallback=True)
+        visibility = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
         chunk_refs = _project_chunk_refs(project)
+
+        payload["address_text"] = address_text
+        payload["addressText"] = address_text
+        payload["address"] = {
+            "text": address_text,
+            # Diese Felder bleiben für Geocoder/Legacy lesbar, sind aber nicht
+            # mehr als normale UI-Eingaben gedacht.
+            "street": getattr(project, "street", None),
+            "house_number": getattr(project, "house_number", None),
+            "postal_code": getattr(project, "postal_code", None),
+            "city": getattr(project, "city", None),
+            "region": getattr(project, "region", None),
+            "country": getattr(project, "country", None),
+        }
+        payload["coordinates"] = {
+            "latitude": getattr(project, "latitude", None),
+            "longitude": getattr(project, "longitude", None),
+            "srid": getattr(project, "coordinate_srid", None),
+            "source": "geocoder_or_legacy",
+        }
+        payload["geocode"] = _safe_dict(_get_project_metadata(project).get("geocode"))
+        payload["geocode_status"] = _geocode_status_from_project(project)
+        payload["visibility"] = visibility
+        payload["is_public"] = visibility == PROJECT_VISIBILITY_PUBLIC
+        payload["isPublic"] = visibility == PROJECT_VISIBILITY_PUBLIC
+        payload["is_unlisted"] = visibility == PROJECT_VISIBILITY_UNLISTED
+        payload["isUnlisted"] = visibility == PROJECT_VISIBILITY_UNLISTED
 
         payload["url"] = project_public_url(project)
         payload["href"] = project_public_url(project)
@@ -1539,6 +2278,22 @@ def serialize_project(
                 else {}
             )
 
+        if include_publication and callable(get_project_publication):
+            try:
+                publication_result = get_project_publication(
+                    project,
+                    actor_user_id=user_id,
+                    include_private=bool(
+                        include_embed_policy
+                        or _safe_bool(payload.get("access", {}).get("can_manage"), False)
+                    ),
+                    for_public=False,
+                    use_cache=False,
+                )
+                payload["publication"] = _safe_dict(publication_result.get("publication"))
+            except Exception:
+                payload["publication"] = {}
+
         return payload
 
     except Exception as exc:
@@ -1562,18 +2317,23 @@ def serialize_project_sidebar_item(project: Any, *, user_id: Optional[int] = Non
                 "projectId": public_id or getattr(project, "id", ""),
                 "public_id": public_id,
                 "title": getattr(project, "name", None) or "Unbenanntes Projekt",
-                "subtitle": getattr(project, "address_text", None) or getattr(project, "setup_status", None) or "Projekt",
+                "subtitle": get_project_address_text(project, allow_structured_fallback=True)
+                or getattr(project, "setup_status", None)
+                or "Projekt",
                 "href": f"/project={public_id}" if public_id else "/project=new",
                 "source": "projects_api",
             }
 
         chunk_refs = _project_chunk_refs(project)
+        access = serialize_project_permissions(project, user_id=user_id)
 
-        item["permissions"] = serialize_project_permissions(project, user_id=user_id).get("permissions", {})
+        item["permissions"] = access.get("permissions", {})
+        item["access"] = access
         item["isConfigured"] = bool(getattr(project, "is_configured", False))
         item["is_configured"] = bool(getattr(project, "is_configured", False))
         item["conversationId"] = getattr(project, "conversation_id", None)
         item["conversation_id"] = getattr(project, "conversation_id", None)
+        item["visibility"] = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
 
         item["chunkReady"] = bool(chunk_refs.get("ready"))
         item["chunk_ready"] = bool(chunk_refs.get("ready"))
@@ -1629,13 +2389,23 @@ def list_projects_for_user(
     user_id: Optional[int] = None,
     *,
     include_public: bool = True,
+    include_unlisted: bool = False,
     include_deleted: bool = False,
     search: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
 ) -> List[Any]:
     try:
-        uid = get_current_user_id(user_id)
+        uid = get_actor_user_id_optional(user_id)
+
+        # Demo ohne persistente AppUser-Verknüpfung bekommt keine echten Projekte
+        # aus der DB-Sidebar. Das spätere Demo-Projekt wird separat angebunden.
+        if not uid and actor_is_demo(user_id):
+            return []
+
+        if not uid:
+            uid = get_current_user_id(user_id)
+
         limit_value = _query_limit(limit, 100, 500)
         offset_value = max(_safe_int(offset, 0), 0)
 
@@ -1660,6 +2430,11 @@ def list_projects_for_user(
         if include_public:
             conditions.append(Project.is_public.is_(True))
             conditions.append(Project.visibility == PROJECT_VISIBILITY_PUBLIC)
+
+        # Unlisted soll nicht standardmäßig in Listen auftauchen.
+        # Direkter Link funktioniert über get_project_result.
+        if include_unlisted:
+            conditions.append(Project.visibility == PROJECT_VISIBILITY_UNLISTED)
 
         if or_ is not None:
             query = query.filter(or_(*conditions))
@@ -1686,7 +2461,10 @@ def list_projects_for_user(
             except Exception:
                 pass
 
-        query = query.order_by(Project.updated_at.desc(), Project.created_at.desc())
+        try:
+            query = query.order_by(Project.updated_at.desc(), Project.created_at.desc())
+        except Exception:
+            pass
 
         if offset_value:
             query = query.offset(offset_value)
@@ -1708,6 +2486,7 @@ def list_project_sidebar_items(
         projects = list_projects_for_user(
             user_id=user_id,
             include_public=include_public,
+            include_unlisted=False,
             include_deleted=False,
             limit=limit,
         )
@@ -1722,170 +2501,165 @@ def list_project_sidebar_items(
 
 
 # ─────────────────────────────────────────────────────────────
-# Project creation / update
+# Project creation / update payload
 # ─────────────────────────────────────────────────────────────
 
-def _project_has_minimum_definition(project: Any) -> bool:
-    try:
-        has_name = bool(_safe_str(getattr(project, "name", None), "", 255))
-        has_address = bool(
-            _safe_str(getattr(project, "address_text", None), "", 2000)
-            or _safe_str(getattr(project, "street", None), "", 255)
-            or _safe_str(getattr(project, "city", None), "", 160)
-            or (
-                getattr(project, "latitude", None) is not None
-                and getattr(project, "longitude", None) is not None
-            )
-        )
+def _normalize_project_payload(
+    data: Optional[Mapping[str, Any]],
+    *,
+    for_update: bool = False,
+    existing_project: Any = None,
+) -> Dict[str, Any]:
+    """
+    Normalisiert Payload aus dem Projektformular.
 
-        return has_name and has_address
+    Neue UI-Regel:
+    - Das Projektformular sendet nur name, description, address_text, visibility.
+    - is_public wird aus visibility abgeleitet.
+    - Strukturierte Adresse/Koordinaten werden nur noch aus expliziten
+      Geocoder-/Backend-Payloads übernommen.
 
-    except Exception:
-        return False
-
-
-def _normalize_project_payload(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    Rückgabe enthält:
+    - __present: Set[str] der Felder, die tatsächlich gesetzt werden sollen.
+    """
     source = _safe_dict(data)
+    present: Set[str] = set()
 
     try:
-        raw_address = source.get("address")
-        address = _safe_dict(raw_address)
-        coordinates = _safe_dict(source.get("coordinates"))
-
-        name = (
-            source.get("name")
-            or source.get("title")
-            or source.get("project_name")
-            or DEFAULT_PROJECT_NAME
-        )
-
-        address_text_value = source.get("address_text")
-
-        if address_text_value is None:
-            if isinstance(raw_address, dict):
-                address_text_value = address.get("text")
-            else:
-                address_text_value = raw_address
-
-        latitude_value = (
-            source.get("latitude")
-            if source.get("latitude") is not None
-            else source.get("lat")
-            if source.get("lat") is not None
-            else coordinates.get("latitude")
-            if coordinates.get("latitude") is not None
-            else coordinates.get("lat")
-        )
-
-        longitude_value = (
-            source.get("longitude")
-            if source.get("longitude") is not None
-            else source.get("lng")
-            if source.get("lng") is not None
-            else source.get("lon")
-            if source.get("lon") is not None
-            else coordinates.get("longitude")
-            if coordinates.get("longitude") is not None
-            else coordinates.get("lng")
-            if coordinates.get("lng") is not None
-            else coordinates.get("lon")
-        )
-
-        payload = {
-            "name": _safe_str(name, DEFAULT_PROJECT_NAME, 255) or DEFAULT_PROJECT_NAME,
-            "description": _safe_str(source.get("description"), "", 10000) or None,
-            "address_text": _safe_str(address_text_value, "", 2000) or None,
-            "street": _safe_str(
-                source.get("street") or source.get("address_street") or address.get("street"),
-                "",
-                255,
-            ) or None,
-            "house_number": _safe_str(
-                source.get("house_number") or source.get("address_house_number") or address.get("house_number"),
-                "",
-                80,
-            ) or None,
-            "postal_code": _safe_str(
-                source.get("postal_code") or source.get("address_postal_code") or address.get("postal_code"),
-                "",
-                40,
-            ) or None,
-            "city": _safe_str(
-                source.get("city") or source.get("address_city") or address.get("city"),
-                "",
-                160,
-            ) or None,
-            "region": _safe_str(
-                source.get("region") or source.get("address_region") or address.get("region"),
-                "",
-                160,
-            ) or None,
-            "country": _safe_str(
-                source.get("country") or source.get("address_country") or address.get("country"),
-                DEFAULT_ADDRESS_COUNTRY,
-                160,
-            ) or DEFAULT_ADDRESS_COUNTRY,
-            "latitude": _safe_float(latitude_value, None),
-            "longitude": _safe_float(longitude_value, None),
-            "coordinate_srid": _safe_str(
-                source.get("coordinate_srid")
-                or source.get("srid")
-                or address.get("coordinate_srid")
-                or coordinates.get("srid"),
-                DEFAULT_COORDINATE_SRID,
-                40,
-            ) or DEFAULT_COORDINATE_SRID,
-            "visibility": _normalize_visibility(source.get("visibility"), PROJECT_VISIBILITY_PRIVATE),
-            "is_public": _safe_bool(source.get("is_public", source.get("public")), False),
-            "chunk_project_id": _safe_str(source.get("chunk_project_id") or source.get("chunkProjectId"), "", 160) or None,
-            "chunk_universe_id": _safe_str(source.get("chunk_universe_id") or source.get("chunkUniverseId"), "", 160) or None,
-            "chunk_world_id": _safe_str(source.get("chunk_world_id") or source.get("chunkWorldId"), "", 160) or None,
-            "plan2d_id": _safe_str(source.get("plan2d_id") or source.get("plan2dId"), "", 160) or None,
-            "lv_id": _safe_str(source.get("lv_id") or source.get("lvId"), "", 160) or None,
-            "service_refs": _safe_dict(source.get("service_refs") or source.get("serviceRefs")),
-            "artifact_refs": _safe_dict(source.get("artifact_refs") or source.get("artifactRefs")),
-            "settings": _safe_dict(source.get("settings")),
+        payload: Dict[str, Any] = {
+            "__present": present,
             "metadata": _safe_dict(source.get("metadata") or source.get("meta")),
+            "settings": _safe_dict(source.get("settings")),
+            "service_refs": {},
+            "artifact_refs": {},
         }
 
-        if payload["is_public"]:
-            payload["visibility"] = PROJECT_VISIBILITY_PUBLIC
+        # Name
+        if not for_update or _payload_has(source, "name", "title", "project_name"):
+            name = (
+                source.get("name")
+                or source.get("title")
+                or source.get("project_name")
+                or DEFAULT_PROJECT_NAME
+            )
+            payload["name"] = _safe_str(name, DEFAULT_PROJECT_NAME, 255) or DEFAULT_PROJECT_NAME
+            present.add("name")
+
+        # Beschreibung. Bei update darf leerer String bewusst löschen.
+        if not for_update or _payload_has(source, "description"):
+            description = _safe_str(source.get("description"), "", 10000)
+            payload["description"] = description or None
+            present.add("description")
+
+        # Eine einzige sichtbare Adressbox.
+        raw_address = source.get("address")
+        address = _safe_dict(raw_address)
+        address_text_value = source.get("address_text")
+
+        if address_text_value is None and _payload_has(source, "addressText"):
+            address_text_value = source.get("addressText")
+
+        if address_text_value is None:
+            if isinstance(raw_address, Mapping):
+                address_text_value = address.get("text")
+            elif isinstance(raw_address, str):
+                address_text_value = raw_address
+
+        if not for_update or address_text_value is not None:
+            payload["address_text"] = _safe_str(address_text_value, "", 2000) or None
+            present.add("address_text")
+
+        # Sichtbarkeit. Kein eigenes UI-is_public mehr.
+        if not for_update or _payload_has(source, "visibility", "is_public", "public"):
+            visibility_input = source.get("visibility")
+
+            # Backward compatibility: alte Checkbox nur nutzen, wenn visibility fehlt.
+            if visibility_input is None and _safe_bool(source.get("is_public", source.get("public")), False):
+                visibility_input = PROJECT_VISIBILITY_PUBLIC
+
+            visibility = _normalize_visibility(visibility_input, PROJECT_VISIBILITY_PRIVATE)
+            payload["visibility"] = visibility
+            payload["is_public"] = visibility == PROJECT_VISIBILITY_PUBLIC
+            present.add("visibility")
+            present.add("is_public")
+
+        # Strukturierte Daten nur aus Geocoder-/Backend-Payloads.
+        structured = _structured_address_payload_from_geocoder(source)
+        if structured:
+            for key, value in structured.items():
+                if key in {"geocode_payload", "geocode_status"}:
+                    payload[key] = value
+                    present.add(key)
+                    continue
+
+                payload[key] = value
+                present.add(key)
+
+        # Backward-compatible Systemrefs nur wenn explizit erlaubt.
+        allow_system_refs = _safe_bool(
+            source.get("allow_system_refs")
+            if "allow_system_refs" in source
+            else _config_bool("VECTOPLAN_PROJECT_PAYLOAD_ALLOW_SYSTEM_REFS", False),
+            False,
+        )
+
+        if allow_system_refs:
+            system_fields = {
+                "chunk_project_id": source.get("chunk_project_id") or source.get("chunkProjectId"),
+                "chunk_universe_id": source.get("chunk_universe_id") or source.get("chunkUniverseId"),
+                "chunk_world_id": source.get("chunk_world_id") or source.get("chunkWorldId"),
+                "plan2d_id": source.get("plan2d_id") or source.get("plan2dId"),
+                "lv_id": source.get("lv_id") or source.get("lvId"),
+                "service_refs": source.get("service_refs") or source.get("serviceRefs"),
+                "artifact_refs": source.get("artifact_refs") or source.get("artifactRefs"),
+            }
+
+            for key, value in system_fields.items():
+                if value is None:
+                    continue
+                if key in {"service_refs", "artifact_refs"}:
+                    payload[key] = _safe_dict(value)
+                else:
+                    payload[key] = _safe_str(value, "", 160) or None
+                present.add(key)
+
+        # Create defaults.
+        if not for_update:
+            payload.setdefault("name", DEFAULT_PROJECT_NAME)
+            payload.setdefault("description", None)
+            payload.setdefault("address_text", None)
+            payload.setdefault("visibility", PROJECT_VISIBILITY_PRIVATE)
+            payload.setdefault("is_public", False)
+            payload.setdefault("country", DEFAULT_ADDRESS_COUNTRY)
+            payload.setdefault("coordinate_srid", DEFAULT_COORDINATE_SRID)
+            present.update({"name", "description", "address_text", "visibility", "is_public"})
+
+        # Setup-Status wird aus dem fachlichen Minimum abgeleitet, nicht blind
+        # aus dem UI übernommen.
+        projected_name = payload.get("name")
+        if for_update and projected_name is None and existing_project is not None:
+            projected_name = getattr(existing_project, "name", None)
+
+        projected_address = payload.get("address_text")
+        if for_update and "address_text" not in present and existing_project is not None:
+            projected_address = get_project_address_text(existing_project, allow_structured_fallback=True)
 
         is_defined = bool(
-            payload["name"]
-            and (
-                payload["address_text"]
-                or payload["street"]
-                or payload["city"]
-                or (payload["latitude"] is not None and payload["longitude"] is not None)
-            )
+            _safe_str(projected_name, "", 255)
+            and _safe_str(projected_address, "", 2000)
         )
 
-        payload["setup_status"] = _safe_str(
-            source.get("setup_status") or source.get("setupStatus"),
-            PROJECT_SETUP_CONFIGURED if is_defined else PROJECT_SETUP_DRAFT,
-            40,
-        )
-
-        if payload["setup_status"] not in {PROJECT_SETUP_DRAFT, PROJECT_SETUP_DEFINED, PROJECT_SETUP_CONFIGURED}:
-            payload["setup_status"] = PROJECT_SETUP_CONFIGURED if is_defined else PROJECT_SETUP_DRAFT
+        payload["setup_status"] = PROJECT_SETUP_CONFIGURED if is_defined else PROJECT_SETUP_DRAFT
+        present.add("setup_status")
 
         return payload
 
     except Exception:
         return {
+            "__present": {"name", "description", "address_text", "visibility", "is_public", "setup_status"},
             "name": DEFAULT_PROJECT_NAME,
             "description": None,
             "address_text": None,
-            "street": None,
-            "house_number": None,
-            "postal_code": None,
-            "city": None,
-            "region": None,
-            "country": DEFAULT_ADDRESS_COUNTRY,
-            "latitude": None,
-            "longitude": None,
-            "coordinate_srid": DEFAULT_COORDINATE_SRID,
             "visibility": PROJECT_VISIBILITY_PRIVATE,
             "is_public": False,
             "setup_status": PROJECT_SETUP_DRAFT,
@@ -1898,12 +2672,41 @@ def _normalize_project_payload(data: Optional[Dict[str, Any]]) -> Dict[str, Any]
 
 def _apply_project_payload(project: Any, payload: Dict[str, Any]) -> Any:
     try:
-        if hasattr(project, "update_from_payload"):
-            project.update_from_payload(payload)
-        else:
-            for key, value in payload.items():
-                if hasattr(project, key):
-                    setattr(project, key, value)
+        present = set(payload.get("__present") or [])
+        before_address_text = get_project_address_text(project, allow_structured_fallback=False)
+
+        # Normale Projektformular-Felder.
+        for key in ["name", "description", "address_text", "visibility", "is_public", "settings"]:
+            if key not in present:
+                continue
+            if hasattr(project, key):
+                setattr(project, key, payload.get(key))
+
+        # Strukturierte Felder nur wenn Geocoder/Backend sie explizit geliefert hat.
+        structured_fields = [
+            "street",
+            "house_number",
+            "postal_code",
+            "city",
+            "region",
+            "country",
+            "latitude",
+            "longitude",
+            "coordinate_srid",
+        ]
+
+        for key in structured_fields:
+            if key in present and hasattr(project, key):
+                setattr(project, key, payload.get(key))
+
+        if "visibility" in present:
+            visibility = _normalize_visibility(payload.get("visibility"), PROJECT_VISIBILITY_PRIVATE)
+            project.visibility = visibility
+            if hasattr(project, "is_public"):
+                project.is_public = visibility == PROJECT_VISIBILITY_PUBLIC
+
+        if "setup_status" in present:
+            project.setup_status = payload.get("setup_status") or PROJECT_SETUP_DRAFT
 
         if _project_has_minimum_definition(project):
             if hasattr(project, "mark_configured"):
@@ -1911,8 +2714,39 @@ def _apply_project_payload(project: Any, payload: Dict[str, Any]) -> Any:
             else:
                 project.setup_status = PROJECT_SETUP_CONFIGURED
                 project.setup_completed_at = getattr(project, "setup_completed_at", None) or _utcnow()
-        elif getattr(project, "setup_status", None) == PROJECT_SETUP_CONFIGURED:
-            project.setup_status = PROJECT_SETUP_DEFINED
+        else:
+            if getattr(project, "setup_status", None) == PROJECT_SETUP_CONFIGURED:
+                project.setup_status = PROJECT_SETUP_DEFINED
+
+        new_address_text = get_project_address_text(project, allow_structured_fallback=False)
+        if "address_text" in present:
+            _mark_geocode_pending_or_stale(
+                project,
+                old_address_text=before_address_text,
+                new_address_text=new_address_text,
+                source="project_form",
+            )
+
+        if "geocode_payload" in present or "geocode_status" in present:
+            metadata = _get_project_metadata(project)
+            geocode = _safe_dict(metadata.get("geocode"))
+            geocode.update(
+                {
+                    "status": _safe_str(payload.get("geocode_status"), GEOCODE_STATUS_RESOLVED, 40),
+                    "payload": _safe_dict(payload.get("geocode_payload")),
+                    "updated_at": _iso(_utcnow()),
+                    "source": "geocoder_payload",
+                }
+            )
+            metadata["geocode"] = geocode
+            _set_project_metadata(project, metadata)
+
+        metadata_patch = _safe_dict(payload.get("metadata"))
+        if metadata_patch:
+            _merge_project_metadata(project, metadata_patch)
+
+        if hasattr(project, "updated_at"):
+            project.updated_at = _utcnow()
 
         if hasattr(project, "normalize_lifecycle"):
             project.normalize_lifecycle()
@@ -1923,12 +2757,16 @@ def _apply_project_payload(project: Any, payload: Dict[str, Any]) -> Any:
         return project
 
 
+# ─────────────────────────────────────────────────────────────
+# Conversation / embed / audit
+# ─────────────────────────────────────────────────────────────
+
 def _create_conversation_for_project(project: Any, *, title: Optional[str] = None) -> Any:
     conv = Conversation()
 
     try:
         conv.project_id = str(project.id)
-        conv.title = _safe_str(title or getattr(project, "name", None), "Projekt-Chat", 255)
+        conv.title = _safe_str(title or getattr(project, "name", None), "Projekt-Status", 255)
         conv.owner_user_id = _safe_int(getattr(project, "owner_user_id", None), 0) or None
         conv.transcript = []
         conv.state = {}
@@ -1963,16 +2801,12 @@ def get_or_create_project_conversation(project: Any, *, commit: bool = False) ->
 
         conv = _create_conversation_for_project(project, title=getattr(project, "name", None))
 
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
-
+        _db_flush_or_commit(commit)
         return conv
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
@@ -1989,17 +2823,13 @@ def get_or_create_embed_policy(project: Any, *, user_id: Optional[int] = None, c
                 created_by_user_id=get_current_user_id(user_id),
             )
             db.session.add(policy)
-
-            if commit:
-                db.session.commit()
-            else:
-                db.session.flush()
+            _db_flush_or_commit(commit)
 
         return policy
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
@@ -2034,6 +2864,10 @@ def _record_project_event(
         return None
 
 
+# ─────────────────────────────────────────────────────────────
+# Project creation / update
+# ─────────────────────────────────────────────────────────────
+
 def create_project(
     data: Optional[Dict[str, Any]] = None,
     *,
@@ -2053,9 +2887,11 @@ def create_project(
     transaction.
     """
     try:
+        uid = require_persistent_actor(user_id)
         user = ensure_project_user()
-        uid = get_current_user_id(user_id)
-        payload = _normalize_project_payload(data)
+        payload = _normalize_project_payload(data, for_update=False)
+
+        visibility = _normalize_visibility(payload.get("visibility"), PROJECT_VISIBILITY_PRIVATE)
 
         project = Project(
             owner_user_id=uid,
@@ -2071,25 +2907,38 @@ def create_project(
             latitude=payload.get("latitude"),
             longitude=payload.get("longitude"),
             coordinate_srid=payload.get("coordinate_srid") or DEFAULT_COORDINATE_SRID,
-            chunk_project_id=payload.get("chunk_project_id"),
-            chunk_world_id=payload.get("chunk_world_id"),
-            plan2d_id=payload.get("plan2d_id"),
-            lv_id=payload.get("lv_id"),
             service_refs=_safe_dict(payload.get("service_refs")),
             artifact_refs=_safe_dict(payload.get("artifact_refs")),
-            visibility=payload.get("visibility") or PROJECT_VISIBILITY_PRIVATE,
-            is_public=bool(payload.get("is_public")),
+            visibility=visibility,
+            is_public=visibility == PROJECT_VISIBILITY_PUBLIC,
             status=PROJECT_STATUS_ACTIVE,
             setup_status=payload.get("setup_status") or PROJECT_SETUP_DRAFT,
             settings=_safe_dict(payload.get("settings")),
             metadata_json={
                 "created_via": "project_service.create_project",
+                "project_form_version": 2,
+                "address_input_mode": "single_box",
+                "system_refs_hidden_in_project_form": True,
                 **_safe_dict(payload.get("metadata")),
             },
         )
 
-        if payload.get("chunk_universe_id") and hasattr(project, "chunk_universe_id"):
-            project.chunk_universe_id = payload.get("chunk_universe_id")
+        if payload.get("geocode_payload") or payload.get("geocode_status"):
+            metadata = _get_project_metadata(project)
+            metadata["geocode"] = {
+                "status": _safe_str(payload.get("geocode_status"), GEOCODE_STATUS_PENDING, 40),
+                "payload": _safe_dict(payload.get("geocode_payload")),
+                "updated_at": _iso(_utcnow()),
+                "source": "create_payload",
+            }
+            _set_project_metadata(project, metadata)
+        elif payload.get("address_text"):
+            _mark_geocode_pending_or_stale(
+                project,
+                old_address_text=None,
+                new_address_text=payload.get("address_text"),
+                source="project_create",
+            )
 
         if _project_has_minimum_definition(project):
             if hasattr(project, "mark_configured"):
@@ -2114,6 +2963,14 @@ def create_project(
 
         get_or_create_embed_policy(project, user_id=uid, commit=False)
 
+        # Publication-Service wird später über eigene API steuerbar. Bei Projekt-
+        # Erstellung setzen wir nur Sichtbarkeit konsistent.
+        if callable(publication_set_project_visibility):
+            try:
+                publication_set_project_visibility(project, visibility, actor_user_id=uid, commit=False)
+            except Exception:
+                pass
+
         _record_project_event(
             project,
             action="created",
@@ -2124,6 +2981,8 @@ def create_project(
             payload={
                 "conversation_id": getattr(conv, "id", None),
                 "placeholder_user_id": getattr(user, "id", uid) if user is not None else uid,
+                "address_input_mode": "single_box",
+                "visibility": visibility,
             },
             commit=False,
         )
@@ -2133,24 +2992,23 @@ def create_project(
         if should_provision:
             _set_project_chunk_status(project, status=CHUNK_STATUS_PENDING)
 
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
+        _db_flush_or_commit(commit)
 
         if should_provision and commit:
             ensure_project_chunk_link(project, user_id=uid, force=False, commit=True)
 
         return project
 
+    except PermissionDenied:
+        if commit:
+            _db_rollback_safely()
+        raise
+
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         else:
-            try:
-                db.session.rollback()
-            except Exception:
-                pass
+            _db_rollback_safely()
         raise
 
 
@@ -2166,13 +3024,15 @@ def update_project(
         if project is None:
             raise ValueError("project required")
 
-        uid = get_current_user_id(user_id)
+        uid = require_persistent_actor(user_id)
         require_project_permission(project, PERMISSION_EDIT, uid, allow_public_view=False)
 
         before = serialize_project(project, user_id=uid, include_permissions=False)
-        payload = _normalize_project_payload(data)
+        payload = _normalize_project_payload(data, for_update=True, existing_project=project)
 
+        old_visibility = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
         _apply_project_payload(project, payload)
+        new_visibility = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
 
         conv = get_or_create_project_conversation(project, commit=False)
 
@@ -2185,15 +3045,11 @@ def update_project(
             except Exception:
                 pass
 
-        if payload.get("chunk_project_id") or payload.get("chunk_world_id"):
-            _set_project_chunk_refs(
-                project,
-                chunk_project_id=payload.get("chunk_project_id") or getattr(project, "chunk_project_id", None),
-                chunk_universe_id=payload.get("chunk_universe_id") or getattr(project, "chunk_universe_id", None),
-                chunk_world_id=payload.get("chunk_world_id") or getattr(project, "chunk_world_id", None),
-                route_hints=_safe_dict(_project_chunk_refs(project).get("route_hints")),
-                status=CHUNK_STATUS_READY,
-            )
+        if old_visibility != new_visibility and callable(publication_set_project_visibility):
+            try:
+                publication_set_project_visibility(project, new_visibility, actor_user_id=uid, commit=False)
+            except Exception:
+                pass
 
         db.session.add(project)
 
@@ -2204,7 +3060,12 @@ def update_project(
             actor_user_id=uid,
             before=before,
             after=serialize_project(project, user_id=uid, include_permissions=False),
-            payload={"source": "project_service.update_project"},
+            payload={
+                "source": "project_service.update_project",
+                "address_input_mode": "single_box",
+                "visibility": new_visibility,
+                "payload_fields": sorted(list(payload.get("__present") or [])),
+            },
             commit=False,
         )
 
@@ -2213,19 +3074,21 @@ def update_project(
         if should_provision:
             _set_project_chunk_status(project, status=CHUNK_STATUS_PENDING)
 
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
+        _db_flush_or_commit(commit)
 
         if should_provision and commit:
             ensure_project_chunk_link(project, user_id=uid, force=False, commit=True)
 
         return project
 
+    except PermissionDenied:
+        if commit:
+            _db_rollback_safely()
+        raise
+
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
@@ -2246,7 +3109,7 @@ def create_or_update_project(
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
@@ -2265,7 +3128,7 @@ def delete_project(
         if project is None:
             return False
 
-        uid = get_current_user_id(user_id)
+        uid = require_persistent_actor(user_id)
         require_project_permission(project, PERMISSION_DELETE, uid, allow_public_view=False)
 
         before = serialize_project(project, user_id=uid, include_permissions=False)
@@ -2310,16 +3173,12 @@ def delete_project(
                 commit=False,
             )
 
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
-
+        _db_flush_or_commit(commit)
         return True
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
@@ -2333,7 +3192,7 @@ def archive_project(
         if project is None:
             raise ValueError("project required")
 
-        uid = get_current_user_id(user_id)
+        uid = require_persistent_actor(user_id)
         require_project_permission(project, PERMISSION_MANAGE, uid, allow_public_view=False)
 
         before = serialize_project(project, user_id=uid, include_permissions=False)
@@ -2358,16 +3217,12 @@ def archive_project(
             commit=False,
         )
 
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
-
+        _db_flush_or_commit(commit)
         return project
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
@@ -2382,7 +3237,7 @@ def transfer_project_owner(
         if project is None:
             raise ValueError("project required")
 
-        actor_id = get_current_user_id(actor_user_id)
+        actor_id = require_persistent_actor(actor_user_id)
         new_owner_id = _safe_int(new_owner_user_id, 0)
 
         if not new_owner_id:
@@ -2393,28 +3248,20 @@ def transfer_project_owner(
         before = serialize_project(project, user_id=actor_id, include_permissions=True)
         old_owner_user_id = _safe_int(getattr(project, "owner_user_id", None), 0)
 
-        if hasattr(project, "transfer_ownership"):
+        if callable(permissions_transfer_project_ownership):
+            permissions_transfer_project_ownership(
+                project,
+                new_owner_user_id=new_owner_id,
+                actor_user_id=actor_id,
+                commit=False,
+            )
+        elif hasattr(project, "transfer_ownership"):
             project.transfer_ownership(new_owner_id)
         else:
             project.owner_user_id = new_owner_id
             project.transferred_from_user_id = old_owner_user_id or None
             project.transferred_at = _utcnow()
             project.updated_at = _utcnow()
-
-        model_ensure_owner_membership(
-            project_id=project.id,
-            owner_user_id=new_owner_id,
-            commit=False,
-        )
-
-        if old_owner_user_id and old_owner_user_id != new_owner_id:
-            old_membership = model_get_project_membership(project.id, old_owner_user_id)
-            if old_membership is not None:
-                try:
-                    old_membership.apply_role(ROLE_ADMIN)
-                except Exception:
-                    old_membership.role = ROLE_ADMIN
-                db.session.add(old_membership)
 
         db.session.add(project)
 
@@ -2432,16 +3279,12 @@ def transfer_project_owner(
             commit=False,
         )
 
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
-
+        _db_flush_or_commit(commit)
         return project
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
@@ -2465,10 +3308,14 @@ def list_project_memberships(project: Any, *, include_inactive: bool = False) ->
 
         rows = query.order_by(ProjectMembership.created_at.asc()).all()
 
-        return [
-            model_serialize_membership(row, include_private=True)
-            for row in rows
-        ]
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            if callable(permissions_serialize_membership):
+                result.append(permissions_serialize_membership(row, include_private=True))
+            else:
+                result.append(model_serialize_membership(row, include_private=True))
+
+        return result
 
     except Exception as exc:
         _log_warning("list_project_memberships failed: %s", exc.__class__.__name__)
@@ -2488,7 +3335,7 @@ def set_project_member_role(
         if project is None:
             raise ValueError("project required")
 
-        actor_id = get_current_user_id(actor_user_id)
+        actor_id = require_persistent_actor(actor_user_id)
         target_uid = _safe_int(target_user_id, 0)
 
         if not target_uid:
@@ -2500,11 +3347,25 @@ def set_project_member_role(
         membership = model_get_project_membership(project.id, target_uid)
 
         if membership is not None:
-            before = model_serialize_membership(membership, include_private=True)
+            before = (
+                permissions_serialize_membership(membership, include_private=True)
+                if callable(permissions_serialize_membership)
+                else model_serialize_membership(membership, include_private=True)
+            )
 
         clean_role = normalize_role(role)
 
-        if membership is None:
+        if callable(permissions_grant_project_role):
+            membership = permissions_grant_project_role(
+                project,
+                user_id=target_uid,
+                role=clean_role,
+                actor_user_id=actor_id,
+                permissions=_safe_dict(overrides),
+                commit=False,
+                allow_owner=False,
+            )
+        elif membership is None:
             membership = model_build_membership(
                 project_id=project.id,
                 user_id=target_uid,
@@ -2519,27 +3380,85 @@ def set_project_member_role(
 
         db.session.add(membership)
 
+        after = (
+            permissions_serialize_membership(membership, include_private=True)
+            if callable(permissions_serialize_membership)
+            else model_serialize_membership(membership, include_private=True)
+        )
+
         _record_project_event(
             project,
             action="permission_changed",
             category="access",
             actor_user_id=actor_id,
             before=before,
-            after=model_serialize_membership(membership, include_private=True),
+            after=after,
             payload={"target_user_id": target_uid, "role": clean_role},
             commit=False,
         )
 
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
-
+        _db_flush_or_commit(commit)
         return membership
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
+        raise
+
+
+def revoke_project_member(
+    project: Any,
+    *,
+    target_user_id: int,
+    actor_user_id: Optional[int] = None,
+    hard_delete: bool = False,
+    commit: bool = True,
+) -> bool:
+    try:
+        if project is None:
+            raise ValueError("project required")
+
+        actor_id = require_persistent_actor(actor_user_id)
+        require_project_permission(project, PERMISSION_MANAGE, actor_id, allow_public_view=False)
+
+        if callable(permissions_revoke_project_membership):
+            ok = permissions_revoke_project_membership(
+                project,
+                user_id=target_user_id,
+                actor_user_id=actor_id,
+                hard_delete=hard_delete,
+                commit=False,
+            )
+        else:
+            membership = model_get_project_membership(project.id, target_user_id)
+            if membership is None:
+                return False
+            membership.status = "revoked"
+            if hasattr(membership, "revoked_at"):
+                membership.revoked_at = _utcnow()
+            if hasattr(membership, "revoked_by_user_id"):
+                membership.revoked_by_user_id = actor_id
+            db.session.add(membership)
+            ok = True
+
+        _record_project_event(
+            project,
+            action="member_removed",
+            category="access",
+            actor_user_id=actor_id,
+            payload={
+                "target_user_id": target_user_id,
+                "hard_delete": bool(hard_delete),
+            },
+            commit=False,
+        )
+
+        _db_flush_or_commit(commit)
+        return bool(ok)
+
+    except Exception:
+        if commit:
+            _db_rollback_safely()
         raise
 
 
@@ -2585,7 +3504,7 @@ def upsert_project_service_link(
         if project is None:
             raise ValueError("project required")
 
-        uid = get_current_user_id(user_id)
+        uid = require_persistent_actor(user_id)
         require_project_permission(project, PERMISSION_MANAGE, uid, allow_public_view=False)
 
         clean_service = model_normalize_service(service_name)
@@ -2641,16 +3560,12 @@ def upsert_project_service_link(
             commit=False,
         )
 
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
-
+        _db_flush_or_commit(commit)
         return row
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
@@ -2712,7 +3627,7 @@ def create_project_version_link(
         if project is None:
             raise ValueError("project required")
 
-        uid = get_current_user_id(user_id)
+        uid = require_persistent_actor(user_id)
         require_project_permission(project, PERMISSION_EDIT, uid, allow_public_view=False)
 
         clean_service = model_normalize_service(service_name or SERVICE_APP)
@@ -2752,16 +3667,12 @@ def create_project_version_link(
             commit=False,
         )
 
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
-
+        _db_flush_or_commit(commit)
         return row
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
@@ -2780,7 +3691,7 @@ def update_project_embed_policy(
         if project is None:
             raise ValueError("project required")
 
-        uid = get_current_user_id(user_id)
+        uid = require_persistent_actor(user_id)
         require_project_permission(project, PERMISSION_EMBED, uid, allow_public_view=False)
 
         payload = _safe_dict(data)
@@ -2841,22 +3752,28 @@ def update_project_embed_policy(
             commit=False,
         )
 
-        if commit:
-            db.session.commit()
-        else:
-            db.session.flush()
-
+        _db_flush_or_commit(commit)
         return policy
 
     except Exception:
         if commit:
-            db.session.rollback()
+            _db_rollback_safely()
         raise
 
 
 # ─────────────────────────────────────────────────────────────
 # High-level API helpers
 # ─────────────────────────────────────────────────────────────
+
+def _permission_denied_result(exc: PermissionDenied) -> ProjectOperationResult:
+    return ProjectOperationResult(
+        ok=False,
+        status_code=getattr(exc, "status_code", 403),
+        code=getattr(exc, "code", "project_permission_denied"),
+        error=getattr(exc, "message", str(exc)),
+        payload=exc.to_dict() if hasattr(exc, "to_dict") else {"ok": False, "error": str(exc)},
+    )
+
 
 def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[int] = None) -> ProjectOperationResult:
     try:
@@ -2873,6 +3790,7 @@ def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[i
                     include_permissions=True,
                     include_embed_policy=True,
                     include_service_links=True,
+                    include_publication=True,
                 ),
                 "sidebar_item": serialize_project_sidebar_item(project, user_id=user_id),
                 "redirect_url": project_public_url(project),
@@ -2881,6 +3799,9 @@ def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[i
             status_code=201,
             code="project_created",
         )
+
+    except PermissionDenied as exc:
+        return _permission_denied_result(exc)
 
     except Exception as exc:
         _log_exception("create_project_result failed", exc)
@@ -2924,6 +3845,7 @@ def update_project_result(
                     include_permissions=True,
                     include_embed_policy=True,
                     include_service_links=True,
+                    include_publication=True,
                 ),
                 "sidebar_item": serialize_project_sidebar_item(project, user_id=user_id),
                 "redirect_url": project_public_url(project),
@@ -2934,13 +3856,7 @@ def update_project_result(
         )
 
     except PermissionDenied as exc:
-        return ProjectOperationResult(
-            ok=False,
-            status_code=exc.status_code,
-            code=exc.code,
-            error=exc.message,
-            payload=exc.to_dict(),
-        )
+        return _permission_denied_result(exc)
 
     except Exception as exc:
         _log_exception("update_project_result failed", exc)
@@ -2970,7 +3886,7 @@ def ensure_project_chunk_link_result(
                 error="project not found",
             )
 
-        uid = get_current_user_id(user_id)
+        uid = require_persistent_actor(user_id)
         require_project_permission(project, PERMISSION_MANAGE, uid, allow_public_view=False)
 
         result = ensure_project_chunk_link(
@@ -2991,6 +3907,7 @@ def ensure_project_chunk_link_result(
                     include_permissions=True,
                     include_service_links=True,
                     include_embed_policy=True,
+                    include_publication=True,
                 ),
                 "sidebar_item": serialize_project_sidebar_item(project, user_id=uid),
                 "chunk": _project_chunk_refs(project),
@@ -3002,13 +3919,7 @@ def ensure_project_chunk_link_result(
         )
 
     except PermissionDenied as exc:
-        return ProjectOperationResult(
-            ok=False,
-            status_code=exc.status_code,
-            code=exc.code,
-            error=exc.message,
-            payload=exc.to_dict(),
-        )
+        return _permission_denied_result(exc)
 
     except Exception as exc:
         _log_exception("ensure_project_chunk_link_result failed", exc)
@@ -3049,6 +3960,8 @@ def get_project_result(
                 payload={"ok": False, "access": permissions.to_dict()},
             )
 
+        include_manage_data = bool(permissions.can_manage)
+
         return ProjectOperationResult(
             ok=True,
             project=project,
@@ -3058,10 +3971,11 @@ def get_project_result(
                     project,
                     user_id=user_id,
                     include_permissions=True,
-                    include_members=permissions.can_manage,
-                    include_service_links=True,
+                    include_members=include_manage_data,
+                    include_service_links=include_manage_data,
                     include_versions=True,
-                    include_embed_policy=permissions.can_manage or permissions.can_embed,
+                    include_embed_policy=include_manage_data or permissions.can_embed,
+                    include_publication=True,
                 ),
                 "sidebar_item": serialize_project_sidebar_item(project, user_id=user_id),
                 "chunk": _project_chunk_refs(project),
@@ -3089,11 +4003,35 @@ def list_projects_result(
     offset: int = 0,
 ) -> ProjectOperationResult:
     try:
-        uid = get_current_user_id(user_id)
+        context = get_actor_context(user_id)
+        uid = get_actor_user_id_optional(user_id)
+
+        if not uid and _safe_bool(context.get("demo_mode"), False):
+            return ProjectOperationResult(
+                ok=True,
+                payload={
+                    "ok": True,
+                    "user_id": None,
+                    "auth": context,
+                    "demo_mode": True,
+                    "items": [],
+                    "projects": [],
+                    "sidebar_items": [],
+                    "total": 0,
+                    "limit": _query_limit(limit, 100, 500),
+                    "offset": max(_safe_int(offset, 0), 0),
+                    "message": "Demo-Modus: Es werden keine persistenten Projekte geladen.",
+                },
+                status_code=200,
+                code="projects_loaded_demo_mode",
+            )
+
+        uid = uid or get_current_user_id(user_id)
 
         projects = list_projects_for_user(
             user_id=uid,
             include_public=True,
+            include_unlisted=False,
             include_deleted=False,
             search=search,
             limit=limit,
@@ -3115,6 +4053,7 @@ def list_projects_result(
             payload={
                 "ok": True,
                 "user_id": uid,
+                "auth": context,
                 "items": items,
                 "projects": items,
                 "sidebar_items": sidebar_items,
@@ -3174,13 +4113,7 @@ def delete_project_result(
         )
 
     except PermissionDenied as exc:
-        return ProjectOperationResult(
-            ok=False,
-            status_code=exc.status_code,
-            code=exc.code,
-            error=exc.message,
-            payload=exc.to_dict(),
-        )
+        return _permission_denied_result(exc)
 
     except Exception as exc:
         _log_exception("delete_project_result failed", exc)
@@ -3251,12 +4184,22 @@ def get_project_service_status() -> Dict[str, Any]:
                     },
                 }
 
+        context = get_actor_context()
+
         return {
             "ok": True,
             "service": "project_service",
-            "phase": "app-project-management-with-chunk-provisioning",
-            "current_user_id": get_current_user_id(),
+            "phase": "single-address-auth-demo-aware-project-management",
+            "current_user_id": get_actor_user_id_optional(),
+            "auth": context,
             "counts": counts,
+            "project_form": {
+                "address_input_mode": "single_box",
+                "visibility_mode": "cards_private_unlisted_public",
+                "system_refs_visible_in_project_form": False,
+                "structured_address_reserved_for_geocoder": True,
+                "coordinates_reserved_for_geocoder": True,
+            },
             "chunk": {
                 "clientAvailable": _chunk_client_available(),
                 "provisioningEnabled": _chunk_provisioning_enabled(),
@@ -3299,6 +4242,11 @@ __all__ = [
     "PROJECT_VISIBILITY_PUBLIC",
     "PROJECT_VISIBILITY_UNLISTED",
     "PROJECT_VISIBILITY_SHARED",
+    "GEOCODE_STATUS_NONE",
+    "GEOCODE_STATUS_PENDING",
+    "GEOCODE_STATUS_STALE",
+    "GEOCODE_STATUS_RESOLVED",
+    "GEOCODE_STATUS_FAILED",
     "SERVICE_CHUNK",
     "SERVICE_EDITOR",
     "SERVICE_OPENLAYER",
@@ -3316,50 +4264,58 @@ __all__ = [
     "ProjectOperationResult",
     "ProjectPermissionResult",
     "PermissionDenied",
-    "project_public_url",
-    "project_workspace_path",
-    "project_editor_path",
-    "project_map_path",
-    "project_cad2d_path",
-    "project_lv_path",
-    "project_admin_path",
+    "actor_can_persist",
+    "actor_is_demo",
+    "build_address_text_from_parts",
     "build_project_paths",
-    "get_current_user_id",
+    "create_or_update_project",
+    "create_project",
+    "create_project_result",
+    "create_project_version_link",
+    "delete_project",
+    "delete_project_result",
+    "ensure_project_chunk_link",
+    "ensure_project_chunk_link_result",
     "ensure_project_user",
+    "get_actor_context",
+    "get_actor_user_id_optional",
+    "get_current_user_id",
+    "get_or_create_embed_policy",
+    "get_or_create_project_conversation",
+    "get_project_address_text",
+    "get_project_by_conversation_id",
     "get_project_by_id",
     "get_project_by_public_id",
-    "get_project_by_conversation_id",
-    "resolve_project",
     "get_project_permission_result",
-    "serialize_project_permissions",
-    "require_project_permission",
-    "serialize_project",
-    "serialize_project_sidebar_item",
-    "serialize_project_list",
-    "list_projects_for_user",
-    "list_project_sidebar_items",
-    "ensure_project_chunk_link",
-    "retry_project_chunk_link",
-    "create_project",
-    "update_project",
-    "create_or_update_project",
-    "get_or_create_project_conversation",
-    "get_or_create_embed_policy",
-    "delete_project",
-    "archive_project",
-    "transfer_project_owner",
-    "list_project_memberships",
-    "set_project_member_role",
-    "list_project_service_links",
-    "upsert_project_service_link",
-    "list_project_versions",
-    "create_project_version_link",
-    "update_project_embed_policy",
-    "create_project_result",
-    "update_project_result",
-    "ensure_project_chunk_link_result",
     "get_project_result",
-    "list_projects_result",
-    "delete_project_result",
     "get_project_service_status",
+    "list_project_memberships",
+    "list_project_service_links",
+    "list_project_sidebar_items",
+    "list_project_versions",
+    "list_projects_for_user",
+    "list_projects_result",
+    "normalize_role",
+    "project_admin_path",
+    "project_cad2d_path",
+    "project_editor_path",
+    "project_lv_path",
+    "project_map_path",
+    "project_public_url",
+    "project_workspace_path",
+    "require_persistent_actor",
+    "require_project_permission",
+    "resolve_project",
+    "retry_project_chunk_link",
+    "revoke_project_member",
+    "serialize_project",
+    "serialize_project_list",
+    "serialize_project_permissions",
+    "serialize_project_sidebar_item",
+    "set_project_member_role",
+    "transfer_project_owner",
+    "update_project",
+    "update_project_embed_policy",
+    "update_project_result",
+    "upsert_project_service_link",
 ]

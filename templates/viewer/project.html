@@ -6,9 +6,18 @@
   - Projektdefinition/-bearbeitung im Workspace-iframe.
   - Wird initial als erster Workspace-Tab geladen.
   - Erst wenn das Projekt gespeichert/konfiguriert ist, sollen Map/3D/2D/LV nutzbar werden.
-  - Frontend spricht später mit /v1/projects.
+  - Frontend spricht mit /v1/projects.
   - Keine direkte Chunk-, Editor-, 2D- oder LV-Persistenz.
   - Diese Seite verwaltet nur App-Projektmetadaten.
+
+  Neuer Zielzustand:
+  - Eine sichtbare Adressbox: address_text.
+  - Keine manuellen Koordinatenfelder im Projektformular.
+  - Keine strukturierten Adressfelder im Projektformular.
+  - Keine Systemreferenzen im normalen Projektformular.
+  - Sichtbarkeit über drei Karten: private | unlisted | public.
+  - Team/Einladungen und Veröffentlichung nur für can_manage.
+  - Demo-Modus wird sichtbar und nicht als echte Persistenz behandelt.
 
   Erwartete optionale Template-Variablen:
   - project
@@ -17,7 +26,7 @@
   - is_new
 
   Robustheitsregel:
-  - Bei Dicts immer .get(...) verwenden, nicht .items oder .values.
+  - Bei Dicts immer .get(...) verwenden.
   - Alle Felder haben Defaults.
 #}
 
@@ -26,6 +35,9 @@
 
 {% set _current_user_raw = current_user|default({}, true) %}
 {% set _current_user = _current_user_raw if _current_user_raw is mapping else {} %}
+
+{% set _auth_raw = _current_user.get('auth', _current_user) %}
+{% set _auth = _auth_raw if _auth_raw is mapping else {} %}
 
 {% set _is_new_raw = is_new|default(_project.get('is_new', _project.get('isNew', false)), true) %}
 {% set _is_new = true if _is_new_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
@@ -39,27 +51,19 @@
 
 {% set _address_obj_raw = _project.get('address', {}) %}
 {% set _address_obj = _address_obj_raw if _address_obj_raw is mapping else {} %}
+{% set _address_text = _project.get('address_text', _project.get('addressText', _address_obj.get('text', ''))) %}
 
-{% set _address_text = _project.get('address_text', _address_obj.get('text', '')) %}
-{% set _address_street = _project.get('address_street', _address_obj.get('street', '')) %}
-{% set _address_house_number = _project.get('address_house_number', _address_obj.get('house_number', '')) %}
-{% set _address_postal_code = _project.get('address_postal_code', _address_obj.get('postal_code', '')) %}
-{% set _address_city = _project.get('address_city', _address_obj.get('city', '')) %}
-{% set _address_region = _project.get('address_region', _address_obj.get('region', '')) %}
-{% set _address_country = _project.get('address_country', _address_obj.get('country', 'DE')) %}
+{% set _visibility_raw = _project.get('visibility', 'private') %}
+{% set _visibility = 'private' %}
+{% if _visibility_raw in ['public', 'öffentlich', 'oeffentlich', 'open'] %}
+  {% set _visibility = 'public' %}
+{% elif _visibility_raw in ['unlisted', 'not_listed', 'nicht_gelistet', 'link', 'link_shared'] %}
+  {% set _visibility = 'unlisted' %}
+{% else %}
+  {% set _visibility = 'private' %}
+{% endif %}
 
-{% set _coordinates_obj_raw = _project.get('coordinates', {}) %}
-{% set _coordinates_obj = _coordinates_obj_raw if _coordinates_obj_raw is mapping else {} %}
-
-{% set _latitude = _project.get('latitude', _coordinates_obj.get('latitude', '')) %}
-{% set _longitude = _project.get('longitude', _coordinates_obj.get('longitude', '')) %}
-{% set _coordinate_srid = _project.get('coordinate_srid', _coordinates_obj.get('srid', 4326)) %}
-
-{% set _visibility = _project.get('visibility', 'private') %}
-{% set _is_public_raw = _project.get('is_public', false) %}
-{% set _is_public = true if _is_public_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-
-{% set _setup_status = _project.get('setup_status', 'draft') %}
+{% set _setup_status = _project.get('setup_status', _project.get('setupStatus', 'draft')) %}
 {% set _is_configured_raw = _project.get('is_configured', _project.get('isConfigured', false)) %}
 {% set _is_configured = true if _is_configured_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 
@@ -67,16 +71,46 @@
 {% set _access = _access_raw if _access_raw is mapping else {} %}
 {% set _permissions_raw = _access.get('permissions', {}) %}
 {% set _permissions = _permissions_raw if _permissions_raw is mapping else {} %}
+
+{% set _can_view_raw = _access.get('can_view', _permissions.get('view', true if _is_new else false)) %}
+{% set _can_view = true if _can_view_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
 {% set _can_edit_raw = _access.get('can_edit', _permissions.get('edit', true if _is_new else false)) %}
 {% set _can_edit = true if _can_edit_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 
+{% set _can_manage_raw = _access.get('can_manage', _permissions.get('manage', _access.get('can_manage_settings', _permissions.get('manage_settings', false)))) %}
+{% set _can_manage = true if _can_manage_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _can_view_settings_raw = _access.get('can_view_settings', _permissions.get('view_settings', _can_manage)) %}
+{% set _can_view_settings = true if _can_view_settings_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _can_manage_team_raw = _access.get('can_manage_team', _permissions.get('manage_team', _can_manage)) %}
+{% set _can_manage_team = true if _can_manage_team_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _authenticated_raw = _auth.get('authenticated', _auth.get('is_authenticated', _auth.get('isAuthenticated', true))) %}
+{% set _authenticated = true if _authenticated_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _demo_raw = _auth.get('demo_mode', _auth.get('demoMode', _auth.get('is_demo', _project.get('demo_mode', _project.get('demoMode', false))))) %}
+{% set _demo_mode = true if _demo_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _persistent_raw = _auth.get('persistent', true if _authenticated and not _demo_mode else false) %}
+{% set _persistent = true if _persistent_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
 {% if _is_new %}
-  {% set _can_edit = true %}
+  {% set _can_view = true %}
+  {% if not _demo_mode %}
+    {% set _can_edit = true %}
+  {% endif %}
 {% endif %}
+
+{% set _form_can_edit = true if _can_edit and _persistent and not _demo_mode else false %}
 
 {% set _detail_path = '/v1/projects/' ~ _project_public_id if _project_public_id and _project_public_id != 'new' else '' %}
 {% set _create_path = '/v1/projects' %}
 {% set _project_context_path = '/ui/project/' ~ _project_public_id ~ '/context.json' if _project_public_id else '/ui/project/new/context.json' %}
+{% set _members_path = '/v1/projects/' ~ _project_public_id ~ '/members' if _project_public_id and _project_public_id != 'new' else '' %}
+{% set _invitations_path = '/v1/projects/' ~ _project_public_id ~ '/invitations' if _project_public_id and _project_public_id != 'new' else '' %}
+{% set _publication_path = '/v1/projects/' ~ _project_public_id ~ '/publication' if _project_public_id and _project_public_id != 'new' else '' %}
 
 <!doctype html>
 <html lang="de" data-theme="light">
@@ -130,6 +164,7 @@
       try {
         var project = {{ _project|tojson }};
         var currentUser = {{ _current_user|tojson }};
+        var access = {{ _access|tojson }};
 
         if (!project || typeof project !== "object") {
           project = {};
@@ -139,26 +174,47 @@
           currentUser = {};
         }
 
+        if (!access || typeof access !== "object") {
+          access = {};
+        }
+
         window.VECTOPLAN_PROJECT_WORKSPACE_CONFIG = {
           appName: "vectoplan-app",
           workspaceKind: "project",
-          version: 1,
+          version: 2,
 
           isNew: {{ _is_new|tojson }},
-          canEdit: {{ _can_edit|tojson }},
+          canView: {{ _can_view|tojson }},
+          canEdit: {{ _form_can_edit|tojson }},
+          canManage: {{ _can_manage|tojson }},
+          canViewSettings: {{ _can_view_settings|tojson }},
+          canManageTeam: {{ _can_manage_team|tojson }},
+
+          authenticated: {{ _authenticated|tojson }},
+          demoMode: {{ _demo_mode|tojson }},
+          persistent: {{ _persistent|tojson }},
 
           project: project,
           currentProject: project,
           currentUser: currentUser,
+          access: access,
 
           projectId: {{ _project_id|tojson }},
           projectPublicId: {{ _project_public_id|tojson }},
+          projectVisibility: {{ _visibility|tojson }},
+          projectConfigured: {{ _is_configured|tojson }},
+
+          addressMode: "single_box",
+          systemReferencesVisible: false,
 
           paths: {
             createProject: {{ _create_path|tojson }},
             updateProject: {{ _detail_path|tojson }},
             getProject: {{ _detail_path|tojson }},
             context: {{ _project_context_path|tojson }},
+            members: {{ _members_path|tojson }},
+            invitations: {{ _invitations_path|tojson }},
+            publication: {{ _publication_path|tojson }},
             projectRoot: "/",
             projectNew: "/project=new"
           },
@@ -168,7 +224,9 @@
             created: "vectoplan:project:created",
             updated: "vectoplan:project:updated",
             deleted: "vectoplan:project:deleted",
-            configured: "vectoplan:project:configured"
+            configured: "vectoplan:project:configured",
+            publicationChanged: "vectoplan:project:publication:changed",
+            teamChanged: "vectoplan:project:team:changed"
           }
         };
 
@@ -191,7 +249,12 @@
     data-project-id="{{ _project_id|e }}"
     data-project-public-id="{{ _project_public_id|e }}"
     data-project-is-new="{{ 'true' if _is_new else 'false' }}"
-    data-project-can-edit="{{ 'true' if _can_edit else 'false' }}"
+    data-project-can-view="{{ 'true' if _can_view else 'false' }}"
+    data-project-can-edit="{{ 'true' if _form_can_edit else 'false' }}"
+    data-project-can-manage="{{ 'true' if _can_manage else 'false' }}"
+    data-project-demo-mode="{{ 'true' if _demo_mode else 'false' }}"
+    data-project-persistent="{{ 'true' if _persistent else 'false' }}"
+    data-project-visibility="{{ _visibility|e }}"
     data-project-setup-status="{{ _setup_status|e }}"
     data-project-is-configured="{{ 'true' if _is_configured else 'false' }}"
   >
@@ -210,22 +273,25 @@
         </h1>
 
         <p class="vp-project-hero__text">
-          Definiere zuerst Name, Beschreibung und Standort. Danach werden die Arbeitsbereiche Map, 3D, 2D und LV freigeschaltet.
+          Verwalte dein Projekt. Rollen- und Rechteverwaltung des Projektes
         </p>
       </div>
 
-      <div class="vp-project-hero__status" aria-label="Projektstatus">
-        {% if _is_configured %}
-          <span class="vp-project-status vp-project-status--configured" data-project-status-pill>
-            Konfiguriert
-          </span>
-        {% else %}
-          <span class="vp-project-status vp-project-status--draft" data-project-status-pill>
-            Entwurf
-          </span>
-        {% endif %}
-      </div>
+
     </section>
+
+    {% if _demo_mode %}
+      <section class="vp-project-alert vp-project-alert--demo" role="status" aria-live="polite" data-project-demo-alert>
+        <strong>Demo-Modus:</strong>
+        Du bist nicht eingeloggt. Änderungen werden nicht dauerhaft gespeichert und können nach Aktualisierung oder nach Ablauf der Demo-Sitzung verloren gehen.
+      </section>
+    {% endif %}
+
+    {% if not _persistent and not _demo_mode %}
+      <section class="vp-project-alert vp-project-alert--warning" role="status" aria-live="polite" data-project-auth-alert>
+        Dein Login ist noch nicht mit einem lokalen VECTOPLAN-App-User verknüpft. Persistente Projektaktionen sind erst nach dem späteren Login-Sync möglich.
+      </section>
+    {% endif %}
 
     <section
       id="projectSystemAlert"
@@ -236,384 +302,145 @@
       hidden
     ></section>
 
-    <form
-      id="projectForm"
-      class="vp-project-form"
-      data-project-form
-      autocomplete="off"
-      novalidate
-    >
-      <input type="hidden" id="projectId" name="id" value="{{ _project_id|e }}">
-      <input type="hidden" id="projectPublicId" name="public_id" value="{{ _project_public_id|e }}">
-      <input type="hidden" id="projectIsNew" name="is_new" value="{{ 'true' if _is_new else 'false' }}">
-
-      <section class="vp-project-card" aria-labelledby="projectBasicsTitle">
+    {% if not _can_view and not _is_new %}
+      <section class="vp-project-card vp-project-card--locked" aria-labelledby="projectLockedTitle">
         <header class="vp-project-card__header">
           <div>
-            <h2 id="projectBasicsTitle" class="vp-project-card__title">
-              Basisdaten
+            <h2 id="projectLockedTitle" class="vp-project-card__title">
+              Zugriff nicht erlaubt
             </h2>
             <p class="vp-project-card__text">
-              Diese Angaben erscheinen in der Projektliste und bilden den Startpunkt für alle weiteren Arbeitsbereiche.
+              Du hast keine Berechtigung, dieses Projekt zu sehen. Wende dich an einen Projekt-Admin oder öffne einen freigegebenen Projektlink.
             </p>
           </div>
         </header>
-
-        <div class="vp-project-grid vp-project-grid--two">
-          <div class="vp-project-field vp-project-field--wide">
-            <label class="vp-project-label" for="projectName">
-              Projektname <span aria-hidden="true">*</span>
-            </label>
-            <input
-              id="projectName"
-              class="vp-project-input"
-              name="name"
-              type="text"
-              value="{{ _project_name|e }}"
-              maxlength="200"
-              placeholder="z. B. Wohnhaus Musterstraße"
-              required
-              data-project-name
-              {% if not _can_edit %}disabled{% endif %}
-            >
-            <p class="vp-project-help">
-              Pflichtfeld. Der Name wird links in der Projektliste angezeigt.
-            </p>
-          </div>
-
-          <div class="vp-project-field vp-project-field--wide">
-            <label class="vp-project-label" for="projectDescription">
-              Beschreibung
-            </label>
-            <textarea
-              id="projectDescription"
-              class="vp-project-textarea"
-              name="description"
-              rows="5"
-              maxlength="5000"
-              placeholder="Kurze Beschreibung, Nutzung, Ziel oder Besonderheiten des Projekts"
-              data-project-description
-              {% if not _can_edit %}disabled{% endif %}
-            >{{ _project_description|e }}</textarea>
-          </div>
-        </div>
       </section>
+    {% else %}
+      <form
+        id="projectForm"
+        class="vp-project-form"
+        data-project-form
+        autocomplete="off"
+        novalidate
+      >
+        <input type="hidden" id="projectId" name="id" value="{{ _project_id|e }}">
+        <input type="hidden" id="projectPublicId" name="public_id" value="{{ _project_public_id|e }}">
+        <input type="hidden" id="projectIsNew" name="is_new" value="{{ 'true' if _is_new else 'false' }}">
 
-      <section class="vp-project-card" aria-labelledby="projectAddressTitle">
-        <header class="vp-project-card__header">
-          <div>
-            <h2 id="projectAddressTitle" class="vp-project-card__title">
-              Adresse und Standort
-            </h2>
-            <p class="vp-project-card__text">
-              Die Adresse wird später für Karte, Geodaten, Koordinaten und externe Datenquellen verwendet.
-            </p>
-          </div>
-        </header>
+        <section class="vp-project-card" aria-labelledby="projectBasicsTitle">
+          <header class="vp-project-card__header">
+            <div>
+              <h2 id="projectBasicsTitle" class="vp-project-card__title">
+                Basisdaten
+              </h2>
+              <p class="vp-project-card__text">
+                Diese Angaben erscheinen in der Projektliste und bilden den Startpunkt für alle weiteren Arbeitsbereiche.
+              </p>
+            </div>
+          </header>
 
-        <div class="vp-project-grid">
-          <div class="vp-project-field vp-project-field--wide">
-            <label class="vp-project-label" for="projectAddressText">
-              Adresse <span aria-hidden="true">*</span>
-            </label>
-            <textarea
-              id="projectAddressText"
-              class="vp-project-textarea"
-              name="address_text"
-              rows="3"
-              maxlength="2000"
-              placeholder="Vollständige Adresse oder Standortbeschreibung"
-              required
-              data-project-address-text
-              {% if not _can_edit %}disabled{% endif %}
-            >{{ _address_text|e }}</textarea>
-            <p class="vp-project-help">
-              Pflichtfeld für die erste Projektkonfiguration.
-            </p>
-          </div>
-
-          <div class="vp-project-field">
-            <label class="vp-project-label" for="projectAddressStreet">
-              Straße
-            </label>
-            <input
-              id="projectAddressStreet"
-              class="vp-project-input"
-              name="address_street"
-              type="text"
-              value="{{ _address_street|e }}"
-              maxlength="240"
-              data-project-address-street
-              {% if not _can_edit %}disabled{% endif %}
-            >
-          </div>
-
-          <div class="vp-project-field">
-            <label class="vp-project-label" for="projectAddressHouseNumber">
-              Hausnummer
-            </label>
-            <input
-              id="projectAddressHouseNumber"
-              class="vp-project-input"
-              name="address_house_number"
-              type="text"
-              value="{{ _address_house_number|e }}"
-              maxlength="40"
-              data-project-address-house-number
-              {% if not _can_edit %}disabled{% endif %}
-            >
-          </div>
-
-          <div class="vp-project-field">
-            <label class="vp-project-label" for="projectAddressPostalCode">
-              PLZ
-            </label>
-            <input
-              id="projectAddressPostalCode"
-              class="vp-project-input"
-              name="address_postal_code"
-              type="text"
-              value="{{ _address_postal_code|e }}"
-              maxlength="40"
-              inputmode="text"
-              data-project-address-postal-code
-              {% if not _can_edit %}disabled{% endif %}
-            >
-          </div>
-
-          <div class="vp-project-field">
-            <label class="vp-project-label" for="projectAddressCity">
-              Ort
-            </label>
-            <input
-              id="projectAddressCity"
-              class="vp-project-input"
-              name="address_city"
-              type="text"
-              value="{{ _address_city|e }}"
-              maxlength="160"
-              data-project-address-city
-              {% if not _can_edit %}disabled{% endif %}
-            >
-          </div>
-
-          <div class="vp-project-field">
-            <label class="vp-project-label" for="projectAddressRegion">
-              Region / Bundesland
-            </label>
-            <input
-              id="projectAddressRegion"
-              class="vp-project-input"
-              name="address_region"
-              type="text"
-              value="{{ _address_region|e }}"
-              maxlength="160"
-              data-project-address-region
-              {% if not _can_edit %}disabled{% endif %}
-            >
-          </div>
-
-          <div class="vp-project-field">
-            <label class="vp-project-label" for="projectAddressCountry">
-              Land
-            </label>
-            <input
-              id="projectAddressCountry"
-              class="vp-project-input"
-              name="address_country"
-              type="text"
-              value="{{ _address_country|e }}"
-              maxlength="80"
-              data-project-address-country
-              {% if not _can_edit %}disabled{% endif %}
-            >
-          </div>
-        </div>
-      </section>
-
-      <section class="vp-project-card" aria-labelledby="projectCoordinatesTitle">
-        <header class="vp-project-card__header">
-          <div>
-            <h2 id="projectCoordinatesTitle" class="vp-project-card__title">
-              Koordinaten
-            </h2>
-            <p class="vp-project-card__text">
-              Optional. Koordinaten können später aus der Adresse berechnet oder manuell gesetzt werden.
-            </p>
-          </div>
-        </header>
-
-        <div class="vp-project-grid vp-project-grid--three">
-          <div class="vp-project-field">
-            <label class="vp-project-label" for="projectLatitude">
-              Latitude
-            </label>
-            <input
-              id="projectLatitude"
-              class="vp-project-input"
-              name="latitude"
-              type="number"
-              step="any"
-              inputmode="decimal"
-              value="{{ _latitude if _latitude is not none else '' }}"
-              placeholder="z. B. 52.5200"
-              data-project-latitude
-              {% if not _can_edit %}disabled{% endif %}
-            >
-          </div>
-
-          <div class="vp-project-field">
-            <label class="vp-project-label" for="projectLongitude">
-              Longitude
-            </label>
-            <input
-              id="projectLongitude"
-              class="vp-project-input"
-              name="longitude"
-              type="number"
-              step="any"
-              inputmode="decimal"
-              value="{{ _longitude if _longitude is not none else '' }}"
-              placeholder="z. B. 13.4050"
-              data-project-longitude
-              {% if not _can_edit %}disabled{% endif %}
-            >
-          </div>
-
-          <div class="vp-project-field">
-            <label class="vp-project-label" for="projectCoordinateSrid">
-              SRID
-            </label>
-            <input
-              id="projectCoordinateSrid"
-              class="vp-project-input"
-              name="coordinate_srid"
-              type="number"
-              step="1"
-              inputmode="numeric"
-              value="{{ _coordinate_srid }}"
-              data-project-coordinate-srid
-              {% if not _can_edit %}disabled{% endif %}
-            >
-          </div>
-        </div>
-      </section>
-
-      <section class="vp-project-card" aria-labelledby="projectVisibilityTitle">
-        <header class="vp-project-card__header">
-          <div>
-            <h2 id="projectVisibilityTitle" class="vp-project-card__title">
-              Sichtbarkeit
-            </h2>
-            <p class="vp-project-card__text">
-              Steuert, ob ein Projekt privat bleibt oder später öffentlich sichtbar sein darf.
-            </p>
-          </div>
-        </header>
-
-        <div class="vp-project-grid vp-project-grid--two">
-          <div class="vp-project-field">
-            <label class="vp-project-label" for="projectVisibility">
-              Sichtbarkeit
-            </label>
-            <select
-              id="projectVisibility"
-              class="vp-project-select"
-              name="visibility"
-              data-project-visibility
-              {% if not _can_edit %}disabled{% endif %}
-            >
-              <option value="private" {% if _visibility == 'private' %}selected{% endif %}>Privat</option>
-              <option value="shared" {% if _visibility == 'shared' %}selected{% endif %}>Geteilt</option>
-              <option value="unlisted" {% if _visibility == 'unlisted' %}selected{% endif %}>Nicht gelistet</option>
-              <option value="public" {% if _visibility == 'public' %}selected{% endif %}>Öffentlich</option>
-            </select>
-          </div>
-
-          <div class="vp-project-field vp-project-field--checkbox">
-            <label class="vp-project-check">
+          <div class="vp-project-grid vp-project-grid--two">
+            <div class="vp-project-field vp-project-field--wide">
+              <label class="vp-project-label" for="projectName">
+                Projektname <span aria-hidden="true">*</span>
+              </label>
               <input
-                id="projectIsPublic"
-                name="is_public"
-                type="checkbox"
-                value="1"
-                data-project-is-public
-                {% if _is_public %}checked{% endif %}
-                {% if not _can_edit %}disabled{% endif %}
+                id="projectName"
+                class="vp-project-input"
+                name="name"
+                type="text"
+                value="{{ _project_name|e }}"
+                maxlength="200"
+                placeholder="z. B. Wohnhaus Musterstraße"
+                required
+                data-project-name
+                {% if not _form_can_edit %}disabled{% endif %}
               >
-              <span>
-                Öffentlich sichtbar
-              </span>
-            </label>
-            <p class="vp-project-help">
-              Spätere iframe-/Webseiten-Einbindung wird zusätzlich über eigene Embed-Freigaben gesteuert.
-            </p>
-          </div>
-        </div>
-      </section>
 
-      <section class="vp-project-card vp-project-card--system" aria-labelledby="projectSystemTitle">
-        <header class="vp-project-card__header">
-          <div>
-            <h2 id="projectSystemTitle" class="vp-project-card__title">
-              Systemreferenzen
-            </h2>
-            <p class="vp-project-card__text">
-              Diese IDs verweisen später auf andere Microservices. Die App verwaltet hier nur die Verknüpfung.
-            </p>
-          </div>
-        </header>
+            </div>
 
-        <dl class="vp-project-kv">
-          <div>
-            <dt>Projekt-ID</dt>
-            <dd>{{ _project_id if _project_id else 'wird beim Speichern erstellt' }}</dd>
+            <div class="vp-project-field vp-project-field--wide">
+              <label class="vp-project-label" for="projectDescription">
+                Beschreibung
+              </label>
+              <textarea
+                id="projectDescription"
+                class="vp-project-textarea"
+                name="description"
+                rows="5"
+                maxlength="5000"
+                placeholder="Kurze Beschreibung, Nutzung, Ziel oder Besonderheiten des Projekts"
+                data-project-description
+                {% if not _form_can_edit %}disabled{% endif %}
+              >{{ _project_description|e }}</textarea>
+            </div>
           </div>
-          <div>
-            <dt>Öffentliche ID</dt>
-            <dd>{{ _project_public_id if _project_public_id else 'new' }}</dd>
-          </div>
-          <div>
-            <dt>Setup-Status</dt>
-            <dd data-project-setup-status-text>{{ _setup_status }}</dd>
-          </div>
-        </dl>
-      </section>
+        </section>
 
-      <footer class="vp-project-form__footer">
-        {% if not _can_edit %}
-          <p class="vp-project-readonly">
-            Du hast für dieses Projekt nur Leserechte.
-          </p>
+        {% include "viewer/partials/project_address.html" %}
+        {% include "viewer/partials/project_visibility.html" %}
+
+        {% if _can_manage and not _is_new %}
+          {% include "viewer/partials/project_publication.html" %}
+          {% include "viewer/partials/project_team.html" %}
+        {% elif not _is_new %}
+          <section class="vp-project-card vp-project-card--locked" aria-labelledby="projectSettingsLockedTitle">
+            <header class="vp-project-card__header">
+              <div>
+                <h2 id="projectSettingsLockedTitle" class="vp-project-card__title">
+                  Einstellungen geschützt
+                </h2>
+                <p class="vp-project-card__text">
+                  Team, Rechte, Veröffentlichung und Systembereiche sind nur für Projektverwalter sichtbar.
+                </p>
+              </div>
+            </header>
+          </section>
         {% endif %}
 
-        <div class="vp-project-form__actions">
-          <button
-            type="button"
-            class="vp-project-btn vp-project-btn--secondary"
-            data-project-reset
-            {% if not _can_edit %}disabled{% endif %}
-          >
-            Zurücksetzen
-          </button>
+        <footer class="vp-project-form__footer">
+          {% if not _form_can_edit %}
+            <p class="vp-project-readonly">
+              {% if _demo_mode %}
+                Demo-Modus: Dieses Formular speichert nicht dauerhaft.
+              {% elif not _persistent %}
+                Dein Account ist noch nicht lokal verknüpft. Speichern ist deaktiviert.
+              {% elif not _can_edit %}
+                Du hast für dieses Projekt nur Leserechte.
+              {% endif %}
+            </p>
+          {% endif %}
 
-          <button
-            type="submit"
-            class="vp-project-btn vp-project-btn--primary"
-            data-project-submit
-            {% if not _can_edit %}disabled{% endif %}
-          >
-            {% if _is_new %}
-              Projekt erstellen
-            {% else %}
-              Projekt speichern
-            {% endif %}
-          </button>
-        </div>
-      </footer>
-    </form>
+          <div class="vp-project-form__actions">
+            <button
+              type="button"
+              class="vp-project-btn vp-project-btn--secondary"
+              data-project-reset
+              {% if not _form_can_edit %}disabled{% endif %}
+            >
+              Zurücksetzen
+            </button>
+
+            <button
+              type="submit"
+              class="vp-project-btn vp-project-btn--primary"
+              data-project-submit
+              {% if not _form_can_edit %}disabled{% endif %}
+            >
+              {% if _is_new %}
+                Projekt erstellen
+              {% else %}
+                Projekt speichern
+              {% endif %}
+            </button>
+          </div>
+        </footer>
+      </form>
+    {% endif %}
   </main>
 
   <script src="{{ url_for('static', filename='js/project/project_form.js') }}?v={{ _project_public_id|default('new', true) }}"></script>
+  <script src="{{ url_for('static', filename='js/project/project_publication.js') }}?v={{ _project_public_id|default('new', true) }}"></script>
+  <script src="{{ url_for('static', filename='js/project/project_team.js') }}?v={{ _project_public_id|default('new', true) }}"></script>
 </body>
 </html>

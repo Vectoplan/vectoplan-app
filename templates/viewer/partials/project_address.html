@@ -1,0 +1,114 @@
+<!-- services/vectoplan-app/templates/viewer/partials/project_address.html -->
+{#
+  VECTOPLAN Project Address Partial
+
+  Zweck:
+  - Reduzierter Adressbereich für das Projektformular.
+  - Sichtbar ist nur eine einzige Adressbox: address_text.
+  - Strukturierte Adressfelder und Koordinaten werden hier bewusst nicht angezeigt.
+  - Späterer Geocoder kann aus address_text automatisch street/city/lat/lon usw. erzeugen.
+  - Dieses Partial erzeugt keine Systemreferenzen und keine Koordinaten-Eingaben.
+
+  Erwartete optionale Variablen:
+  - project
+  - current_project
+  - _project
+  - can_edit
+  - _can_edit
+  - is_new
+  - _is_new
+  - demo_mode
+  - _demo_mode
+
+  Robustheitsregel:
+  - Bei Dicts immer .get(...) verwenden.
+  - Partial darf auch funktionieren, wenn es ohne vorbereitete Parent-Variablen eingebunden wird.
+#}
+
+{% set _address_project_raw = _project|default(project|default(current_project|default({}, true), true), true) %}
+{% set _address_project = _address_project_raw if _address_project_raw is mapping else {} %}
+
+{% set _address_obj_raw = _address_project.get('address', {}) %}
+{% set _address_obj = _address_obj_raw if _address_obj_raw is mapping else {} %}
+
+{% set _metadata_raw = _address_project.get('metadata', _address_project.get('metadata_json', {})) %}
+{% set _metadata = _metadata_raw if _metadata_raw is mapping else {} %}
+
+{% set _geocode_raw = _address_project.get('geocode', _metadata.get('geocode', {})) %}
+{% set _geocode = _geocode_raw if _geocode_raw is mapping else {} %}
+
+{% set _address_text = _address_project.get('address_text', _address_project.get('addressText', _address_obj.get('text', ''))) %}
+
+{% set _address_can_edit_raw = _can_edit|default(can_edit|default(true, true), true) %}
+{% set _address_can_edit = true if _address_can_edit_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _address_is_new_raw = _is_new|default(is_new|default(_address_project.get('is_new', _address_project.get('isNew', false)), true), true) %}
+{% set _address_is_new = true if _address_is_new_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _address_demo_raw = _demo_mode|default(demo_mode|default(_address_project.get('demo_mode', _address_project.get('demoMode', false)), true), true) %}
+{% set _address_demo_mode = true if _address_demo_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _geocode_status = _address_project.get('geocode_status', _address_project.get('geocodeStatus', _geocode.get('status', 'none'))) %}
+{% set _geocode_source = _geocode.get('source', '') %}
+{% set _geocode_updated_at = _geocode.get('updated_at', _geocode.get('updatedAt', '')) %}
+
+<section
+  class="vp-project-card vp-project-card--address"
+  aria-labelledby="projectAddressTitle"
+  data-project-address-card
+  data-geocode-status="{{ _geocode_status|default('none', true)|e }}"
+>
+  <header class="vp-project-card__header">
+    <div>
+      <h2 id="projectAddressTitle" class="vp-project-card__title">
+        Adresse und Standort
+      </h2>
+
+      <p class="vp-project-card__text">
+        Gib die Adresse deines Projektes ein
+      </p>
+    </div>
+
+
+  </header>
+
+  {% if _address_demo_mode %}
+    <div class="vp-project-inline-note vp-project-inline-note--demo" data-project-address-demo-note>
+      <strong>Demo-Modus:</strong>
+      Diese Adresse wird nicht dauerhaft gespeichert. Änderungen können nach Aktualisierung oder spätestens nach Ablauf der Demo-Sitzung verloren gehen.
+    </div>
+  {% endif %}
+
+  <div class="vp-project-grid">
+    <div class="vp-project-field vp-project-field--wide">
+      <label class="vp-project-label" for="projectAddressText">
+        Adresse <span aria-hidden="true">*</span>
+      </label>
+
+      <textarea
+        id="projectAddressText"
+        class="vp-project-textarea"
+        name="address_text"
+        rows="4"
+        maxlength="2000"
+        placeholder="z. B. Musterstraße 1, 12345 Berlin, Deutschland"
+        required
+        autocomplete="street-address"
+        data-project-address-text
+        data-project-single-address-input
+        {% if not _address_can_edit %}disabled{% endif %}
+      >{{ _address_text|default('', true)|e }}</textarea>
+
+
+    </div>
+  </div>
+
+
+
+
+  <noscript>
+    <p class="vp-project-help">
+      JavaScript ist deaktiviert. Die Adresse kann trotzdem gespeichert werden; Zeichenzähler und Live-Hinweise sind dann nicht verfügbar.
+    </p>
+  </noscript>
+</section>

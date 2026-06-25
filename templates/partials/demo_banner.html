@@ -1,0 +1,160 @@
+<!-- services/vectoplan-app/templates/partials/demo_banner.html -->
+{#
+  VECTOPLAN Demo Banner Partial
+
+  Zweck:
+  - Sichtbarer Hinweis, wenn kein echter Login-/Auth-Kontext vorhanden ist.
+  - Informiert klar, dass der Nutzer im Demo-Modus arbeitet.
+  - Macht deutlich:
+      - keine dauerhafte Speicherung
+      - keine echten Einladungen
+      - kein Bigdata-Zugriff
+      - Daten können nach Refresh oder Ablauf der Demo-Sitzung verloren gehen
+  - Bleibt kompatibel mit aktuellem Dev-User id=1.
+  - Wird nur sichtbar gerendert, wenn demo_mode aktiv ist.
+
+  Erwartete optionale Variablen:
+  - current_user
+  - _current_user
+  - auth
+  - auth_context
+  - demo_mode
+  - _demo_mode
+  - demo_ttl_seconds
+  - demo_expires_at
+  - demo_project_available
+  - demo_project_title
+
+  Empfohlene Einbindung:
+    {% include "partials/demo_banner.html" %}
+
+  Typische Orte:
+  - templates/chat_viewer.html
+  - später ggf. Login-/Landing-/Shell-Templates
+
+  Robustheitsregel:
+  - Partial darf auch ohne vorbereitete Variablen rendern.
+  - Es rendert dann standardmäßig nichts, damit Dev-/Produktivansichten nicht
+    versehentlich einen Demo-Hinweis zeigen.
+#}
+
+{% set _demo_user_raw = _current_user|default(current_user|default(auth|default(auth_context|default({}, true), true), true), true) %}
+{% set _demo_user = _demo_user_raw if _demo_user_raw is mapping else {} %}
+
+{% set _demo_mode_raw = _demo_mode|default(demo_mode|default(_demo_user.get('demo_mode', _demo_user.get('demoMode', _demo_user.get('is_demo', false))), true), true) %}
+{% set _demo_is_active = true if _demo_mode_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _demo_authenticated_raw = _demo_user.get('authenticated', _demo_user.get('is_authenticated', _demo_user.get('isAuthenticated', false))) %}
+{% set _demo_authenticated = true if _demo_authenticated_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _demo_persistent_raw = _demo_user.get('persistent', _demo_user.get('can_persist_projects', _demo_user.get('canPersistProjects', false))) %}
+{% set _demo_persistent = true if _demo_persistent_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _demo_ttl = demo_ttl_seconds|default(_demo_user.get('ttl_seconds', _demo_user.get('ttlSeconds', 1800)), true) %}
+{% set _demo_expires_at = demo_expires_at|default(_demo_user.get('expires_at', _demo_user.get('expiresAt', '')), true) %}
+{% set _demo_warning = _demo_user.get('warning', '') %}
+
+{% set _demo_project_available_raw = demo_project_available|default(_demo_user.get('demo_project_available', _demo_user.get('demoProjectAvailable', false)), true) %}
+{% set _demo_project_available = true if _demo_project_available_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% set _demo_project_title = demo_project_title|default(_demo_user.get('demo_project_title', _demo_user.get('demoProjectTitle', 'Demo-Projekt')), true) %}
+
+{% if _demo_is_active %}
+  <section
+    class="vp-demo-banner"
+    role="status"
+    aria-live="polite"
+    data-demo-banner
+    data-demo-mode="true"
+    data-demo-authenticated="{{ 'true' if _demo_authenticated else 'false' }}"
+    data-demo-persistent="{{ 'true' if _demo_persistent else 'false' }}"
+    data-demo-ttl-seconds="{{ _demo_ttl|e }}"
+    data-demo-expires-at="{{ _demo_expires_at|e }}"
+  >
+    <div class="vp-demo-banner__inner">
+      <div class="vp-demo-banner__icon" aria-hidden="true">
+        ◇
+      </div>
+
+      <div class="vp-demo-banner__content">
+        <div class="vp-demo-banner__header">
+          <h2 class="vp-demo-banner__title">
+            Demo-Modus
+          </h2>
+
+          <span class="vp-demo-banner__badge">
+            nicht eingeloggt
+          </span>
+        </div>
+
+        <p class="vp-demo-banner__text">
+          {% if _demo_warning %}
+            {{ _demo_warning }}
+          {% else %}
+            Du bist nicht eingeloggt und befindest dich im Demo-Modus. Änderungen werden nicht dauerhaft gespeichert und können nach Aktualisierung oder spätestens nach ca. 30 Minuten verloren gehen.
+          {% endif %}
+        </p>
+
+        <ul class="vp-demo-banner__facts" aria-label="Demo-Einschränkungen">
+          <li>
+            Keine dauerhafte Projektspeicherung
+          </li>
+          <li>
+            Keine echten Team-Einladungen
+          </li>
+          <li>
+            Kein Zugriff auf Bigdata-/Abo-Datenquellen
+          </li>
+          <li>
+            Kein echter Account-Kontext
+          </li>
+        </ul>
+
+        {% if _demo_project_available %}
+          <p class="vp-demo-banner__hint" data-demo-project-hint>
+            Aktuell kann ein Demo-Projekt verwendet werden: <strong>{{ _demo_project_title|e }}</strong>.
+          </p>
+        {% else %}
+          <p class="vp-demo-banner__hint" data-demo-project-hint>
+            Aktuell startet die Demo leer. Später kann hier ein Standard-Demo-Projekt eingebunden werden.
+          </p>
+        {% endif %}
+      </div>
+
+      <div class="vp-demo-banner__actions">
+        <a
+          class="vp-demo-banner__link"
+          href="/project=new"
+          data-demo-new-project-link
+        >
+          Leeres Demo-Projekt öffnen
+        </a>
+
+        <a
+          class="vp-demo-banner__link vp-demo-banner__link--secondary"
+          href="/"
+          data-demo-home-link
+        >
+          Zur Projektübersicht
+        </a>
+      </div>
+    </div>
+
+    <div class="vp-demo-banner__footer">
+      <span>
+        Demo-Sitzung:
+        {% if _demo_ttl %}
+          ca. {{ (_demo_ttl|int // 60) if (_demo_ttl|int) >= 60 else 30 }} Minuten
+        {% else %}
+          temporär
+        {% endif %}
+      </span>
+
+      {% if _demo_expires_at %}
+        <span>
+          Ablaufhinweis: {{ _demo_expires_at|e }}
+        </span>
+      {% endif %}
+    </div>
+  </section>
+{% endif %}

@@ -6,20 +6,29 @@ VECTOPLAN projects API.
 
 Zweck:
 - JSON-API für die Projektverwaltung in vectoplan-app.
-- Arbeitet in Phase 1 mit Platzhalter-User id=1.
-- Nutzt services/project_service.py für fachliche Projektlogik.
-- Hält Routen dünn und robust.
-- Verwaltet App-seitige Projekt-Metadaten, Rechte, Service-Links,
-  Version-Links, Embed-Policy und Chunk-Service-Referenzen.
+- Hält Routen dünn und delegiert Fachlogik an services/.
+- Unterstützt:
+    - Projekt erstellen/bearbeiten/löschen
+    - eine sichtbare Adressbox im Projektformular
+    - Sichtbarkeit private/unlisted/public
+    - Team-/Rollenverwaltung
+    - Einladungen per registrierter E-Mail
+    - Veröffentlichte Workspace-Reiter
+    - Embed-/Publication-Policy
+    - Chunk-Referenzen
+    - Demo-/Auth-Kontext
 
-Wichtig:
+Wichtige Architekturregeln:
+- vectoplan-app erzeugt KEINE echten Benutzeraccounts.
+- Login, Registrierung, Account-Typ, Abo-Status und Bigdata-Zugriff liegen
+  später im Auth-/Registrierungsdienst.
+- vectoplan-app verwaltet Projektrollen, Sichtbarkeit, Veröffentlichungen und
+  Projektfrontend.
 - Diese API speichert keine Chunk-Daten.
 - Diese API speichert keine 3D-Welt-Wahrheit.
 - Diese API speichert keine 2D-Geometrie.
 - Diese API speichert keine LV-Fachdaten.
-- Sie verwaltet zentrale Projektverwaltung und Referenzen auf andere Services.
-- Chunk-Provisioning läuft serverseitig über vectoplan-app -> vectoplan-chunk
-  mit VECTOPLAN_CHUNK_INTERNAL_URL.
+- Systemreferenzen sind API-/Admin-Daten und nicht normales Projektformular.
 """
 
 from typing import Any, Dict, Optional
@@ -31,10 +40,12 @@ from services.current_user import (
     ensure_default_user,
     get_current_user_context,
     get_current_user_id,
+    get_current_user_id_optional,
     get_current_user_status,
 )
 
 from services.project_permissions import (
+    PERMISSION_EMBED,
     PERMISSION_MANAGE,
     PERMISSION_VIEW,
     PermissionDenied,
@@ -42,7 +53,6 @@ from services.project_permissions import (
     get_permission_service_status,
     normalize_role,
     require_project_permission,
-    revoke_project_membership,
     serialize_project_permissions,
 )
 
@@ -60,6 +70,7 @@ from services.project_service import (
     list_project_versions,
     list_projects_result,
     resolve_project,
+    revoke_project_member,
     serialize_project,
     serialize_project_sidebar_item,
     set_project_member_role,
@@ -68,6 +79,40 @@ from services.project_service import (
     update_project_result,
     upsert_project_service_link,
 )
+
+try:
+    from services.project_invitation_service import (
+        accept_project_invitation,
+        expire_project_invitations,
+        get_project_invitation_service_status,
+        invite_registered_email_to_project,
+        list_project_invitations,
+        reject_project_invitation,
+        revoke_project_invitation,
+    )
+except Exception:  # pragma: no cover
+    accept_project_invitation = None  # type: ignore
+    expire_project_invitations = None  # type: ignore
+    get_project_invitation_service_status = None  # type: ignore
+    invite_registered_email_to_project = None  # type: ignore
+    list_project_invitations = None  # type: ignore
+    reject_project_invitation = None  # type: ignore
+    revoke_project_invitation = None  # type: ignore
+
+try:
+    from services.project_publication_service import (
+        can_access_project_workspace,
+        get_project_publication,
+        get_project_publication_service_status,
+        normalize_workspace_key,
+        update_project_publication,
+    )
+except Exception:  # pragma: no cover
+    can_access_project_workspace = None  # type: ignore
+    get_project_publication = None  # type: ignore
+    get_project_publication_service_status = None  # type: ignore
+    normalize_workspace_key = None  # type: ignore
+    update_project_publication = None  # type: ignore
 
 
 bp = Blueprint("projects_api", __name__)
@@ -120,12 +165,15 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
         if isinstance(value, bool):
             return value
 
+        if isinstance(value, (int, float)):
+            return bool(value)
+
         text = str(value if value is not None else "").strip().lower()
 
-        if text in {"1", "true", "yes", "y", "on", "ja", "enabled"}:
+        if text in {"1", "true", "yes", "y", "on", "ja", "enabled", "enable"}:
             return True
 
-        if text in {"0", "false", "no", "n", "off", "nein", "disabled"}:
+        if text in {"0", "false", "no", "n", "off", "nein", "disabled", "disable"}:
             return False
 
         return default
@@ -136,7 +184,13 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
 
 def _safe_dict(value: Any) -> Dict[str, Any]:
     try:
-        return dict(value) if isinstance(value, dict) else {}
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return dict(value)
+        if hasattr(value, "to_dict") and callable(value.to_dict):
+            return dict(value.to_dict())
+        return {}
     except Exception:
         return {}
 
@@ -146,6 +200,8 @@ def _safe_list(value: Any) -> list:
         if isinstance(value, list):
             return list(value)
         if isinstance(value, tuple):
+            return list(value)
+        if isinstance(value, set):
             return list(value)
         return []
     except Exception:
@@ -253,6 +309,80 @@ def _log_exception(message: str, exc: Optional[Exception] = None) -> None:
             current_app.logger.exception(message)
     except Exception:
         pass
+
+
+def _current_user_context_dict(*, ensure: bool = False) -> Dict[str, Any]:
+    try:
+        context = get_current_user_context(ensure=ensure)
+        if hasattr(context, "to_dict"):
+            return _safe_dict(context.to_dict())
+        return _safe_dict(context)
+    except Exception:
+        return {
+            "user_id": get_current_user_id(),
+            "authenticated": True,
+            "demo_mode": False,
+            "persistent": True,
+            "source": "route_fallback",
+        }
+
+
+def _current_user_id_optional() -> Optional[int]:
+    try:
+        value = get_current_user_id_optional()
+        parsed = _safe_int(value, 0)
+        return parsed if parsed > 0 else None
+    except Exception:
+        return None
+
+
+def _current_user_id_for_legacy() -> int:
+    try:
+        optional = _current_user_id_optional()
+        if optional:
+            return optional
+        return get_current_user_id()
+    except Exception:
+        return 1
+
+
+def _current_auth_user_id() -> Optional[str]:
+    try:
+        context = _current_user_context_dict(ensure=False)
+        value = _safe_str(
+            context.get("auth_user_id")
+            or context.get("authUserId")
+            or context.get("sub")
+            or context.get("subject"),
+            "",
+            160,
+        )
+        return value or None
+    except Exception:
+        return None
+
+
+def _current_email() -> Optional[str]:
+    try:
+        context = _current_user_context_dict(ensure=False)
+        value = _safe_str(
+            context.get("email")
+            or context.get("auth_email")
+            or context.get("authEmail"),
+            "",
+            320,
+        ).lower()
+        return value or None
+    except Exception:
+        return None
+
+
+def _is_demo_mode() -> bool:
+    try:
+        context = _current_user_context_dict(ensure=False)
+        return _safe_bool(context.get("demo_mode") or context.get("is_demo"), False)
+    except Exception:
+        return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -374,6 +504,7 @@ def _serialize_project_chunk_payload(
             user_id=user_id,
             include_permissions=True,
             include_service_links=include_private,
+            include_publication=True,
         )
 
         chunk = _extract_chunk_from_project_payload(project_payload)
@@ -570,6 +701,7 @@ def _json_error(
     payload: Dict[str, Any] = {
         "ok": False,
         "error": message,
+        "message": message,
         "code": code,
     }
 
@@ -582,12 +714,23 @@ def _json_error(
 def _result_response(result: Any):
     try:
         payload = result.to_dict() if hasattr(result, "to_dict") else {}
-        status = int(getattr(result, "status_code", 200) or 200)
+        status = int(getattr(result, "status_code", payload.get("status_code", 200)) or 200)
         return _json_response(payload, status, no_store=True)
 
     except Exception as exc:
         _log_exception("_result_response failed", exc)
         return _json_error(str(exc), 500, code="result_response_failed")
+
+
+def _service_dict_response(payload: Dict[str, Any], default_status: int = 200):
+    try:
+        body = _safe_dict(payload)
+        status = _safe_int(body.get("status_code"), default_status)
+        if status <= 0:
+            status = default_status
+        return _json_response(body, status, no_store=True)
+    except Exception as exc:
+        return _exception_response("_service_dict_response failed", exc, code="service_response_failed")
 
 
 def _permission_error_response(exc: PermissionDenied):
@@ -618,7 +761,18 @@ def _exception_response(message: str, exc: Exception, *, code: str = "internal_e
 @bp.before_request
 def _projects_api_before_request():
     try:
+        context = _current_user_context_dict(ensure=False)
+
+        # Demo- und nicht persistente externe Auth-Kontexte sollen keinen
+        # Dev-Placeholder-User erzwingen.
+        if _safe_bool(context.get("demo_mode") or context.get("is_demo"), False):
+            return
+
+        if not _safe_bool(context.get("persistent"), bool(context.get("user_id"))):
+            return
+
         ensure_default_user()
+
     except Exception as exc:
         _log_warning("ensure_default_user before projects API failed: %s", exc.__class__.__name__)
 
@@ -630,14 +784,44 @@ def _projects_api_before_request():
 @bp.get("/v1/projects/_status")
 def projects_status():
     try:
+        invitation_status = {}
+        publication_status = {}
+
+        try:
+            if callable(get_project_invitation_service_status):
+                invitation_status = get_project_invitation_service_status()
+        except Exception as exc:
+            invitation_status = {
+                "ok": False,
+                "code": "invitation_status_failed",
+                "error": str(exc),
+            }
+
+        try:
+            if callable(get_project_publication_service_status):
+                publication_status = get_project_publication_service_status()
+        except Exception as exc:
+            publication_status = {
+                "ok": False,
+                "code": "publication_status_failed",
+                "error": str(exc),
+            }
+
         payload = {
             "ok": True,
             "service": "projects_api",
             "blueprint": "projects_api",
-            "phase": "app-project-management-with-chunk-provisioning",
+            "phase": "project-management-auth-demo-invitations-publication",
             "current_user": get_current_user_status(),
             "project_service": get_project_service_status(),
             "permissions": get_permission_service_status(),
+            "invitations": invitation_status,
+            "publication": publication_status,
+            "project_form": {
+                "address_input_mode": "single_box",
+                "visibility_mode": "cards_private_unlisted_public",
+                "system_refs_in_normal_form": False,
+            },
             "chunk": {
                 "provisioningEnabled": _config_bool("VECTOPLAN_CHUNK_PROVISION_ON_PROJECT_CREATE", True),
                 "provisioningRequired": _config_bool("VECTOPLAN_CHUNK_PROVISION_REQUIRED", False),
@@ -653,7 +837,11 @@ def projects_status():
                 "chunk_get": "/v1/projects/<project_id>/chunk",
                 "chunk_ensure": "/v1/projects/<project_id>/chunk/ensure",
                 "chunk_retry": "/v1/projects/<project_id>/chunk/retry",
+                "members": "/v1/projects/<project_id>/members",
+                "invitations": "/v1/projects/<project_id>/invitations",
+                "publication": "/v1/projects/<project_id>/publication",
                 "service_links": "/v1/projects/<project_id>/service-links",
+                "embed_policy": "/v1/projects/<project_id>/embed-policy",
             },
         }
 
@@ -669,7 +857,7 @@ def projects_current_user():
         return _json_response(
             {
                 "ok": True,
-                "user": get_current_user_context(ensure=True).to_dict(),
+                "user": _current_user_context_dict(ensure=True),
             },
             200,
             no_store=True,
@@ -686,7 +874,7 @@ def projects_current_user():
 @bp.get("/v1/projects")
 def projects_list():
     try:
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
         search = _request_str("q", "", 160) or _request_str("search", "", 160)
         limit = _request_int("limit", 100)
         offset = _request_int("offset", 0)
@@ -707,7 +895,7 @@ def projects_list():
 @bp.get("/v1/projects/sidebar")
 def projects_sidebar():
     try:
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
         limit = _request_int("limit", 100)
         include_public = _request_bool("include_public", True)
 
@@ -717,10 +905,14 @@ def projects_sidebar():
             limit=limit,
         )
 
+        context = _current_user_context_dict(ensure=False)
+
         return _json_response(
             {
                 "ok": True,
                 "user_id": user_id,
+                "auth": context,
+                "demo_mode": _safe_bool(context.get("demo_mode"), False),
                 "items": items,
                 "sidebar_items": items,
                 "total": len(items),
@@ -741,11 +933,14 @@ def projects_sidebar():
 def projects_create():
     try:
         data = _request_json({})
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
 
         result = create_project_result(data, user_id=user_id)
 
         return _result_response(result)
+
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
 
     except Exception as exc:
         return _exception_response("projects_create failed", exc, code="project_create_failed")
@@ -754,7 +949,7 @@ def projects_create():
 @bp.get("/v1/projects/<project_id>")
 def projects_get(project_id: str):
     try:
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
         include_deleted = _request_bool("include_deleted", False)
 
         result = get_project_result(
@@ -774,7 +969,7 @@ def projects_get(project_id: str):
 def projects_update(project_id: str):
     try:
         data = _request_json({})
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
 
         result = update_project_result(
             project_id,
@@ -784,6 +979,9 @@ def projects_update(project_id: str):
 
         return _result_response(result)
 
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+
     except Exception as exc:
         return _exception_response("projects_update failed", exc, code="project_update_failed")
 
@@ -791,7 +989,7 @@ def projects_update(project_id: str):
 @bp.delete("/v1/projects/<project_id>")
 def projects_delete(project_id: str):
     try:
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
         hard_delete = _request_bool("hard_delete", False)
 
         result = delete_project_result(
@@ -801,6 +999,9 @@ def projects_delete(project_id: str):
         )
 
         return _result_response(result)
+
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
 
     except Exception as exc:
         return _exception_response("projects_delete failed", exc, code="project_delete_failed")
@@ -818,10 +1019,12 @@ def project_chunk_get(project_id: str):
         if project is None:
             return _json_error("project not found", 404, code="project_not_found")
 
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
         require_project_permission(project, PERMISSION_VIEW, user_id, allow_public_view=True)
 
-        include_private = _request_bool("include_private", False) and can_manage_project(project, user_id)
+        include_private = _request_bool("include_private", False) and bool(
+            user_id and can_manage_project(project, user_id)
+        )
 
         payload = _serialize_project_chunk_payload(
             project,
@@ -849,7 +1052,7 @@ def project_chunk_get(project_id: str):
 @bp.post("/v1/projects/<project_id>/chunk/provision")
 def project_chunk_ensure(project_id: str):
     try:
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
         force = _request_bool("force", False)
 
         result = ensure_project_chunk_link_result(
@@ -870,7 +1073,7 @@ def project_chunk_ensure(project_id: str):
 @bp.post("/v1/projects/<project_id>/chunk/retry")
 def project_chunk_retry(project_id: str):
     try:
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
 
         result = ensure_project_chunk_link_result(
             project_id,
@@ -899,13 +1102,14 @@ def project_access_get(project_id: str):
         if project is None:
             return _json_error("project not found", 404, code="project_not_found")
 
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
 
         return _json_response(
             {
                 "ok": True,
                 "project_id": getattr(project, "id", None),
                 "public_id": getattr(project, "public_id", None),
+                "auth": _current_user_context_dict(ensure=False),
                 "access": serialize_project_permissions(project, user_id=user_id),
             },
             200,
@@ -924,7 +1128,7 @@ def project_members_list(project_id: str):
         if project is None:
             return _json_error("project not found", 404, code="project_not_found")
 
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
         require_project_permission(project, PERMISSION_MANAGE, user_id, allow_public_view=False)
 
         include_inactive = _request_bool("include_inactive", False)
@@ -938,6 +1142,7 @@ def project_members_list(project_id: str):
                 "items": members,
                 "members": members,
                 "total": len(members),
+                "access": serialize_project_permissions(project, user_id=user_id),
             },
             200,
             no_store=True,
@@ -959,7 +1164,7 @@ def project_member_set(project_id: str, target_user_id: int):
         if project is None:
             return _json_error("project not found", 404, code="project_not_found")
 
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
         data = _request_json({})
 
         role = data.get("role") or request.args.get("role") or "viewer"
@@ -1001,14 +1206,12 @@ def project_member_delete(project_id: str, target_user_id: int):
         if project is None:
             return _json_error("project not found", 404, code="project_not_found")
 
-        user_id = get_current_user_id()
-        require_project_permission(project, PERMISSION_MANAGE, user_id, allow_public_view=False)
-
+        user_id = _current_user_id_optional()
         hard_delete = _request_bool("hard_delete", False)
 
-        ok = revoke_project_membership(
+        ok = revoke_project_member(
             project,
-            user_id=target_user_id,
+            target_user_id=target_user_id,
             actor_user_id=user_id,
             hard_delete=hard_delete,
             commit=True,
@@ -1042,7 +1245,7 @@ def project_transfer(project_id: str):
             return _json_error("project not found", 404, code="project_not_found")
 
         data = _request_json({})
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
         new_owner_user_id = _safe_int(
             data.get("new_owner_user_id")
             or data.get("newOwnerUserId")
@@ -1081,6 +1284,293 @@ def project_transfer(project_id: str):
 
 
 # ─────────────────────────────────────────────────────────────
+# Project invitations
+# ─────────────────────────────────────────────────────────────
+
+@bp.get("/v1/projects/<project_id>/invitations")
+def project_invitations_list(project_id: str):
+    try:
+        if not callable(list_project_invitations):
+            return _json_error("project invitation service unavailable", 503, code="invitation_service_unavailable")
+
+        project = resolve_project(project_id)
+
+        if project is None:
+            return _json_error("project not found", 404, code="project_not_found")
+
+        user_id = _current_user_id_optional()
+        include_terminal = _request_bool("include_terminal", True)
+        include_private = _request_bool("include_private", False)
+
+        result = list_project_invitations(
+            project,
+            actor_user_id=user_id,
+            include_terminal=include_terminal,
+            include_private=include_private,
+        )
+
+        return _service_dict_response(result, default_status=200)
+
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+
+    except Exception as exc:
+        return _exception_response("project_invitations_list failed", exc, code="invitations_list_failed")
+
+
+@bp.post("/v1/projects/<project_id>/invitations")
+def project_invitations_create(project_id: str):
+    try:
+        if not callable(invite_registered_email_to_project):
+            return _json_error("project invitation service unavailable", 503, code="invitation_service_unavailable")
+
+        project = resolve_project(project_id)
+
+        if project is None:
+            return _json_error("project not found", 404, code="project_not_found")
+
+        data = _request_json({})
+        user_id = _current_user_id_optional()
+
+        email = (
+            data.get("email")
+            or data.get("user_email")
+            or data.get("userEmail")
+            or data.get("invitee")
+            or data.get("recipient")
+            or request.args.get("email")
+        )
+        role = data.get("role") or request.args.get("role") or "viewer"
+        message = data.get("message") or data.get("note")
+        metadata = _safe_dict(data.get("metadata") or data.get("meta"))
+
+        if not _safe_str(email, "", 320):
+            return _json_error("email required", 400, code="email_required")
+
+        result = invite_registered_email_to_project(
+            project,
+            email=email,
+            role=role,
+            actor_user_id=user_id,
+            message=message,
+            metadata=metadata,
+            dispatch=True,
+            commit=True,
+            include_token_in_result=_request_bool("include_token", False),
+        )
+
+        return _service_dict_response(result, default_status=201)
+
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+
+    except Exception as exc:
+        return _exception_response("project_invitations_create failed", exc, code="invitation_create_failed")
+
+
+@bp.delete("/v1/projects/<project_id>/invitations/<invitation_id>")
+@bp.post("/v1/projects/<project_id>/invitations/<invitation_id>/revoke")
+def project_invitations_revoke(project_id: str, invitation_id: str):
+    try:
+        if not callable(revoke_project_invitation):
+            return _json_error("project invitation service unavailable", 503, code="invitation_service_unavailable")
+
+        project = resolve_project(project_id)
+
+        if project is None:
+            return _json_error("project not found", 404, code="project_not_found")
+
+        data = _request_json({})
+        user_id = _current_user_id_optional()
+        reason = data.get("reason") or request.args.get("reason")
+
+        result = revoke_project_invitation(
+            project,
+            invitation_id=invitation_id,
+            actor_user_id=user_id,
+            reason=reason,
+            commit=True,
+        )
+
+        return _service_dict_response(result, default_status=200)
+
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+
+    except Exception as exc:
+        return _exception_response("project_invitations_revoke failed", exc, code="invitation_revoke_failed")
+
+
+@bp.post("/v1/project-invitations/<invitation_id>/accept")
+def project_invitation_accept(invitation_id: str):
+    try:
+        if not callable(accept_project_invitation):
+            return _json_error("project invitation service unavailable", 503, code="invitation_service_unavailable")
+
+        data = _request_json({})
+        user_id = _current_user_id_optional()
+
+        result = accept_project_invitation(
+            invitation_id=invitation_id,
+            auth_user_id=data.get("auth_user_id") or data.get("authUserId") or _current_auth_user_id(),
+            email=data.get("email") or _current_email(),
+            local_user_id=data.get("local_user_id") or data.get("localUserId") or user_id,
+            plain_token=data.get("token") or request.args.get("token"),
+            actor_user_id=user_id,
+            commit=True,
+        )
+
+        return _service_dict_response(result, default_status=200)
+
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+
+    except Exception as exc:
+        return _exception_response("project_invitation_accept failed", exc, code="invitation_accept_failed")
+
+
+@bp.post("/v1/project-invitations/<invitation_id>/reject")
+def project_invitation_reject(invitation_id: str):
+    try:
+        if not callable(reject_project_invitation):
+            return _json_error("project invitation service unavailable", 503, code="invitation_service_unavailable")
+
+        data = _request_json({})
+
+        result = reject_project_invitation(
+            invitation_id=invitation_id,
+            auth_user_id=data.get("auth_user_id") or data.get("authUserId") or _current_auth_user_id(),
+            email=data.get("email") or _current_email(),
+            reason=data.get("reason") or request.args.get("reason"),
+            commit=True,
+        )
+
+        return _service_dict_response(result, default_status=200)
+
+    except Exception as exc:
+        return _exception_response("project_invitation_reject failed", exc, code="invitation_reject_failed")
+
+
+@bp.post("/v1/projects/invitations/expire")
+@bp.post("/v1/project-invitations/expire")
+def project_invitations_expire():
+    try:
+        if not callable(expire_project_invitations):
+            return _json_error("project invitation service unavailable", 503, code="invitation_service_unavailable")
+
+        project_id = _request_str("project_id", "", 120) or None
+        project = resolve_project(project_id) if project_id else None
+
+        if project is not None:
+            user_id = _current_user_id_optional()
+            require_project_permission(project, PERMISSION_MANAGE, user_id, allow_public_view=False)
+
+        result = expire_project_invitations(project, commit=True)
+
+        return _service_dict_response(result, default_status=200)
+
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+
+    except Exception as exc:
+        return _exception_response("project_invitations_expire failed", exc, code="invitations_expire_failed")
+
+
+# ─────────────────────────────────────────────────────────────
+# Project publication / workspace visibility
+# ─────────────────────────────────────────────────────────────
+
+@bp.get("/v1/projects/<project_id>/publication")
+def project_publication_get(project_id: str):
+    try:
+        if not callable(get_project_publication):
+            return _json_error("project publication service unavailable", 503, code="publication_service_unavailable")
+
+        project = resolve_project(project_id)
+
+        if project is None:
+            return _json_error("project not found", 404, code="project_not_found")
+
+        user_id = _current_user_id_optional()
+        include_private_requested = _request_bool("include_private", False)
+
+        include_private = False
+        if include_private_requested and user_id and can_manage_project(project, user_id):
+            include_private = True
+
+        result = get_project_publication(
+            project,
+            actor_user_id=user_id,
+            include_private=include_private,
+            for_public=not bool(user_id),
+            use_cache=False,
+        )
+
+        return _service_dict_response(result, default_status=200)
+
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+
+    except Exception as exc:
+        return _exception_response("project_publication_get failed", exc, code="publication_get_failed")
+
+
+@bp.put("/v1/projects/<project_id>/publication")
+@bp.patch("/v1/projects/<project_id>/publication")
+def project_publication_update(project_id: str):
+    try:
+        if not callable(update_project_publication):
+            return _json_error("project publication service unavailable", 503, code="publication_service_unavailable")
+
+        project = resolve_project(project_id)
+
+        if project is None:
+            return _json_error("project not found", 404, code="project_not_found")
+
+        user_id = _current_user_id_optional()
+        data = _request_json({})
+
+        result = update_project_publication(
+            project,
+            data,
+            actor_user_id=user_id,
+            commit=True,
+        )
+
+        return _service_dict_response(result, default_status=200)
+
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+
+    except Exception as exc:
+        return _exception_response("project_publication_update failed", exc, code="publication_update_failed")
+
+
+@bp.get("/v1/projects/<project_id>/publication/workspaces/<workspace>")
+@bp.get("/v1/projects/<project_id>/workspace-access/<workspace>")
+def project_workspace_access_get(project_id: str, workspace: str):
+    try:
+        if not callable(can_access_project_workspace):
+            return _json_error("project publication service unavailable", 503, code="publication_service_unavailable")
+
+        user_id = _current_user_id_optional()
+        public_request = _request_bool("public", False) or user_id is None
+        workspace_key = normalize_workspace_key(workspace) if callable(normalize_workspace_key) else workspace
+
+        result = can_access_project_workspace(
+            project_id,
+            workspace_key,
+            actor_user_id=user_id,
+            public_request=public_request,
+        )
+
+        return _service_dict_response(result, default_status=200)
+
+    except Exception as exc:
+        return _exception_response("project_workspace_access_get failed", exc, code="workspace_access_failed")
+
+
+# ─────────────────────────────────────────────────────────────
 # Project versions
 # ─────────────────────────────────────────────────────────────
 
@@ -1092,7 +1582,7 @@ def project_versions_list(project_id: str):
         if project is None:
             return _json_error("project not found", 404, code="project_not_found")
 
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
         require_project_permission(project, PERMISSION_VIEW, user_id, allow_public_view=True)
 
         kind = _request_str("kind", "", 80) or None
@@ -1114,6 +1604,7 @@ def project_versions_list(project_id: str):
                 "items": items,
                 "versions": items,
                 "total": len(items),
+                "access": serialize_project_permissions(project, user_id=user_id),
             },
             200,
             no_store=True,
@@ -1135,7 +1626,7 @@ def project_versions_create(project_id: str):
             return _json_error("project not found", 404, code="project_not_found")
 
         data = _normalize_version_payload(_request_json({}))
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
 
         row = create_project_version_link(
             project,
@@ -1183,8 +1674,10 @@ def project_service_links_list(project_id: str):
         if project is None:
             return _json_error("project not found", 404, code="project_not_found")
 
-        user_id = get_current_user_id()
-        require_project_permission(project, PERMISSION_VIEW, user_id, allow_public_view=True)
+        user_id = _current_user_id_optional()
+
+        # Systemreferenzen sind Admin-/Settings-Daten.
+        require_project_permission(project, PERMISSION_MANAGE, user_id, allow_public_view=False)
 
         items = list_project_service_links(project)
 
@@ -1196,6 +1689,7 @@ def project_service_links_list(project_id: str):
                 "items": items,
                 "service_links": items,
                 "total": len(items),
+                "access": serialize_project_permissions(project, user_id=user_id),
             },
             200,
             no_store=True,
@@ -1217,7 +1711,7 @@ def project_service_links_upsert(project_id: str):
             return _json_error("project not found", 404, code="project_not_found")
 
         data = _normalize_service_link_payload(_request_json({}))
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
 
         if not data.get("service_name"):
             return _json_error("service_name required", 400, code="service_name_required")
@@ -1257,14 +1751,22 @@ def project_service_links_upsert(project_id: str):
             commit=True,
         )
 
+        project_payload = serialize_project(
+            project,
+            user_id=user_id,
+            include_permissions=True,
+            include_service_links=True,
+            include_publication=True,
+        )
+
         return _json_response(
             {
                 "ok": True,
                 "project_id": getattr(project, "id", None),
                 "public_id": getattr(project, "public_id", None),
                 "service_link": _serialize_model(row, include_private=True),
-                "project": serialize_project(project, user_id=user_id, include_permissions=True, include_service_links=True),
-                "chunk": _extract_chunk_from_project_payload(serialize_project(project, user_id=user_id, include_permissions=False)),
+                "project": project_payload,
+                "chunk": _extract_chunk_from_project_payload(project_payload),
             },
             200,
             no_store=True,
@@ -1289,18 +1791,19 @@ def project_embed_policy_get(project_id: str):
         if project is None:
             return _json_error("project not found", 404, code="project_not_found")
 
-        user_id = get_current_user_id()
-        require_project_permission(project, PERMISSION_VIEW, user_id, allow_public_view=True)
+        user_id = _current_user_id_optional()
+
+        # Embed-Policy ist Einstellung. Nicht an viewer/public ausliefern.
+        require_project_permission(project, PERMISSION_EMBED, user_id, allow_public_view=False)
 
         policy = get_or_create_embed_policy(project, user_id=user_id, commit=True)
-        include_private = can_manage_project(project, user_id)
 
         return _json_response(
             {
                 "ok": True,
                 "project_id": getattr(project, "id", None),
                 "public_id": getattr(project, "public_id", None),
-                "embed_policy": _serialize_model(policy, include_private=include_private),
+                "embed_policy": _serialize_model(policy, include_private=True),
                 "access": serialize_project_permissions(project, user_id=user_id),
             },
             200,
@@ -1324,7 +1827,7 @@ def project_embed_policy_update(project_id: str):
             return _json_error("project not found", 404, code="project_not_found")
 
         data = _request_json({})
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
 
         policy = update_project_embed_policy(
             project,
@@ -1364,7 +1867,7 @@ def project_sidebar_item_get(project_id: str):
         if project is None:
             return _json_error("project not found", 404, code="project_not_found")
 
-        user_id = get_current_user_id()
+        user_id = _current_user_id_optional()
         require_project_permission(project, PERMISSION_VIEW, user_id, allow_public_view=True)
 
         return _json_response(
