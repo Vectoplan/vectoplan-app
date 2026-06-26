@@ -1176,9 +1176,9 @@ def project_workspace_path(project: Any) -> str:
 def project_editor_path(project: Any) -> str:
     try:
         public_id = _safe_str(getattr(project, "public_id", None), "", 120)
-        return f"/ui/project/{public_id}/editor" if public_id else "/ui/editor"
+        return f"/ui/project/{public_id}/editor3d" if public_id else "/ui/editor3d"
     except Exception:
-        return "/ui/editor"
+        return "/ui/editor3d"
 
 
 def project_map_path(project: Any) -> str:
