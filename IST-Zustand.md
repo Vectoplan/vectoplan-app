@@ -1,13 +1,11 @@
-Teil 1 aktualisiert die vorhandene IST-Datei und integriert den aktuellen Stand nach Chunk-Anbindung, Runtime-Tests und der `ConversationState`-Reparatur. Grundlage ist deine bestehende IST-Datei. 
-
 <!-- /vectoplan-website/services/vectoplan-server/docs/IST-Zustand-vectoplan-app.md -->
 
 # IST-Zustand – `vectoplan-app`
 
-Stand: 2026-06-24
-Status: Projektgeführte Portal-App mit App↔Chunk-Provisioning, Workspace-Orchestrierung, modularen App-Models und repariertem Conversation-State-Kompatibilitätspfad
+Stand: 2026-06-25
+Status: Projektgeführte Portal-App mit Demo-/Auth-Kontext, Einladungslogik, Veröffentlichungssteuerung, zentralem Workspace-Gateway und repariertem 3D-Editor-Embed
 
-> Teil 1 von 2
+> Teil 1 von 3
 
 ---
 
@@ -21,7 +19,11 @@ Die Datei ist eine Bestandsaufnahme des aktuellen Entwicklungsstands. Sie beschr
 - welche Rolle vectoplan-app im Gesamtsystem hat,
 - welche Dateien neu entstanden oder wesentlich angepasst wurden,
 - wie Projektverwaltung, Workspace-Shell und Service-Referenzen funktionieren,
+- wie Demo-/Auth-Kontext aktuell behandelt wird,
+- wie Einladungen und lokale App-Mitgliedschaften gedacht sind,
+- wie Projekt-Sichtbarkeit und Workspace-Veröffentlichung funktionieren,
 - wie vectoplan-app mit vectoplan-chunk zusammenarbeitet,
+- wie vectoplan-app externe Workspaces wie 3D und Map öffnet,
 - welche Legacy-/Kompatibilitätspfade noch existieren,
 - welche Punkte stabil sind,
 - welche Punkte später bereinigt werden sollten.
@@ -53,9 +55,14 @@ Ihre aktuelle Rolle ist:
 vectoplan-app
   = Portal
   = Projektverwaltung
-  = Berechtigungsverwaltung
+  = lokale Projekt-Mitgliedschaftsverwaltung
+  = lokale AppUser-Verknüpfungs-/Platzhalterverwaltung
+  = Einladungs-Orchestrator
+  = Projekt-Sichtbarkeitsverwaltung
+  = Workspace-Veröffentlichungsverwaltung
   = Workspace-Shell
   = iframe-Orchestrator
+  = zentraler Browser-Gateway für externe Workspace-Services
   = zentrale Referenzverwaltung
   = App-seitiger Audit-/Version-/Service-Link-Host
   = App-seitiger Einstieg in Chunk-Provisioning
@@ -71,6 +78,10 @@ vectoplan-app
   ≠ LV-Fachdaten-Wahrheit
   ≠ OpenLayer-Ersatz
   ≠ sichtbarer Chat-Client
+  ≠ Registrierungsservice
+  ≠ Login-/Auth-Service
+  ≠ Account-/Abo-Service
+  ≠ Bigdata-Service
 ```
 
 Primäre Browser-Einstiege sind:
@@ -85,6 +96,19 @@ Beispiel:
 
 ```text
 http://localhost:5103/project=prj_979eb0a4d8894086a5b2a74b
+```
+
+Der eigentliche Projekt-Workspace wird im iframe über App-interne Gateway-Routen geladen:
+
+```text
+/ui/project/new/project
+/ui/project/<project_public_id>/project
+/ui/project/<project_public_id>/editor3d
+/ui/project/<project_public_id>/map
+/ui/project/<project_public_id>/cad2d
+/ui/project/<project_public_id>/lv
+/ui/project/<project_public_id>/versions
+/ui/project/<project_public_id>/admin
 ```
 
 Die frühere Route `/ui/chat-3d` kann technisch noch existieren, ist aber nicht mehr der Zielpfad für die neue Projekt-Shell.
@@ -103,17 +127,27 @@ Aktuell erreicht:
 5. Das Chat-Öffnen-Symbol neben Projekt wurde entfernt.
 6. Projekt-Erstellung und Projekt-Bearbeitung laufen über /ui/project/...
 7. Projekt-Daten werden über /v1/projects erstellt und aktualisiert.
-8. Map, 3D, 2D und LV werden erst nach Projekt-Konfiguration freigeschaltet.
-9. Projekt-Models wurden modularisiert.
-10. models/core.py ist Kompatibilitäts-Export.
-11. routes/projects_api.py stellt die Projekt-JSON-API bereit.
-12. routes/ui/projects.py rendert die Projekt-Shell.
-13. Browser-Public-URLs und Docker-Internal-URLs bleiben getrennt.
-14. vectoplan-app speichert nur App-Projekt-/Referenz-/Berechtigungsdaten.
-15. vectoplan-app kann über chunk_client.py einen Chunk-Projektgraphen im Chunk-Service sicherstellen.
-16. vectoplan-chunk liefert für App-Projekte eine konkrete world_spawn.
-17. Editor kann über App-Projektkontext Chunks aus world_spawn laden.
-18. ConversationState-Kompatibilität ist repariert.
+8. Das Projektformular nutzt sichtbar nur noch eine Adressbox: address_text.
+9. Strukturierte Adress-/Koordinatenfelder bleiben serverseitig vorbereitet, sind aber nicht mehr UI-Fokus.
+10. Sichtbarkeit ist als private / unlisted / public modelliert.
+11. Workspace-Veröffentlichung ist getrennt von Projekt-Sichtbarkeit.
+12. Admin/System/Team/Permissions/Settings sind nie öffentlich sichtbar.
+13. Team- und Einladungsbereiche sind nur für Projektverwalter sichtbar.
+14. Einladungen erzeugen keine echten Useraccounts.
+15. AppUser bleibt lokale Verknüpfung/Platzhalterstruktur, nicht Auth-Wahrheit.
+16. Demo-Modus ist nicht persistent.
+17. Map, 3D, 2D und LV werden erst nach Projekt-Konfiguration freigeschaltet.
+18. 3D öffnet nun über /ui/project/<id>/editor3d.
+19. /ui/project/<id>/editor3d prüft Projektzugriff und leitet dann auf vectoplan-editor PUBLIC_URL weiter.
+20. Browser-Public-URLs und Docker-Internal-URLs bleiben getrennt.
+21. vectoplan-app speichert nur App-Projekt-/Referenz-/Berechtigungsdaten.
+22. vectoplan-app kann über chunk_client.py einen Chunk-Projektgraphen im Chunk-Service sicherstellen.
+23. vectoplan-chunk liefert für App-Projekte eine konkrete world_spawn.
+24. Editor kann über App-Projektkontext Chunks aus world_spawn laden.
+25. ConversationState-Kompatibilität ist repariert.
+26. routes/viewer.py ist der neue zentrale App-Gateway für /ui/project/...
+27. services/workspace_embed_service.py baut browserfähige Public-Embed-Ziele.
+28. static/js/chat/main.js ist weiterhin der Workspace-Orchestrator, obwohl der Pfad historisch noch chat enthält.
 ```
 
 Wichtigster aktueller Testbefund:
@@ -125,6 +159,15 @@ vectoplan-app
 vectoplan-app
   → PUT /projects/by-app/<app_project_public_id>
   → vectoplan-chunk legt/holt Chunk-Projekt, Universe und world_spawn
+
+Browser
+  → klickt 3D
+
+vectoplan-app
+  → /ui/project/<project_public_id>/editor3d
+  → prüft Projektzugriff
+  → baut Public-Editor-Embed-URL
+  → redirect auf http://localhost:5100/editor?embed=1&...
 
 vectoplan-editor
   → lädt über Chunk-Service world_spawn chunks/batch
@@ -219,6 +262,182 @@ ist weiterhin separat zu betrachten. Sie ist aktuell kein Blocker, weil die App 
 
 ---
 
+### 4.3 3D-Reiter zeigte Platzhalter statt Editor
+
+Aufgetretener Zustand:
+
+```text
+User klickt 3D
+  ↓
+iframe lädt /ui/project/<project_public_id>/editor oder /editor3d
+  ↓
+routes.viewer rendert generischen App-Platzhalter
+```
+
+Ursache:
+
+```text
+routes.viewer hatte für Nicht-Projekt-Workspaces einen generischen Platzhalter.
+Der 3D-Workspace wurde noch nicht als externer Editor-Gateway behandelt.
+static/js/chat/main.js hatte zusätzlich alte editor-Fallbacks.
+```
+
+Reparatur:
+
+```text
+services/vectoplan-app/services/workspace_embed_service.py
+services/vectoplan-app/routes/viewer.py
+services/vectoplan-app/templates/chat_viewer.html
+services/vectoplan-app/static/js/chat/main.js
+```
+
+Aktueller Zielzustand:
+
+```text
+User klickt 3D
+  ↓
+static/js/chat/main.js
+  ↓
+iframe src = /ui/project/<project_public_id>/editor3d
+  ↓
+routes.viewer
+  ↓
+Projekt laden
+  ↓
+Berechtigung prüfen
+  ↓
+Workspace-Zugriff prüfen
+  ↓
+workspace_embed_service.py baut Browser-Public-URL
+  ↓
+302 Redirect auf vectoplan-editor Public URL
+  ↓
+http://localhost:5100/editor?embed=1&app_project_public_id=...
+```
+
+Wichtig:
+
+```text
+Der Browser bekommt niemals http://vectoplan-editor:5000.
+Der Browser bekommt http://localhost:5100.
+```
+
+---
+
+### 4.4 Projektformular wurde vereinfacht
+
+Vorher war das Projektformular stärker technisch und enthielt mehrere sichtbare Felder für Adresse, Koordinaten und Systemreferenzen.
+
+Aktueller UI-Zustand:
+
+```text
+sichtbar:
+  name
+  description
+  address_text
+  visibility
+
+separat:
+  publication
+  team
+  invitations
+
+nicht mehr normal sichtbar:
+  street
+  house_number
+  postal_code
+  city
+  region
+  country
+  latitude
+  longitude
+  coordinate_srid
+  service_refs
+  artifact_refs
+  system_refs
+```
+
+Regel:
+
+```text
+Die sichtbare Adresse ist eine einzelne Box: address_text.
+Strukturierte Adresse und Koordinaten bleiben für späteren Geocoder vorbereitet.
+```
+
+---
+
+### 4.5 Sichtbarkeit und Veröffentlichung wurden getrennt
+
+Projekt-Sichtbarkeit:
+
+```text
+private
+unlisted
+public
+```
+
+Workspace-Veröffentlichung:
+
+```text
+project
+map
+editor3d
+cad2d
+lv
+versions
+```
+
+Nie öffentlich:
+
+```text
+admin
+team
+settings
+permissions
+system
+system_refs
+```
+
+Wichtig:
+
+```text
+public bedeutet nicht automatisch, dass alle Workspaces öffentlich sind.
+Workspaces müssen separat veröffentlicht werden.
+```
+
+---
+
+### 4.6 Demo-/Auth-Kontext wurde vorbereitet
+
+Aktueller Stand:
+
+```text
+dev mode:
+  lokaler Platzhalter-User id=1
+
+demo mode:
+  kein persistenter User
+  keine dauerhafte Speicherung
+  keine echten Einladungen
+  kein Bigdata-/Abo-Zugriff
+  Reset nach Refresh oder Ablauf der Demo-Sitzung möglich
+
+external auth mode:
+  vorbereitet über Trusted Headers / zukünftigen Auth-Service
+  lokale AppUser-Verknüpfung nur bei bekannter Identität
+  keine automatische echte User-Erstellung in vectoplan-app
+```
+
+Wichtig:
+
+```text
+vectoplan-app ist nicht der Auth-Service.
+vectoplan-app ist nicht der Registrierungsservice.
+vectoplan-app erzeugt keine echten Benutzeraccounts.
+```
+
+---
+
 ## 5. Aktuelle Service-Rollen
 
 ### 5.1 `vectoplan-app`
@@ -232,13 +451,18 @@ Projekt-Sidebar
 Workspace-Shell
 iframe-Orchestrator
 Projekt-Metadaten
+Projekt-Sichtbarkeit
+Workspace-Veröffentlichung
 Projekt-Berechtigungen
+Projekt-Mitgliedschaften
+Projekt-Einladungen
 Embed-Policy
 Service-Links
 Version-Referenzen
 Audit-Events
 App↔Chunk-Provisioning-Orchestrierung
 technischer Conversation-/Workspace-State
+Browser-Gateway zu externen Workspaces
 ```
 
 Nicht Rolle:
@@ -250,6 +474,10 @@ OpenLayer-Datenwahrheit
 2D-CAD-Geometriewahrheit
 LV-Fachdatenwahrheit
 sichtbarer Chat-Client
+Auth-Wahrheit
+Registrierungs-Wahrheit
+Abo-/Billing-Wahrheit
+Bigdata-Wahrheit
 ```
 
 Die App verwaltet zentrale App-Objekte wie:
@@ -257,6 +485,7 @@ Die App verwaltet zentrale App-Objekte wie:
 ```text
 Project
 ProjectMembership
+ProjectInvitation
 ProjectEmbedPolicy
 ProjectServiceLink
 ProjectVersion
@@ -291,13 +520,14 @@ http://localhost:5100/editor
 Embed aus der App:
 
 ```text
-/ui/project/<project_public_id>/editor
+/ui/project/<project_public_id>/editor3d
 ```
 
-Die App darf im Browser nur die Public-URL verwenden:
+Die App leitet nach Berechtigungsprüfung weiter auf:
 
 ```text
 VECTOPLAN_EDITOR_PUBLIC_URL=http://localhost:5100
+VECTOPLAN_EDITOR_ROUTE=/editor
 ```
 
 Nicht im Browser verwenden:
@@ -401,6 +631,12 @@ Die App speichert nur Referenzen wie:
 plan2d_id
 ```
 
+Der aktuelle App-Gateway-Pfad lautet:
+
+```text
+/ui/project/<project_public_id>/cad2d
+```
+
 ---
 
 ### 5.6 `vectoplan-lv`
@@ -416,6 +652,12 @@ Die App speichert nur Referenzen wie:
 
 ```text
 lv_id
+```
+
+Der aktuelle App-Gateway-Pfad lautet:
+
+```text
+/ui/project/<project_public_id>/lv
 ```
 
 ---
@@ -434,6 +676,42 @@ Nicht Browser-Ziel aus der App-Shell:
 
 ```text
 http://vectoplan-library:5000
+```
+
+---
+
+### 5.8 Zukünftiger Auth-/Registrierungsservice
+
+Rolle:
+
+```text
+Login
+Registrierung
+Account-Identität
+E-Mail-Verifikation
+Registrierte User prüfen
+Einladungszustellung
+```
+
+Aktuelle App-Anbindung:
+
+```text
+services/auth_identity_client.py
+```
+
+Die App fragt zukünftig dort ab:
+
+```text
+Ist diese E-Mail registriert?
+Darf an diese E-Mail eine Projekt-Einladung erstellt werden?
+Soll eine Einladung zugestellt werden?
+```
+
+Wichtig:
+
+```text
+vectoplan-app erstellt keinen echten User.
+vectoplan-app erstellt nur lokale Projekt-Einladungen und lokale App-Bezüge.
 ```
 
 ---
@@ -477,6 +755,39 @@ vectoplan-chunk
 vectoplan-library
 ```
 
+### 6.3 Aktueller Schutz im Frontend
+
+`static/js/chat/main.js` blockiert bekannte interne/alte Browser-Ziele wie:
+
+```text
+http://vectoplan-editor:5000
+http://editor:5000
+http://openlayer:8090
+http://vectoplan-openlayer:8090
+```
+
+Wenn ein unsicheres Ziel erkannt wird, fällt der Workspace-Orchestrator auf den App-Gateway-Pfad zurück.
+
+### 6.4 Aktueller Schutz im Backend
+
+`services/workspace_embed_service.py` baut externe Workspace-Ziele ausschließlich aus Public-URL-Konfiguration.
+
+Beispiel für 3D:
+
+```text
+VECTOPLAN_EDITOR_PUBLIC_URL
++
+VECTOPLAN_EDITOR_ROUTE
++
+sichere Query-Parameter
+```
+
+Nicht:
+
+```text
+VECTOPLAN_EDITOR_INTERNAL_URL
+```
+
 ---
 
 ## 7. Aktueller UI-Gesamtfluss
@@ -496,7 +807,7 @@ templates/chat_viewer.html
   ↓
 Projekt-Sidebar + Workspace
   ↓
-iframe src = /ui/project/new
+iframe src = /ui/project/new/project
   ↓
 templates/viewer/project.html
 ```
@@ -520,7 +831,7 @@ GET http://localhost:5103/project=new
   ↓
 Projekt-Shell
   ↓
-iframe src = /ui/project/new
+iframe src = /ui/project/new/project
   ↓
 Projektformular
 ```
@@ -553,6 +864,8 @@ Browser
   ↓
 GET http://localhost:5103/project=<project_public_id>
   ↓
+routes/ui/projects.py
+  ↓
 Projekt laden
   ↓
 Berechtigung prüfen
@@ -574,22 +887,29 @@ Map
 3D
 2D
 LV
-Admin
 Versionen
+Admin
 ```
 
 Regel:
 
 ```text
 Projekt: immer verfügbar
-Admin: verfügbar, wenn Projekt existiert
-Map/3D/2D/LV: verfügbar, wenn Projekt konfiguriert ist
+Admin: verfügbar, wenn Projekt existiert und User verwalten darf
 Versionen: verfügbar, wenn Projekt existiert
+Map/3D/2D/LV: verfügbar, wenn Projekt konfiguriert ist und Zugriff erlaubt ist
+```
+
+Für öffentliche oder ungelistete Projektlinks gilt zusätzlich:
+
+```text
+Workspace muss explizit veröffentlicht sein.
+Admin/Team/Settings/Permissions/System sind nie öffentlich.
 ```
 
 ---
 
-## 8. Projekt-Konfiguration
+## 8. Projekt-Konfiguration und Projektformular
 
 Ein Projekt gilt als konfiguriert, wenn die Minimaldefinition vorhanden ist.
 
@@ -597,7 +917,7 @@ Aktuell relevant:
 
 ```text
 name
-address_text oder street/city oder coordinates
+address_text
 ```
 
 Nach erfolgreicher Konfiguration:
@@ -607,7 +927,7 @@ setup_status = configured
 is_configured = true
 ```
 
-Dann werden freigeschaltet:
+Dann können freigeschaltet werden:
 
 ```text
 Map
@@ -616,11 +936,157 @@ Map
 LV
 ```
 
+### 8.1 Sichtbare Projektformular-Felder
+
+Aktueller UI-Fokus:
+
+```text
+name
+description
+address_text
+visibility
+```
+
+### 8.2 Nicht mehr sichtbarer UI-Fokus
+
+Diese Felder bleiben modellseitig bzw. für spätere Geocoder/Service-Integrationen vorbereitet, sind aber nicht mehr normale sichtbare Projektformular-Felder:
+
+```text
+street
+house_number
+postal_code
+city
+region
+country
+latitude
+longitude
+coordinate_srid
+service_refs
+artifact_refs
+system_refs
+```
+
+### 8.3 Sichtbarkeit
+
+Sichtbarkeit wird über Karten gesteuert:
+
+```text
+private
+unlisted
+public
+```
+
+Kein separater sichtbarer `is_public`-Schalter mehr.
+
+`is_public` wird serverseitig aus `visibility` abgeleitet.
+
+### 8.4 Workspace-Veröffentlichung
+
+Separater Bereich:
+
+```text
+project
+map
+editor3d
+cad2d
+lv
+versions
+```
+
+Nie veröffentlichbar:
+
+```text
+admin
+team
+settings
+permissions
+system
+```
+
 ---
 
-## 9. Aktuelle App↔Chunk-Integration
+## 9. Aktueller primärer 3D-Flow
 
-### 9.1 Ziel
+Der alte 3D-Pfad wurde aktualisiert.
+
+Nicht mehr primär:
+
+```text
+/ui/project/<project_public_id>/editor
+```
+
+Aktuell primär:
+
+```text
+/ui/project/<project_public_id>/editor3d
+```
+
+Flow:
+
+```text
+Browser
+  ↓
+http://localhost:5103/project=<project_public_id>
+  ↓
+Projekt ist konfiguriert
+  ↓
+User klickt 3D
+  ↓
+static/js/chat/main.js
+  ↓
+iframe src = /ui/project/<project_public_id>/editor3d
+  ↓
+routes/viewer.py
+  ↓
+Projekt laden
+  ↓
+Berechtigung prüfen
+  ↓
+Workspace-Zugriff prüfen
+  ↓
+services/workspace_embed_service.py
+  ↓
+Public-Editor-URL bauen
+  ↓
+302 Redirect
+  ↓
+http://localhost:5100/editor?embed=1&app_project_public_id=...
+  ↓
+vectoplan-editor rendert 3D-Editor
+  ↓
+vectoplan-editor fragt vectoplan-chunk
+  ↓
+world_spawn / chunks/batch
+```
+
+Wichtige Query-Parameter, die vorbereitet werden können:
+
+```text
+embed=1
+source=vectoplan-app
+workspace=editor3d
+app_project_public_id=<project_public_id>
+project_public_id=<project_public_id>
+context_url=http://localhost:5103/ui/project/<project_public_id>/context.json
+return_url=http://localhost:5103/project=<project_public_id>
+read_only=0|1
+chunk_project_id=<chunk_project_id>
+chunk_universe_id=<chunk_universe_id>
+chunk_world_id=world_spawn
+```
+
+Wichtig:
+
+```text
+context_url zeigt zurück auf vectoplan-app.
+Der Editor kann daraus App-Projektkontext und Chunk-Referenzen lesen.
+```
+
+---
+
+## 10. Aktuelle App↔Chunk-Integration
+
+### 10.1 Ziel
 
 Die App soll beim Anlegen oder Öffnen eines App-Projekts sicherstellen können, dass im Chunk-Service ein passender Chunk-Projektgraph existiert.
 
@@ -636,7 +1102,7 @@ Die App speichert danach nur Referenzen.
 
 ---
 
-### 9.2 Neuer/angepasster App-Client
+### 10.2 App-Client
 
 Datei:
 
@@ -676,7 +1142,7 @@ PUT http://vectoplan-chunk:5000/projects/by-app/prj_979eb0a4d8894086a5b2a74b
 Erwartetes Resultat:
 
 ```text
-201 Created
+201 Created oder 200 OK
 chunk_project_id vorhanden
 chunk_universe_id vorhanden
 chunk_world_id = world_spawn
@@ -684,7 +1150,7 @@ chunk_world_id = world_spawn
 
 ---
 
-### 9.3 App-seitig gespeicherte Chunk-Referenzen
+### 10.3 App-seitig gespeicherte Chunk-Referenzen
 
 Im App-Projekt werden Referenzen gepflegt wie:
 
@@ -711,7 +1177,7 @@ vectoplan-app speichert nur IDs und Links.
 
 ---
 
-### 9.4 Aktuell getesteter Flow
+### 10.4 Aktuell getesteter Flow
 
 ```text
 vectoplan-app
@@ -720,7 +1186,7 @@ PUT /projects/by-app/<app_project_public_id>
   ↓
 vectoplan-chunk
   ↓
-201 Created
+201 Created oder 200 OK
   ↓
 App-Projekt enthält Chunk-Referenzen
   ↓
@@ -735,7 +1201,7 @@ Damit ist der primäre App↔Chunk↔Editor-Flow funktionsfähig.
 
 ---
 
-## 10. Aktuelle Datenmodell-Architektur
+## 11. Aktuelle Datenmodell-Architektur
 
 Die alte flache Model-Struktur wurde modularisiert.
 
@@ -761,6 +1227,7 @@ services/vectoplan-app/models/
   legacy.py
   projects.py
   project_access.py
+  project_invitations.py
   project_embed.py
   project_links.py
   project_versions.py
@@ -770,7 +1237,7 @@ services/vectoplan-app/models/
 
 ---
 
-### 10.1 `models/base.py`
+### 11.1 `models/base.py`
 
 Zweck:
 
@@ -805,7 +1272,7 @@ utcnow()
 
 ---
 
-### 10.2 `models/users.py`
+### 11.2 `models/users.py`
 
 Zweck:
 
@@ -819,11 +1286,11 @@ Zentrales Model:
 AppUser
 ```
 
-Aktueller Standard-User:
+Aktueller Dev-Standard-User:
 
 ```text
 id = 1
-public_id = u_demo_1
+public_id = u_demo_1 oder lokaler Placeholder
 handle = demo
 display_name = Demo User
 role = admin
@@ -831,18 +1298,16 @@ is_placeholder = true
 is_system = true
 ```
 
-Wichtige Helper:
+Wichtig:
 
 ```text
-ensure_default_user()
-current_user_id_placeholder()
-serialize_user()
-get_user_model_status()
+AppUser ist nicht die Auth-Wahrheit.
+AppUser ist eine lokale App-Verknüpfung bzw. Platzhalterstruktur.
 ```
 
 ---
 
-### 10.3 `models/legacy.py`
+### 11.3 `models/legacy.py`
 
 Zweck:
 
@@ -893,7 +1358,7 @@ wieder ohne `AttributeError`.
 
 ---
 
-### 10.4 `models/projects.py`
+### 11.4 `models/projects.py`
 
 Zweck:
 
@@ -912,11 +1377,14 @@ Speichert:
 ```text
 Projektname
 Beschreibung
-Adresse
-Koordinaten
+Adressbox address_text
+strukturierte Adresse optional
+Koordinaten optional
 Owner
 Sichtbarkeit
 Setup-Status
+Chunk-Referenzen
+2D-/LV-Referenzen
 Service-Referenzen
 Artefakt-Referenzen
 Lifecycle
@@ -975,10 +1443,7 @@ Beispiel-Projekt:
   "name": "Testprojekt",
   "description": "Test",
   "address_text": "Innenried 31",
-  "street": "Innenried",
-  "house_number": "31",
-  "city": "Beispielstadt",
-  "country": "DE",
+  "visibility": "private",
   "setup_status": "configured",
   "is_configured": true,
   "chunk_project_id": "chk_prj_prj_979eb0a4d8894086a5b2a74b_2653d3872366",
@@ -989,7 +1454,7 @@ Beispiel-Projekt:
 
 ---
 
-### 10.5 `models/project_access.py`
+### 11.5 `models/project_access.py`
 
 Zweck:
 
@@ -1021,48 +1486,73 @@ manage
 delete
 transfer
 embed
+view_settings
+manage_settings
+view_team
+manage_team
+view_admin
 ```
 
-Wichtige Felder:
+Wichtige Regel:
 
 ```text
-project_id
-user_id
-role
-can_view
-can_edit
-can_manage
-can_delete
-can_transfer
-can_embed
-status
-invited_by_user_id
-accepted_at
-revoked_at
-metadata_json
-```
-
-Beispiel:
-
-```json
-{
-  "project_id": 1,
-  "user_id": 1,
-  "role": "owner",
-  "permissions": {
-    "view": true,
-    "edit": true,
-    "manage": true,
-    "delete": true,
-    "transfer": true,
-    "embed": true
-  }
-}
+Public-/Unlisted-Viewer erhalten keine Admin-/Settings-/Team-Rechte.
+Demo-Kontext darf keine persistenten Team-/Admin-Aktionen ausführen.
 ```
 
 ---
 
-### 10.6 `models/project_embed.py`
+### 11.6 `models/project_invitations.py`
+
+Zweck:
+
+```text
+Projekt-Einladungen an bereits registrierte E-Mail-Adressen
+```
+
+Model:
+
+```text
+ProjectInvitation
+```
+
+Speichert:
+
+```text
+project_id
+email
+role
+status
+token_hash
+expires_at
+invited_by_user_id
+accepted_by_user_id
+dispatch_status
+identity_status
+audit-/metadata-Felder
+```
+
+Wichtige Statuswerte:
+
+```text
+pending
+accepted
+rejected
+revoked
+expired
+failed
+```
+
+Wichtige Regel:
+
+```text
+Eine Einladung erzeugt keinen echten Useraccount.
+Die E-Mail muss im externen Auth-/Registrierungsdienst bereits bekannt sein.
+```
+
+---
+
+### 11.7 `models/project_embed.py`
 
 Zweck:
 
@@ -1086,26 +1576,11 @@ welche Origins erlaubt sind
 welche Workspace-Bereiche eingebettet werden dürfen
 ```
 
-Beispiel:
-
-```json
-{
-  "enabled": true,
-  "allow_iframe": true,
-  "mode": "spectator",
-  "allowed_modes": ["spectator", "readonly"],
-  "allow_map": true,
-  "allow_editor3d": true,
-  "allow_2d": true,
-  "allow_lv": true,
-  "require_auth": true,
-  "require_project_permission": true
-}
-```
+Zusätzlich wird Veröffentlichung über den Publication-Service gelesen/geschrieben.
 
 ---
 
-### 10.7 `models/project_links.py`
+### 11.8 `models/project_links.py`
 
 Zweck:
 
@@ -1134,23 +1609,9 @@ file/blob
 version artifact
 ```
 
-Beispiel:
-
-```json
-{
-  "project_id": 1,
-  "service": "chunk",
-  "resource_type": "chunk_world",
-  "resource_id": "world_spawn",
-  "external_project_id": "chk_prj_prj_979eb0a4d8894086a5b2a74b_2653d3872366",
-  "is_primary": true,
-  "status": "active"
-}
-```
-
 ---
 
-### 10.8 `models/project_versions.py`
+### 11.9 `models/project_versions.py`
 
 Zweck:
 
@@ -1179,25 +1640,9 @@ Metriken
 Payload-Referenzen
 ```
 
-Beispiel:
-
-```json
-{
-  "version_id": "ver_abc",
-  "project_id": 1,
-  "version_no": 3,
-  "kind": "metadata",
-  "status": "stored",
-  "label": "Projektstand 3",
-  "artifact_refs": {
-    "project_metadata": true
-  }
-}
-```
-
 ---
 
-### 10.9 `models/project_audit.py`
+### 11.10 `models/project_audit.py`
 
 Zweck:
 
@@ -1224,25 +1669,16 @@ embed_changed
 linked
 version_created
 chunk_provisioned
+invitation_created
+invitation_accepted
+invitation_revoked
+publication_changed
 error
-```
-
-Beispiel:
-
-```json
-{
-  "event_id": "aud_123",
-  "project_id": 1,
-  "category": "project",
-  "action": "updated",
-  "actor_user_id": 1,
-  "message": "Project metadata updated"
-}
 ```
 
 ---
 
-### 10.10 `models/core.py`
+### 11.11 `models/core.py`
 
 Zweck:
 
@@ -1266,7 +1702,7 @@ from models.core import Conversation
 
 ---
 
-### 10.11 `models/__init__.py`
+### 11.12 `models/__init__.py`
 
 Zweck:
 
@@ -1287,6 +1723,7 @@ MessageTemplate
 ConversationState
 Project
 ProjectMembership
+ProjectInvitation
 ProjectEmbedPolicy
 ProjectServiceLink
 ProjectVersion
@@ -1296,70 +1733,77 @@ ProjectAuditEvent
 Beispiel:
 
 ```python
-from models import Project, ProjectMembership, ProjectVersion
+from models import Project, ProjectMembership, ProjectInvitation, ProjectVersion
 ```
 
 ---
 
-## 11. Aktuelle Service-Schicht
+## 12. Aktuelle Service-Schicht
 
 ```text
 services/vectoplan-app/services/
   current_user.py
   project_permissions.py
   project_service.py
+  project_invitation_service.py
+  project_publication_service.py
+  auth_identity_client.py
   chunk_client.py
+  workspace_embed_service.py
 ```
 
 ---
 
-### 11.1 `services/current_user.py`
+### 12.1 `services/current_user.py`
 
 Zweck:
 
 ```text
-zentraler Platzhalter für aktuellen User
+zentraler Current-User-/Auth-/Demo-Kontext
 ```
 
-Aktuell:
+Aktuelle Modi:
 
 ```text
-immer User id=1
-kein Login
-keine Session-Pflicht
-keine externe Auth
+dev
+external
+demo
+```
+
+Wichtig:
+
+```text
+dev:
+  Platzhalter-User id=1 kann sichergestellt werden.
+
+external:
+  spätere Auth-Header-/Auth-Service-Verknüpfung.
+  keine automatische User-Erstellung ohne bekannte lokale Verknüpfung.
+
+demo:
+  user_id = None
+  persistent = false
+  ttl = 1800 Sekunden
+  keine echten Einladungen
+  keine dauerhafte Speicherung
+  kein Bigdata-/Abo-Zugriff
 ```
 
 Wichtige Funktionen:
 
 ```python
-get_current_user_id()
-get_current_user_id_from_g_or_default()
-ensure_default_user()
-get_current_user()
-require_current_user()
 get_current_user_context()
-serialize_current_user()
-```
-
-Beispiel-Kontext:
-
-```json
-{
-  "user_id": 1,
-  "id": 1,
-  "public_id": "u_demo_1",
-  "handle": "demo",
-  "display_name": "Demo User",
-  "role": "admin",
-  "is_placeholder": true,
-  "source": "db"
-}
+get_current_user_id_optional()
+is_current_user_demo()
+is_current_user_authenticated()
+current_user_can_persist()
+require_persistent_current_user()
+ensure_default_user()
 ```
 
 ---
 
-### 11.2 `services/project_permissions.py`
+### 12.2 `services/project_permissions.py`
 
 Zweck:
 
@@ -1385,6 +1829,19 @@ manage
 delete
 transfer
 embed
+view_settings
+manage_settings
+view_team
+manage_team
+view_admin
+```
+
+Wichtige Regel:
+
+```text
+Demo-/nicht-persistente Kontexte dürfen keine Mutationen ausführen.
+Öffentliche Betrachter sehen keine Settings-/Team-/Adminbereiche.
+Admin/System/Permissions bleiben geschützt.
 ```
 
 Wichtige Funktionen:
@@ -1395,34 +1852,13 @@ require_project_permission(project, "edit", user_id)
 can_view_project(project, user_id)
 can_edit_project(project, user_id)
 can_manage_project(project, user_id)
-can_delete_project(project, user_id)
-can_transfer_project(project, user_id)
-can_embed_project(project, user_id)
-ensure_owner_membership(project_id=..., owner_user_id=...)
-grant_project_role(project, user_id=..., role=...)
-revoke_project_membership(project, user_id=...)
-transfer_project_ownership(project, new_owner_user_id=...)
-```
-
-Beispiel:
-
-```python
-require_project_permission(project, "manage", user_id=1)
-```
-
-Wenn die Berechtigung fehlt:
-
-```json
-{
-  "ok": false,
-  "code": "project_permission_denied",
-  "permission": "manage"
-}
+can_view_project_settings(...)
+can_manage_project_team(...)
 ```
 
 ---
 
-### 11.3 `services/project_service.py`
+### 12.3 `services/project_service.py`
 
 Zweck:
 
@@ -1449,29 +1885,129 @@ Audit-Events schreiben
 Chunk-Referenzen speichern/aktualisieren
 ```
 
-Wichtige Funktionen:
+Aktuelle UI-Payload-Regel:
 
-```python
-create_project(data, user_id=1)
-update_project(project, data, user_id=1)
-create_or_update_project(...)
-delete_project(project, user_id=1)
-archive_project(project, user_id=1)
-transfer_project_owner(project, new_owner_user_id=...)
-list_projects_for_user(user_id=1)
-list_project_sidebar_items(user_id=1)
-serialize_project(project)
-serialize_project_sidebar_item(project)
-get_or_create_project_conversation(project)
-get_or_create_embed_policy(project)
-upsert_project_service_link(...)
-create_project_version_link(...)
-update_project_embed_policy(...)
+```text
+Normales Projektformular akzeptiert:
+  name
+  description
+  address_text
+  visibility
+
+System-/Service-Refs nur über explizit erlaubte Backendpfade.
 ```
 
 ---
 
-### 11.4 `services/chunk_client.py`
+### 12.4 `services/project_invitation_service.py`
+
+Zweck:
+
+```text
+Einladungslogik für Projektmitglieder
+```
+
+Verantwortlich für:
+
+```text
+E-Mail normalisieren
+Berechtigung manage/team prüfen
+Demo-Kontext ablehnen
+Auth-/Registrierungsdienst abfragen
+unregistrierte E-Mail ablehnen
+bereits vorhandene Mitglieder erkennen
+doppelte Pending-Invites vermeiden
+ProjectInvitation erzeugen
+Einladungsstatus ändern
+Audit-Events schreiben
+```
+
+Wichtig:
+
+```text
+vectoplan-app erstellt keinen echten Useraccount.
+```
+
+---
+
+### 12.5 `services/auth_identity_client.py`
+
+Zweck:
+
+```text
+Adapter zum zukünftigen Auth-/Registrierungsdienst
+```
+
+Verantwortlich für:
+
+```text
+E-Mail-Lookup
+Registrierungsstatus prüfen
+Einladungsdispatch vorbereiten
+Dev-Mode-Placeholder
+TTL-Cache
+Statusdiagnose
+```
+
+Wichtige ENV-/Config-Werte:
+
+```text
+AUTH_IDENTITY_INTERNAL_URL
+AUTH_IDENTITY_LOOKUP_PATH
+AUTH_IDENTITY_INVITATION_DISPATCH_PATH
+AUTH_IDENTITY_API_TOKEN
+AUTH_IDENTITY_DEV_MODE
+AUTH_IDENTITY_DEV_REGISTERED_EMAILS
+AUTH_IDENTITY_DEV_ACCEPT_ALL_REGISTERED
+AUTH_IDENTITY_PLACEHOLDER_INVITES
+```
+
+---
+
+### 12.6 `services/project_publication_service.py`
+
+Zweck:
+
+```text
+Projekt-Sichtbarkeit und Workspace-Veröffentlichung zentral verwalten
+```
+
+Verantwortlich für:
+
+```text
+visibility normalisieren
+published_workspaces normalisieren
+effective_published_workspaces berechnen
+private/unlisted/public abbilden
+Admin/System/Team/Permissions ausschließen
+Embed-Policy defensiv lesen/schreiben
+Workspace-Zugriff prüfen
+```
+
+Veröffentlichbare Workspaces:
+
+```text
+project
+map
+editor3d
+cad2d
+lv
+versions
+```
+
+Nie veröffentlichbar:
+
+```text
+admin
+team
+settings
+permissions
+system
+```
+
+---
+
+### 12.7 `services/chunk_client.py`
 
 Zweck:
 
@@ -1513,11 +2049,57 @@ PUT /projects/by-app/<app_project_public_id>
 
 ---
 
-## 12. Aktuelle Route-Struktur
+### 12.8 `services/workspace_embed_service.py`
+
+Zweck:
+
+```text
+browserfähige Public-Embed-/Redirect-Ziele für externe Workspaces bauen
+```
+
+Aktuell wichtigster Workspace:
+
+```text
+editor3d
+```
+
+Aufgaben:
+
+```text
+Workspace normalisieren
+Public-URL-Konfiguration lesen
+INTERNAL_URLs nicht an den Browser geben
+Editor-Embed-URL bauen
+Map-Embed-URL vorbereiten
+App-Kontext-URL setzen
+Return-URL setzen
+Chunk-Hints als Query-Parameter setzen
+Debug-/Statusdaten bereitstellen
+kleinen TTL-Cache nutzen
+```
+
+Beispiel-Ausgabe für 3D:
+
+```text
+http://localhost:5100/editor
+  ?embed=1
+  &source=vectoplan-app
+  &workspace=editor3d
+  &app_project_public_id=prj_...
+  &project_public_id=prj_...
+  &context_url=http://localhost:5103/ui/project/prj_.../context.json
+  &return_url=http://localhost:5103/project=prj_...
+  &chunk_world_id=world_spawn
+```
+
+---
+
+## 13. Aktuelle Route-Struktur
 
 ```text
 services/vectoplan-app/routes/
   projects_api.py
+  viewer.py
   viewer_selection.py
 
   ui/
@@ -1532,7 +2114,7 @@ Zusätzlich können ältere/weitere Routen noch im Codebestand existieren, sind 
 
 ---
 
-### 12.1 `routes/projects_api.py`
+### 13.1 `routes/projects_api.py`
 
 Zweck:
 
@@ -1552,30 +2134,44 @@ GET    /v1/projects/<project_id>
 PATCH  /v1/projects/<project_id>
 PUT    /v1/projects/<project_id>
 DELETE /v1/projects/<project_id>
+
 GET    /v1/projects/<project_id>/access
 GET    /v1/projects/<project_id>/members
 PUT    /v1/projects/<project_id>/members/<user_id>
 PATCH  /v1/projects/<project_id>/members/<user_id>
 DELETE /v1/projects/<project_id>/members/<user_id>
 POST   /v1/projects/<project_id>/transfer
+
 GET    /v1/projects/<project_id>/versions
 POST   /v1/projects/<project_id>/versions
+
 GET    /v1/projects/<project_id>/service-links
 POST   /v1/projects/<project_id>/service-links
+
 GET    /v1/projects/<project_id>/embed-policy
 PUT    /v1/projects/<project_id>/embed-policy
 PATCH  /v1/projects/<project_id>/embed-policy
-GET    /v1/projects/<project_id>/sidebar-item
+
+GET    /v1/projects/<project_id>/publication
+PUT    /v1/projects/<project_id>/publication
+PATCH  /v1/projects/<project_id>/publication
+
+GET    /v1/projects/<project_id>/invitations
+POST   /v1/projects/<project_id>/invitations
+DELETE /v1/projects/<project_id>/invitations/<invitation_id>
+
+POST   /v1/project-invitations/<invitation_id>/accept
+POST   /v1/project-invitations/<invitation_id>/reject
 ```
 
 ---
 
-### 12.2 `routes/ui/projects.py`
+### 13.2 `routes/ui/projects.py`
 
 Zweck:
 
 ```text
-projektgeführte UI-Shell
+projektgeführte UI-Shell und Kompatibilitätsschicht
 ```
 
 Wichtige Routen:
@@ -1586,129 +2182,72 @@ GET /project=new            → Projekt-Shell, neues Projekt
 GET /project=<project_id>   → Projekt-Shell, bestehendes Projekt
 GET /project/<project_id>   → Redirect auf /project=<project_id>
 GET /projects               → Projekt-Shell
-GET /ui/project/new         → Projektformular im iframe
-GET /ui/project/<id>/project
-GET /ui/project/<id>/admin
-GET /ui/project/<id>/lv
-GET /ui/project/<id>/context.json
 GET /ui/projects/sidebar.json
+GET /ui/projects/status.json
+```
+
+Wichtig:
+
+```text
+Diese Datei rendert die Shell.
+Die iframe-Workspaces unter /ui/project/... liegen nun bei routes/viewer.py.
 ```
 
 ---
 
-### 12.3 `routes/ui/editor.py`
+### 13.3 `routes/viewer.py`
 
 Zweck:
 
 ```text
-3D-Editor-Gateway
+zentraler App-Gateway für Projekt-Workspaces unter /ui/project/...
 ```
 
 Wichtige Routen:
 
 ```text
-GET /ui/project/<project_id>/editor
-GET /ui/chat/<chat_id>/editor
-GET /ui/editor
+GET /ui/_status
+GET /ui/project/_status
+
+GET /ui/project/new
+GET /ui/project/new/project
+GET /ui/project/new/context.json
+
+GET /ui/project/<project_id>
+GET /ui/project/<project_id>/
+GET /ui/project/<project_id>/project
+GET /ui/project/<project_id>/context.json
+
+GET /ui/project/<project_id>/<workspace>
+GET /ui/project/<project_id>/<workspace>/context.json
 ```
 
-Regel:
+Workspace-Verhalten:
 
 ```text
-Browser bekommt nur VECTOPLAN_EDITOR_PUBLIC_URL
-```
+project:
+  rendert templates/viewer/project.html
 
-Nie:
+admin:
+  rendert geschützten Projekt-/Admin-Kontext über project.html bzw. geschützten Bereich
 
-```text
-http://vectoplan-editor:5000
+editor3d:
+  prüft Zugriff
+  baut Public-Editor-Embed-URL
+  redirect auf vectoplan-editor
+
+map:
+  prüft Zugriff
+  kann über workspace_embed_service auf OpenLayer weiterleiten
+
+cad2d/lv/versions:
+  aktuell Shell-/Platzhalter-/Gateway-Pfade
+  später Service-spezifisch verfeinern
 ```
 
 ---
 
-### 12.4 `routes/ui/map.py`
-
-Zweck:
-
-```text
-Map-Gateway
-```
-
-Wichtige Routen:
-
-```text
-GET /ui/project/<project_id>/map
-GET /ui/chat/<chat_id>/map
-GET /ui/map
-GET /ui/project/<project_id>/map.json
-GET /ui/chat/<chat_id>/map.json
-```
-
-Regel:
-
-```text
-Browser bekommt nur OPENLAYER_PUBLIC_URL
-```
-
-Nie:
-
-```text
-http://openlayer:8090
-```
-
----
-
-### 12.5 `routes/ui/viewer2d.py`
-
-Zweck:
-
-```text
-2D-/CAD-Gateway
-```
-
-Wichtige Routen:
-
-```text
-GET /ui/project/<project_id>/cad2d
-GET /ui/chat/<chat_id>/cad2d
-GET /ui/project/<project_id>/plan2d.json
-GET /ui/chat/<chat_id>/plan2d.json
-GET /ui/project/<project_id>/cad-embed.json
-GET /ui/chat/<chat_id>/cad-embed.json
-```
-
----
-
-### 12.6 `routes/ui/chat.py`
-
-Zweck im neuen Stand:
-
-```text
-Legacy-/Kompatibilitätsroute
-```
-
-Nicht mehr primärer Zielpfad.
-
-Kann noch genutzt werden für:
-
-```text
-alte /ui/chat-3d Redirects
-bestehende Chat-IDs
-Legacy-Shell-Kompatibilität
-Upload-/Version-Kompatibilität
-```
-
-Ziel später:
-
-```text
-entweder entfernen
-oder hart auf Projekt-Shell redirecten
-oder hinter Feature-Flag legen
-```
-
----
-
-### 12.7 `routes/viewer_selection.py`
+### 13.4 `routes/viewer_selection.py`
 
 Zweck:
 
@@ -1743,7 +2282,122 @@ Die Route funktioniert wieder, weil ConversationState nun get_or_create und merg
 
 ---
 
-## 13. Aktuelle Template-Struktur
+### 13.5 `routes/ui/editor.py`
+
+Zweck im neuen Stand:
+
+```text
+älterer/zusätzlicher 3D-Editor-Gateway
+```
+
+Wichtige Routen können weiterhin existieren:
+
+```text
+GET /ui/project/<project_id>/editor
+GET /ui/chat/<chat_id>/editor
+GET /ui/editor
+```
+
+Aktueller primärer Projektpfad ist aber:
+
+```text
+GET /ui/project/<project_id>/editor3d
+```
+
+über:
+
+```text
+routes/viewer.py
+services/workspace_embed_service.py
+```
+
+---
+
+### 13.6 `routes/ui/map.py`
+
+Zweck:
+
+```text
+älterer/zusätzlicher Map-Gateway
+```
+
+Wichtige Routen können weiterhin existieren:
+
+```text
+GET /ui/project/<project_id>/map
+GET /ui/chat/<chat_id>/map
+GET /ui/map
+GET /ui/project/<project_id>/map.json
+GET /ui/chat/<chat_id>/map.json
+```
+
+Im neuen Stand kann `/ui/project/<id>/map` auch zentral über `routes/viewer.py` und `workspace_embed_service.py` laufen.
+
+Regel bleibt:
+
+```text
+Browser bekommt nur OPENLAYER_PUBLIC_URL
+```
+
+Nie:
+
+```text
+http://openlayer:8090
+```
+
+---
+
+### 13.7 `routes/ui/viewer2d.py`
+
+Zweck:
+
+```text
+2D-/CAD-Gateway
+```
+
+Wichtige Routen:
+
+```text
+GET /ui/project/<project_id>/cad2d
+GET /ui/chat/<chat_id>/cad2d
+GET /ui/project/<project_id>/plan2d.json
+GET /ui/chat/<chat_id>/plan2d.json
+GET /ui/project/<project_id>/cad-embed.json
+GET /ui/chat/<chat_id>/cad-embed.json
+```
+
+---
+
+### 13.8 `routes/ui/chat.py`
+
+Zweck im neuen Stand:
+
+```text
+Legacy-/Kompatibilitätsroute
+```
+
+Nicht mehr primärer Zielpfad.
+
+Kann noch genutzt werden für:
+
+```text
+alte /ui/chat-3d Redirects
+bestehende Chat-IDs
+Legacy-Shell-Kompatibilität
+Upload-/Version-Kompatibilität
+```
+
+Ziel später:
+
+```text
+entweder entfernen
+oder hart auf Projekt-Shell redirecten
+oder hinter Feature-Flag legen
+```
+
+---
+
+## 14. Aktuelle Template-Struktur
 
 ```text
 services/vectoplan-app/templates/
@@ -1751,9 +2405,16 @@ services/vectoplan-app/templates/
 
   partials/
     project_sidebar.html
+    demo_banner.html
 
   viewer/
     project.html
+
+    partials/
+      project_address.html
+      project_visibility.html
+      project_publication.html
+      project_team.html
 ```
 
 Weitere alte Templates können noch existieren:
@@ -1768,7 +2429,7 @@ viewer/map.html
 
 ---
 
-### 13.1 `templates/chat_viewer.html`
+### 14.1 `templates/chat_viewer.html`
 
 Trotz Name ist diese Datei jetzt die Projekt-/Workspace-Shell.
 
@@ -1780,6 +2441,8 @@ Projekt-Sidebar einbinden
 Workspace-Toolbar rendern
 iframe rendern
 APP_CONFIG erzeugen
+Demo-Banner einbinden
+Workspace-Pfade zentral bereitstellen
 ```
 
 Aktuelles Layout:
@@ -1810,18 +2473,22 @@ window.APP_CONFIG = {
   projectPublicId: "...",
   projectConfigured: true,
   workspacePaths: {
-    projectPagePath: "...",
-    editorPagePath: "...",
-    mapPagePath: "...",
-    cad2dPagePath: "...",
-    lvPagePath: "..."
+    projectPagePath: "/ui/project/<id>/project",
+    editor3dPagePath: "/ui/project/<id>/editor3d",
+    editorPagePath: "/ui/project/<id>/editor3d",
+    initialEditorUrl: "/ui/project/<id>/editor3d",
+    mapPagePath: "/ui/project/<id>/map",
+    cad2dPagePath: "/ui/project/<id>/cad2d",
+    lvPagePath: "/ui/project/<id>/lv",
+    versionsPagePath: "/ui/project/<id>/versions",
+    adminPagePath: "/ui/project/<id>/admin"
   }
 }
 ```
 
 ---
 
-### 13.2 `templates/partials/project_sidebar.html`
+### 14.2 `templates/partials/project_sidebar.html`
 
 Zweck:
 
@@ -1845,7 +2512,27 @@ navigiert auf /project=<public_id>
 
 ---
 
-### 13.3 `templates/viewer/project.html`
+### 14.3 `templates/partials/demo_banner.html`
+
+Zweck:
+
+```text
+sichtbarer Hinweis bei Demo-Kontext
+```
+
+Zeigt:
+
+```text
+nicht eingeloggt
+keine dauerhafte Speicherung
+keine echten Einladungen
+kein Bigdata-/Abo-Zugriff
+temporäre Demo-Sitzung
+```
+
+---
+
+### 14.4 `templates/viewer/project.html`
 
 Zweck:
 
@@ -1853,23 +2540,25 @@ Zweck:
 Projektformular im Workspace-iframe
 ```
 
-Enthält Felder für:
+Enthält sichtbar:
 
 ```text
 Projektname
 Beschreibung
-Adresse
-Straße
-Hausnummer
-PLZ
-Ort
-Region
-Land
-Latitude
-Longitude
-SRID
-Sichtbarkeit
+Adressbox address_text
+Sichtbarkeit private/unlisted/public
+Veröffentlichung
+Team und Einladungen
+```
+
+Nicht mehr normal sichtbar:
+
+```text
+Einzeladressfelder
+Koordinatenfelder
 Systemreferenzen
+Service-Refs
+Chunk-Refs
 ```
 
 Beim Speichern:
@@ -1883,7 +2572,90 @@ Danach wird der Parent aktualisiert.
 
 ---
 
-## 14. Aktuelle Static-Struktur
+### 14.5 `templates/viewer/partials/project_address.html`
+
+Zweck:
+
+```text
+einzige sichtbare Adressbox
+```
+
+Wichtig:
+
+```text
+address_text ist das sichtbare Feld.
+strukturierte Adresse/Koordinaten bleiben spätere Geocoder-Aufgabe.
+```
+
+---
+
+### 14.6 `templates/viewer/partials/project_visibility.html`
+
+Zweck:
+
+```text
+Projekt-Sichtbarkeit private/unlisted/public
+```
+
+Wichtig:
+
+```text
+Sichtbarkeit ist nicht identisch mit Workspace-Veröffentlichung.
+```
+
+---
+
+### 14.7 `templates/viewer/partials/project_publication.html`
+
+Zweck:
+
+```text
+Workspace-Veröffentlichung je Projekt steuern
+```
+
+Workspaces:
+
+```text
+project
+map
+editor3d
+cad2d
+lv
+versions
+```
+
+Nie öffentlich:
+
+```text
+admin
+team
+settings
+permissions
+system
+```
+
+---
+
+### 14.8 `templates/viewer/partials/project_team.html`
+
+Zweck:
+
+```text
+Teammitglieder und Einladungen verwalten
+```
+
+Wichtig:
+
+```text
+nur Projektverwalter
+keine Anzeige für unberechtigte User
+keine echten Useraccounts erzeugen
+Einladungen nur an registrierte E-Mails
+```
+
+---
+
+## 15. Aktuelle Static-Struktur
 
 ```text
 services/vectoplan-app/static/
@@ -1902,11 +2674,13 @@ services/vectoplan-app/static/
 
     project/
       project_form.js
+      project_publication.js
+      project_team.js
 ```
 
 ---
 
-### 14.1 `static/css/chat.css`
+### 15.1 `static/css/chat.css`
 
 Zweck:
 
@@ -1926,22 +2700,9 @@ Gating-Zustände
 Light/Dark Theme
 ```
 
-Explizit deaktiviert:
-
-```text
-.chat-wrap
-.chat-backdrop
-#composer
-#message
-#attachBtn
-#sendBtn
-#chatToggleBtn
-#msgs
-```
-
 ---
 
-### 14.2 `static/css/project_sidebar.css`
+### 15.2 `static/css/project_sidebar.css`
 
 Zweck:
 
@@ -1965,7 +2726,7 @@ Mobile-Verhalten
 
 ---
 
-### 14.3 `static/css/project_workspace.css`
+### 15.3 `static/css/project_workspace.css`
 
 Zweck:
 
@@ -1979,14 +2740,19 @@ Steuert:
 Form-Layout
 Sektionen
 Input-Felder
+Adressbox
+Sichtbarkeitskarten
+Publication-Karten
+Team-/Einladungslisten
+Demo-Hinweise
 Sticky Save-Bar
-Status-Chip
+Status-Chips
 Projekt-Konfigurationszustand
 ```
 
 ---
 
-### 14.4 `static/js/chat/main.js`
+### 15.4 `static/js/chat/main.js`
 
 Trotz Pfadname ist diese Datei jetzt der Workspace-Orchestrator.
 
@@ -2001,6 +2767,15 @@ Theme toggeln
 Versionen-Dropdown steuern
 Projekt-Speicher-Events verarbeiten
 Debug-API bereitstellen
+```
+
+Aktueller wichtiger Fix:
+
+```text
+3D normalisiert auf editor3d.
+3D-Pfad ist /ui/project/<id>/editor3d.
+Alte editor-/viewer-Fallbacks werden auf editor3d gemappt.
+Interne Docker-Hosts werden als unsichere Browser-Ziele blockiert.
 ```
 
 Nicht mehr enthalten:
@@ -2027,77 +2802,13 @@ Beispiele:
 ```js
 window.__VECTOPLAN_WORKSPACE_DEBUG__.project.current()
 window.__VECTOPLAN_WORKSPACE_DEBUG__.project.configured()
-window.__VECTOPLAN_WORKSPACE_DEBUG__.setWorkspaceMode("map")
+window.__VECTOPLAN_WORKSPACE_DEBUG__.modes.set("3d")
+window.__VECTOPLAN_WORKSPACE_DEBUG__.routes.editor()
 ```
 
 ---
 
-### 14.5 `static/js/chat/project_sidebar_data.js`
-
-Zweck:
-
-```text
-Datenquelle der Projekt-Sidebar
-```
-
-Primär:
-
-```text
-GET /v1/projects/sidebar
-```
-
-Fallback:
-
-```text
-lokaler Cache/localStorage
-```
-
----
-
-### 14.6 `static/js/chat/project_sidebar_resize.js`
-
-Zweck:
-
-```text
-Resize-Logik der Projekt-Sidebar
-```
-
-Steuert:
-
-```text
-Maus-/Touch-Resize
-min/max width
-collapsed width
-localStorage-Persistenz
-Resize-Events an Shell
-```
-
----
-
-### 14.7 `static/js/chat/project_sidebar.js`
-
-Zweck:
-
-```text
-Controller der Projekt-Sidebar
-```
-
-Steuert:
-
-```text
-Initialisierung
-Item-Rendering
-Suche
-Aktives Projekt
-Neues Projekt
-Refresh
-Collapse
-Navigation
-```
-
----
-
-### 14.8 `static/js/project/project_form.js`
+### 15.5 `static/js/project/project_form.js`
 
 Zweck:
 
@@ -2118,20 +2829,107 @@ Dirty-State
 Fehleranzeige
 ```
 
-Wichtige Events:
+Gesendeter Standard-Payload:
 
 ```text
-vectoplan:project:saved
-vectoplan:project:created
-vectoplan:project:updated
-vectoplan:project:configured
-vectoplan:project:dirty
-vectoplan:project:error
+name
+title
+description
+address_text
+address.text
+visibility
+```
+
+Nicht mehr gesendet im normalen UI-Pfad:
+
+```text
+street
+house_number
+postal_code
+city
+region
+country
+latitude
+longitude
+coordinate_srid
+is_public
+service_refs
+system_refs
 ```
 
 ---
 
-## 15. Detaillierte aktuelle Ordner-/Filestruktur
+### 15.6 `static/js/project/project_publication.js`
+
+Zweck:
+
+```text
+Veröffentlichungseinstellungen speichern
+```
+
+Steuert:
+
+```text
+published_workspaces
+require_auth
+require_project_permission
+```
+
+Speichert über:
+
+```text
+PATCH /v1/projects/<project_id>/publication
+```
+
+---
+
+### 15.7 `static/js/project/project_team.js`
+
+Zweck:
+
+```text
+Teammitglieder, Rollen und Einladungen verwalten
+```
+
+Steuert:
+
+```text
+GET    /v1/projects/<project_id>/members
+PATCH  /v1/projects/<project_id>/members/<user_id>
+DELETE /v1/projects/<project_id>/members/<user_id>
+GET    /v1/projects/<project_id>/invitations
+POST   /v1/projects/<project_id>/invitations
+DELETE /v1/projects/<project_id>/invitations/<invitation_id>
+```
+
+Wichtig:
+
+```text
+Owner wird nicht per Einladung vergeben.
+Echte Useraccounts werden nicht erzeugt.
+```
+
+---
+
+## 16. Fortsetzung in Teil 2
+
+Teil 2 aktualisiert anschließend:
+
+```text
+16. Detaillierte Ordner-/Filestruktur
+17. Wichtigste Endpoints
+18. Beispiel: Projekt erstellen
+19. Beispiel: Projekt bearbeiten
+20. Beispiel: Sidebar laden
+21. Beispiel: Service-Link setzen
+22. Beispiel: Version anlegen
+23. Beispiel: Embed-/Publication-Policy
+24. Beispiel: Workspace-State speichern
+25. Frontend-Eventfluss nach Projektspeicherung
+26. Aktueller UI-Zielzustand
+27. Datenbank- und Runtime-Hinweise
+```
+## 16. Detaillierte aktuelle Ordner-/Filestruktur
 
 ```text
 services/vectoplan-app/
@@ -2149,6 +2947,7 @@ services/vectoplan-app/
     legacy.py
     projects.py
     project_access.py
+    project_invitations.py
     project_embed.py
     project_links.py
     project_versions.py
@@ -2157,12 +2956,18 @@ services/vectoplan-app/
 
   services/
     current_user.py
+    auth_identity_client.py
     project_permissions.py
     project_service.py
+    project_invitation_service.py
+    project_publication_service.py
+    workspace_embed_service.py
     chunk_client.py
 
   routes/
     projects_api.py
+    viewer.py
+    viewer_selection.py
 
     ui/
       projects.py
@@ -2185,7 +2990,6 @@ services/vectoplan-app/
     versions_api.py
     templates.py
     state.py
-    viewer_selection.py
 
     embed.py
     speckle_upload.py
@@ -2197,9 +3001,17 @@ services/vectoplan-app/
 
     partials/
       project_sidebar.html
+      demo_banner.html
 
     viewer/
       project.html
+
+      partials/
+        project_address.html
+        project_visibility.html
+        project_publication.html
+        project_team.html
+
       admin.html
       cad2d.html
       lv.html
@@ -2221,36 +3033,78 @@ services/vectoplan-app/
 
       project/
         project_form.js
+        project_publication.js
+        project_team.js
 ```
 
 Hinweis:
 
-Einige ältere Dateien können noch vorhanden sein, obwohl sie nicht mehr zum neuen primären Projektfluss gehören. Sie werden später geprüft, deaktiviert oder entfernt.
-
----
-
-## 16. Wichtigste Endpoints – Teilübersicht
-
-### 16.1 UI
-
 ```text
-GET /
-GET /project=new
-GET /project=<project_public_id>
-GET /ui/project/new
-GET /ui/project/<project_public_id>/project
-GET /ui/project/<project_public_id>/editor
-GET /ui/project/<project_public_id>/map
-GET /ui/project/<project_public_id>/cad2d
-GET /ui/project/<project_public_id>/lv
-GET /ui/project/<project_public_id>/admin
-GET /ui/project/<project_public_id>/context.json
-GET /ui/projects/sidebar.json
+Einige ältere Dateien können noch vorhanden sein, obwohl sie nicht mehr zum neuen primären Projektfluss gehören.
+Sie werden später geprüft, deaktiviert oder entfernt.
 ```
 
 ---
 
-### 16.2 API
+## 17. Wichtigste Endpoints
+
+### 17.1 Projekt-Shell / UI
+
+```text
+GET /                                      → Projekt-Shell, neues Projekt
+GET /project=new                          → Projekt-Shell, neues Projekt
+GET /project=<project_public_id>          → Projekt-Shell, bestehendes Projekt
+GET /project/<project_public_id>          → Redirect auf /project=<project_public_id>
+GET /projects                             → Projekt-Shell
+```
+
+Wichtig:
+
+```text
+Diese Routen rendern die App-Shell, nicht direkt den iframe-Workspace.
+Die Shell-Datei ist aktuell templates/chat_viewer.html.
+```
+
+---
+
+### 17.2 Projekt-Workspaces / iframe-Gateway
+
+```text
+GET /ui/project/new
+GET /ui/project/new/project
+GET /ui/project/new/context.json
+
+GET /ui/project/<project_public_id>
+GET /ui/project/<project_public_id>/
+GET /ui/project/<project_public_id>/project
+GET /ui/project/<project_public_id>/context.json
+
+GET /ui/project/<project_public_id>/editor3d
+GET /ui/project/<project_public_id>/map
+GET /ui/project/<project_public_id>/cad2d
+GET /ui/project/<project_public_id>/lv
+GET /ui/project/<project_public_id>/versions
+GET /ui/project/<project_public_id>/admin
+
+GET /ui/project/<project_public_id>/<workspace>/context.json
+```
+
+Zentrale Datei:
+
+```text
+services/vectoplan-app/routes/viewer.py
+```
+
+Wichtig:
+
+```text
+/ui/project/<project_public_id>/editor3d ist jetzt der primäre 3D-Gateway.
+Nicht mehr primär: /ui/project/<project_public_id>/editor
+```
+
+---
+
+### 17.3 Projekt-API
 
 ```text
 GET    /v1/projects/_status
@@ -2258,27 +3112,56 @@ GET    /v1/projects/current-user
 GET    /v1/projects
 POST   /v1/projects
 GET    /v1/projects/sidebar
+
 GET    /v1/projects/<project_id>
 PATCH  /v1/projects/<project_id>
 PUT    /v1/projects/<project_id>
 DELETE /v1/projects/<project_id>
+
 GET    /v1/projects/<project_id>/access
 GET    /v1/projects/<project_id>/members
 PUT    /v1/projects/<project_id>/members/<user_id>
+PATCH  /v1/projects/<project_id>/members/<user_id>
 DELETE /v1/projects/<project_id>/members/<user_id>
+
 POST   /v1/projects/<project_id>/transfer
+
 GET    /v1/projects/<project_id>/versions
 POST   /v1/projects/<project_id>/versions
+
 GET    /v1/projects/<project_id>/service-links
 POST   /v1/projects/<project_id>/service-links
+
 GET    /v1/projects/<project_id>/embed-policy
 PUT    /v1/projects/<project_id>/embed-policy
-GET    /v1/projects/<project_id>/sidebar-item
+PATCH  /v1/projects/<project_id>/embed-policy
+
+GET    /v1/projects/<project_id>/publication
+PUT    /v1/projects/<project_id>/publication
+PATCH  /v1/projects/<project_id>/publication
+
+GET    /v1/projects/<project_id>/publication/workspaces/<workspace>
+GET    /v1/projects/<project_id>/workspace-access/<workspace>
+
+GET    /v1/projects/<project_id>/invitations
+POST   /v1/projects/<project_id>/invitations
+DELETE /v1/projects/<project_id>/invitations/<invitation_id>
+POST   /v1/projects/<project_id>/invitations/<invitation_id>/revoke
+
+POST   /v1/project-invitations/<invitation_id>/accept
+POST   /v1/project-invitations/<invitation_id>/reject
+POST   /v1/project-invitations/<invitation_id>/expire
+```
+
+Zentrale Datei:
+
+```text
+services/vectoplan-app/routes/projects_api.py
 ```
 
 ---
 
-### 16.3 Technischer State-Kompatibilitätspfad
+### 17.4 Technischer State-Kompatibilitätspfad
 
 ```text
 GET   /v1/chats/<chat_id>/viewer/selection
@@ -2296,11 +3179,43 @@ kein Speckle-State
 kein alter Viewer-Backend-State
 ```
 
+Gespeicherte Werte:
+
+```text
+mode
+workspace_mode
+viewer_selection
+workspace_selection
+last_2d_selection
+last_2d_hover
+last_editor_selection
+last_editor_message
+last_map_selection
+last_map_hover
+last_lv_selection
+last_workspace_error
+```
+
+Nicht speichern:
+
+```text
+speckle_*
+legacy_viewer*
+viewer_url
+model_id
+version_id
+runtime_url
+service_refs
+artifact_refs
+system_refs
+chunk snapshot internals
+```
+
 ---
 
-## 17. Beispiel: Projekt erstellen
+## 18. Beispiel: Projekt erstellen
 
-Request:
+Aktueller Request im vereinfachten Projektformular:
 
 ```bash
 curl -X POST http://localhost:5103/v1/projects \
@@ -2309,18 +3224,28 @@ curl -X POST http://localhost:5103/v1/projects \
     "name": "Testprojekt",
     "description": "Erstes Testprojekt",
     "address_text": "Musterstraße 1, 12345 Berlin, Deutschland",
-    "street": "Musterstraße",
-    "house_number": "1",
-    "postal_code": "12345",
-    "city": "Berlin",
-    "region": "Berlin",
-    "country": "DE",
-    "latitude": 52.52,
-    "longitude": 13.405,
-    "visibility": "private",
-    "is_public": false
+    "visibility": "private"
   }'
 ```
+
+Nicht mehr im normalen UI-Payload:
+
+```json
+{
+  "street": "Musterstraße",
+  "house_number": "1",
+  "postal_code": "12345",
+  "city": "Berlin",
+  "region": "Berlin",
+  "country": "DE",
+  "latitude": 52.52,
+  "longitude": 13.405,
+  "coordinate_srid": 4326,
+  "is_public": false
+}
+```
+
+Diese Felder können modellseitig oder über spätere Geocoder-/Systempfade weiter existieren, sind aber nicht mehr normal sichtbarer Projektformular-Fokus.
 
 Erwartetes Ergebnis:
 
@@ -2331,6 +3256,10 @@ Erwartetes Ergebnis:
   "project": {
     "public_id": "prj_...",
     "name": "Testprojekt",
+    "description": "Erstes Testprojekt",
+    "address_text": "Musterstraße 1, 12345 Berlin, Deutschland",
+    "visibility": "private",
+    "is_public": false,
     "setup_status": "configured",
     "is_configured": true,
     "chunk_project_id": "chk_prj_...",
@@ -2341,9 +3270,19 @@ Erwartetes Ergebnis:
 }
 ```
 
+Nach Erstellung:
+
+```text
+project_form.js sendet Parent-Event.
+main.js aktualisiert APP_CONFIG.
+Sidebar wird aktualisiert.
+Workspace-Gating wird neu berechnet.
+Browser öffnet /project=<project_public_id>.
+```
+
 ---
 
-## 18. Beispiel: Projekt bearbeiten
+## 19. Beispiel: Projekt bearbeiten
 
 Request:
 
@@ -2354,7 +3293,7 @@ curl -X PATCH http://localhost:5103/v1/projects/prj_979eb0a4d8894086a5b2a74b \
     "name": "Testprojekt aktualisiert",
     "description": "Neue Beschreibung",
     "address_text": "Innenried 31",
-    "city": "Beispielstadt"
+    "visibility": "private"
   }'
 ```
 
@@ -2367,33 +3306,25 @@ Erwartetes Ergebnis:
   "project": {
     "public_id": "prj_979eb0a4d8894086a5b2a74b",
     "name": "Testprojekt aktualisiert",
+    "description": "Neue Beschreibung",
+    "address_text": "Innenried 31",
+    "visibility": "private",
     "setup_status": "configured",
     "is_configured": true
   }
 }
 ```
 
----
-
-Fortsetzung in Teil 2:
+Wichtig:
 
 ```text
-19. Sidebar laden
-20. Service-Link setzen
-21. Version anlegen
-22. Embed-Policy
-23. Frontend-Eventfluss
-24. Workspace-Flows
-25. Datenbank-/Runtime-Hinweise
-26. Bekannte Altlasten
-27. Was behalten werden sollte
-28. Was später umbenannt werden sollte
-29. Was später entfernt/deaktiviert werden sollte
-30. Offene Punkte
-31. Gesamtfazit
-32. Ordner-/Architekturübersicht
+Normale Bearbeitung verändert keine Systemreferenzen.
+Chunk-/Service-/Artifact-Referenzen bleiben separaten Backend-/Servicepfaden vorbehalten.
 ```
-## 19. Beispiel: Sidebar laden
+
+---
+
+## 20. Beispiel: Sidebar laden
 
 Request:
 
@@ -2425,7 +3356,7 @@ Die Sidebar ist die primäre Navigation der App. Sie lädt ihre Daten serverseit
 
 ---
 
-## 20. Beispiel: Service-Link setzen
+## 21. Beispiel: Service-Link setzen
 
 Ein Projekt mit einer Chunk-Ressource verknüpfen:
 
@@ -2461,7 +3392,7 @@ providerWorldId = flat
 
 ---
 
-## 21. Beispiel: Version anlegen
+## 22. Beispiel: Version anlegen
 
 ```bash
 curl -X POST http://localhost:5103/v1/projects/prj_979eb0a4d8894086a5b2a74b/versions \
@@ -2486,37 +3417,184 @@ Alte transcript-basierte Versionierung ist noch nicht vollständig bereinigt.
 Service-Artefakte sollen später konsequent als Referenzen gespeichert werden.
 ```
 
----
+Wichtig:
 
-## 22. Beispiel: Embed-Policy lesen
-
-```bash
-curl http://localhost:5103/v1/projects/prj_979eb0a4d8894086a5b2a74b/embed-policy
+```text
+Versionen sind App-seitige Referenzen.
+Sie ersetzen nicht die fachlichen Snapshot-/Persistenzmechanismen der einzelnen Microservices.
 ```
 
-Die Embed-Policy beschreibt, ob und wie ein Projekt in iframes oder externe Kontexte eingebettet werden darf.
+---
+
+## 23. Beispiel: Projekt-Sichtbarkeit und Veröffentlichung
+
+### 23.1 Sichtbarkeit lesen
+
+```bash
+curl http://localhost:5103/v1/projects/prj_979eb0a4d8894086a5b2a74b
+```
+
+Relevanter Ausschnitt:
+
+```json
+{
+  "project": {
+    "public_id": "prj_979eb0a4d8894086a5b2a74b",
+    "visibility": "private",
+    "is_public": false
+  }
+}
+```
+
+Sichtbarkeiten:
+
+```text
+private
+unlisted
+public
+```
+
+---
+
+### 23.2 Veröffentlichung lesen
+
+```bash
+curl http://localhost:5103/v1/projects/prj_979eb0a4d8894086a5b2a74b/publication
+```
 
 Beispiel:
 
 ```json
 {
   "ok": true,
-  "policy": {
-    "enabled": true,
-    "allow_iframe": true,
-    "allow_map": true,
-    "allow_editor3d": true,
-    "allow_2d": true,
-    "allow_lv": true,
-    "require_auth": true,
-    "require_project_permission": true
+  "publication": {
+    "visibility": "public",
+    "publication_enabled": true,
+    "published_workspaces": {
+      "project": true,
+      "map": true,
+      "editor3d": true,
+      "cad2d": false,
+      "lv": false,
+      "versions": false
+    },
+    "effective_published_workspaces": {
+      "project": true,
+      "map": true,
+      "editor3d": true,
+      "cad2d": false,
+      "lv": false,
+      "versions": false
+    },
+    "require_auth": false,
+    "require_project_permission": false
   }
 }
 ```
 
 ---
 
-## 23. Beispiel: Workspace-State speichern
+### 23.3 Veröffentlichung ändern
+
+```bash
+curl -X PATCH http://localhost:5103/v1/projects/prj_979eb0a4d8894086a5b2a74b/publication \
+  -H "Content-Type: application/json" \
+  -d '{
+    "visibility": "public",
+    "published_workspaces": {
+      "project": true,
+      "map": true,
+      "editor3d": true,
+      "cad2d": false,
+      "lv": false,
+      "versions": false
+    },
+    "require_auth": false,
+    "require_project_permission": false
+  }'
+```
+
+Regel:
+
+```text
+Projekt-Sichtbarkeit und Workspace-Veröffentlichung sind getrennt.
+Ein öffentliches Projekt veröffentlicht nicht automatisch alle Workspaces.
+```
+
+Nie öffentlich:
+
+```text
+admin
+team
+settings
+permissions
+system
+```
+
+---
+
+## 24. Beispiel: Projekt-Einladung erstellen
+
+Request:
+
+```bash
+curl -X POST http://localhost:5103/v1/projects/prj_979eb0a4d8894086a5b2a74b/invitations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "person@example.com",
+    "role": "editor"
+  }'
+```
+
+Ablauf:
+
+```text
+1. User muss Projekt verwalten dürfen.
+2. Demo-Kontext wird abgelehnt.
+3. E-Mail wird normalisiert.
+4. Auth-/Registrierungsdienst wird gefragt.
+5. Wenn E-Mail nicht registriert ist: Ablehnung.
+6. Wenn E-Mail registriert ist: ProjectInvitation wird erstellt.
+7. Optional wird Einladungsdispatch vorbereitet.
+8. Audit-Event wird geschrieben.
+```
+
+Erwartetes Ergebnis bei registrierter E-Mail:
+
+```json
+{
+  "ok": true,
+  "code": "project_invitation_created",
+  "invitation": {
+    "id": 123,
+    "email": "person@example.com",
+    "role": "editor",
+    "status": "pending",
+    "dispatch_status": "placeholder"
+  }
+}
+```
+
+Erwartetes Ergebnis bei nicht registrierter E-Mail:
+
+```json
+{
+  "ok": false,
+  "code": "auth_identity_email_not_registered",
+  "error": "email not registered"
+}
+```
+
+Wichtig:
+
+```text
+vectoplan-app erzeugt keinen echten Useraccount.
+Owner wird nicht per Einladung vergeben.
+```
+
+---
+
+## 25. Beispiel: Workspace-State speichern
 
 Die App hat weiterhin technische State-Routen für Workspace-/Viewer-Auswahl.
 
@@ -2526,7 +3604,8 @@ Beispiel:
 curl -X PUT http://localhost:5103/v1/chats/<chat_id>/viewer/selection \
   -H "Content-Type: application/json" \
   -d '{
-    "mode": "editor"
+    "mode": "editor",
+    "workspace_mode": "3d"
   }'
 ```
 
@@ -2566,7 +3645,7 @@ viewer_selection.py kann ohne Änderung weiter funktionieren.
 
 ---
 
-## 24. Frontend-Eventfluss nach Projektspeicherung
+## 26. Frontend-Eventfluss nach Projektspeicherung
 
 Wenn das Projektformular speichert, sendet `project_form.js` ein Event an den Parent:
 
@@ -2574,8 +3653,10 @@ Wenn das Projektformular speichert, sendet `project_form.js` ein Event an den Pa
 window.parent.dispatchEvent(new CustomEvent("vectoplan:project:saved", {
   detail: {
     project: savedProject,
-    sidebar_item: sidebarItem,
-    redirect_url: "/project=prj_..."
+    payload: responsePayload,
+    isNew: true,
+    isConfigured: true,
+    redirectUrl: "/project=prj_..."
   }
 }));
 ```
@@ -2585,6 +3666,8 @@ window.parent.dispatchEvent(new CustomEvent("vectoplan:project:saved", {
 ```text
 Projekt in APP_CONFIG aktualisieren
 Root data-Attribute aktualisieren
+Workspace-Pfade aktualisieren
+3D-Pfad auf /ui/project/<id>/editor3d setzen
 Workspace-Gating neu berechnen
 Projekt-Sidebar refreshen
 Versionen aktualisieren
@@ -2595,7 +3678,7 @@ Der sichtbare Chat ist daran nicht beteiligt.
 
 ---
 
-## 25. Aktueller UI-Zielzustand
+## 27. Aktueller UI-Zielzustand
 
 Aktuelle Shell:
 
@@ -2624,9 +3707,48 @@ Vectoplan kann Fehler machen...
 Chat-Öffnen-Icon neben Projekt
 ```
 
+Aktuelle Projektseite im iframe:
+
+```text
+Basisdaten
+  ├─ Projektname
+  ├─ Beschreibung
+
+Adresse
+  └─ address_text
+
+Sichtbarkeit
+  ├─ private
+  ├─ unlisted
+  └─ public
+
+Veröffentlichung
+  ├─ project
+  ├─ map
+  ├─ editor3d
+  ├─ cad2d
+  ├─ lv
+  └─ versions
+
+Team und Rechte
+  ├─ Mitglieder
+  ├─ Einladungen
+  └─ Rollenübersicht
+```
+
+Nur Projektverwalter sehen:
+
+```text
+Veröffentlichung
+Team und Rechte
+Admin/Settings/Systembereiche
+```
+
+Öffentliche Betrachter sehen diese Bereiche nicht.
+
 ---
 
-## 26. Aktueller Datenbank- und Runtime-Hinweis
+## 28. Aktueller Datenbank- und Runtime-Hinweis
 
 Da sich das Datenmodell stark geändert hat, gibt es weiterhin keine harte Pflicht zur Abwärtskompatibilität mit alten lokalen Entwicklungsdatenbanken.
 
@@ -2652,9 +3774,11 @@ address_street is an invalid keyword argument for Project
 chunk_universe_id column missing
 ConversationState has no attribute merge_patch
 ConversationState has no attribute get_or_create
+project_invitations table missing
+ProjectInvitation import missing
 ```
 
-Aktueller Stand nach letzter Reparatur:
+Aktueller Stand nach den letzten Reparaturen:
 
 ```text
 ConversationState-Kompatibilitätsfehler ist behoben.
@@ -2662,17 +3786,59 @@ Chunk-Service läuft read-only in Runtime.
 Chunk-Seed/Schema sind ready.
 App kann Chunk-Projekt für App-Projekt erzeugen.
 Editor kann world_spawn laden.
+3D-Reiter öffnet über /ui/project/<id>/editor3d den echten Editor.
+Projektformular nutzt address_text als einzige sichtbare Adressbox.
+Einladungsmodell und Invitation-Service sind vorbereitet.
+Publication-Service ist vorbereitet.
+Workspace-Embed-Service ist vorbereitet.
+```
+
+Noch möglich:
+
+```text
+state_api_bp unavailable; skipped
+```
+
+Einordnung:
+
+```text
+kein aktueller Blocker
+separat prüfen
+nicht derselbe Fehler wie ConversationState.merge_patch
 ```
 
 ---
 
-## 27. Bekannte technische Altlasten
+## 29. Fortsetzung in Teil 3
 
-### 27.1 Dateinamen mit altem Chat-Begriff
+Teil 3 aktualisiert anschließend:
+
+```text
+29. Bekannte technische Altlasten
+30. Was behalten werden sollte
+31. Was später umbenannt werden sollte
+32. Was später entfernt/deaktiviert werden sollte
+33. Aktueller primärer Projektfluss
+34. Aktueller primärer App↔Chunk-Provisioning-Flow
+35. Aktueller primärer 3D-Flow
+36. Aktueller primärer Map-Flow
+37. Aktueller primärer 2D-Flow
+38. Aktueller primärer LV-Flow
+39. Aktueller Workspace-State-Flow
+40. Aktuelle Tests / Smoke-Checks
+41. Offene Punkte
+42. Was aktuell als stabil gilt
+43. Gesamtfazit
+44. Ordner- und Filestruktur als Übersicht
+45. Abschlussstand
+```
+## 29. Bekannte technische Altlasten
+
+### 29.1 Dateinamen mit altem Chat-Begriff
 
 Einige neue Shell-Dateien liegen noch unter `chat/`, obwohl der sichtbare Chat entfernt wurde:
 
-```text
+```text id="2kde7r"
 templates/chat_viewer.html
 static/js/chat/main.js
 static/css/chat.css
@@ -2683,31 +3849,39 @@ Aktuell bewusst akzeptiert, um Umbauaufwand zu reduzieren.
 
 Später möglich:
 
-```text
+```text id="vnqimr"
 templates/app_shell.html
 static/js/shell/main.js
 static/css/shell.css
 static/js/project_sidebar/
 ```
 
+Wichtig:
+
+```text id="0c612x"
+Nicht während aktiver Fehleranalyse umbenennen.
+Erst umbenennen, wenn Projektfluss, Editor-Embed, Publication und Invitations stabil sind.
+```
+
 ---
 
-### 27.2 Conversation bleibt technisch vorhanden
+### 29.2 Conversation bleibt technisch vorhanden
 
 `Conversation` bleibt im Datenmodell, obwohl der sichtbare Chat entfernt wurde.
 
 Aktuelle Gründe:
 
-```text
+```text id="bdgtrz"
 technischer State-Kontext
 Kompatibilität zu alten Workspace-State-Routen
 Version-/Upload-Historie in Altpfaden
 mögliche spätere Projektkommunikation
+Übergangspfad für viewer_selection.py
 ```
 
 Später prüfen:
 
-```text
+```text id="e3plso"
 Conversation vollständig entfernen
 oder als unsichtbare Projekt-Historie behalten
 oder nur noch für technische Workspace-State-Kompatibilität nutzen
@@ -2715,13 +3889,13 @@ oder nur noch für technische Workspace-State-Kompatibilität nutzen
 
 ---
 
-### 27.3 ConversationState ist jetzt Kompatibilitätsschicht
+### 29.3 ConversationState ist jetzt Kompatibilitätsschicht
 
 `ConversationState` ist aktuell wichtig für alte und neutrale UI-State-Routen.
 
 Aktueller Zustand:
 
-```text
+```text id="x7mqkm"
 ConversationState.state      = echte DB-Spalte
 ConversationState.state_json = Kompatibilitätsalias
 ConversationState.selection  = optionale Auswahl-/Selection-Spalte
@@ -2729,7 +3903,7 @@ ConversationState.selection  = optionale Auswahl-/Selection-Spalte
 
 Neue/ergänzte API:
 
-```text
+```text id="6jurjr"
 ConversationState.get_or_create(...)
 ConversationState.merge_patch(...)
 ConversationState.replace_state(...)
@@ -2739,17 +3913,17 @@ Damit bleiben ältere Routen stabil, ohne überall auf freie Helper-Funktionen u
 
 ---
 
-### 27.4 `state_api_bp unavailable`
+### 29.4 `state_api_bp unavailable`
 
 Beim App-Start kann weiterhin erscheinen:
 
-```text
+```text id="wknbxe"
 blueprint state_api_bp unavailable; skipped
 ```
 
 Einordnung:
 
-```text
+```text id="0o87xx"
 kein aktueller Blocker
 nicht derselbe Fehler wie ConversationState.merge_patch
 App startet trotzdem
@@ -2759,7 +3933,7 @@ Projekt-/Chunk-/Editor-Flow funktioniert
 
 Später prüfen:
 
-```text
+```text id="0hml22"
 alte state_api_bp-Registrierung entfernen
 oder Blueprint korrekt hinter Feature-Flag legen
 oder vorhandene State-Routen konsolidieren
@@ -2767,11 +3941,11 @@ oder vorhandene State-Routen konsolidieren
 
 ---
 
-### 27.5 Alte Chat-Routen existieren teilweise noch
+### 29.5 Alte Chat-Routen existieren teilweise noch
 
 Diese können noch vorhanden sein:
 
-```text
+```text id="ltxk66"
 routes/ui/chat.py
 routes/chat/
 routes/state.py
@@ -2780,13 +3954,22 @@ routes/viewer_selection.py
 
 Sie sind nicht mehr primärer UI-Zielpfad.
 
+Aktueller primärer Shell-Zielpfad:
+
+```text id="gip8gb"
+routes/ui/projects.py
+  → templates/chat_viewer.html
+  → iframe /ui/project/...
+  → routes/viewer.py
+```
+
 ---
 
-### 27.6 Speckle-/Altviewer-Altlasten
+### 29.6 Speckle-/Altviewer-Altlasten
 
 Noch zu prüfen:
 
-```text
+```text id="jjf7d8"
 routes/embed.py
 routes/speckle_upload.py
 routes/vectoplan_ingest.py
@@ -2800,20 +3983,126 @@ routes/chat/stream.py
 
 Ziel:
 
-```text
+```text id="nfjrdk"
 Speckle-Altlasten entfernen oder hart deaktivieren
 keine Speckle-Karten
 kein Auto-Publish
 keine alten Viewer-URLs
+kein Rückfall auf alte 3D-Viewerlogik
 ```
 
 ---
 
-## 28. Was behalten werden sollte
+### 29.7 Alte 3D-Routen
+
+Nicht mehr primär:
+
+```text id="jz40j7"
+/ui/project/<project_id>/editor
+```
+
+Aktuell primär:
+
+```text id="ptgk1d"
+/ui/project/<project_id>/editor3d
+```
+
+Wichtig:
+
+```text id="d1om5k"
+editor3d läuft über routes/viewer.py.
+routes/viewer.py prüft Zugriff und leitet über workspace_embed_service.py an vectoplan-editor PUBLIC_URL weiter.
+```
+
+Alte `/editor`-Routen können als Kompatibilität bestehen, sollten aber nicht mehr Hauptpfad in Shell oder Dokumentation sein.
+
+---
+
+### 29.8 Admin-/Team-/Settings-Sichtbarkeit
+
+Bekannte Sicherheitsregel:
+
+```text id="2xry38"
+Admin
+Team
+Settings
+Permissions
+System
+```
+
+dürfen nicht öffentlich sichtbar sein.
+
+Das gilt auch bei:
+
+```text id="rzrbr8"
+visibility = public
+visibility = unlisted
+published_workspaces.project = true
+```
+
+Öffentliche Betrachter dürfen nur explizit veröffentlichte, erlaubte Workspaces sehen.
+
+---
+
+### 29.9 Einladungslogik ist vorbereitet, aber Auth-Service ist noch Platzhalter
+
+Aktuell vorbereitet:
+
+```text id="j5j9w2"
+ProjectInvitation Model
+project_invitation_service.py
+auth_identity_client.py
+Invitation API-Routen
+Team-UI in project_team.html
+project_team.js
+```
+
+Noch nicht final:
+
+```text id="2dcgza"
+echter Auth-/Registrierungsdienst
+echter Einladungsversand
+echte Account-Erstellung
+echtes Login-/Abo-System
+```
+
+Wichtig:
+
+```text id="qrg0oj"
+vectoplan-app erzeugt keine echten User.
+```
+
+---
+
+### 29.10 Publication-Logik ist vorbereitet, aber Public-Produktfluss ist noch zu testen
+
+Aktuell vorbereitet:
+
+```text id="83fqw1"
+project_publication_service.py
+project_publication.html
+project_publication.js
+Publication API-Routen
+Workspace-Zugriffsprüfung
+```
+
+Noch zu testen:
+
+```text id="9ah8ul"
+public Projekt-Link ohne Login
+unlisted Projekt-Link ohne Listing
+öffentliche Map
+öffentlicher 3D-Workspace
+nicht öffentliche Admin-/Team-Bereiche
+```
+
+---
+
+## 30. Was behalten werden sollte
 
 Behalten:
 
-```text
+```text id="nsl4db"
 app.py
 config.py
 extensions.py
@@ -2825,6 +4114,7 @@ models/
   legacy.py
   projects.py
   project_access.py
+  project_invitations.py
   project_embed.py
   project_links.py
   project_versions.py
@@ -2833,12 +4123,17 @@ models/
 
 services/
   current_user.py
+  auth_identity_client.py
   project_permissions.py
   project_service.py
+  project_invitation_service.py
+  project_publication_service.py
+  workspace_embed_service.py
   chunk_client.py
 
 routes/
   projects_api.py
+  viewer.py
   viewer_selection.py
 
 routes/ui/
@@ -2850,7 +4145,12 @@ routes/ui/
 templates/
   chat_viewer.html
   partials/project_sidebar.html
+  partials/demo_banner.html
   viewer/project.html
+  viewer/partials/project_address.html
+  viewer/partials/project_visibility.html
+  viewer/partials/project_publication.html
+  viewer/partials/project_team.html
 
 static/css/
   chat.css
@@ -2865,17 +4165,19 @@ static/js/chat/
 
 static/js/project/
   project_form.js
+  project_publication.js
+  project_team.js
 ```
 
 `viewer_selection.py` bleibt vorerst als technischer State-Kompatibilitätspfad erhalten.
 
 ---
 
-## 29. Was später umbenannt werden sollte
+## 31. Was später umbenannt werden sollte
 
 Aktuell funktionieren die Dateien, aber die Namen sind historisch:
 
-```text
+```text id="q5n6j1"
 templates/chat_viewer.html      → templates/app_shell.html
 static/css/chat.css             → static/css/app_shell.css
 static/js/chat/main.js          → static/js/shell/main.js
@@ -2886,18 +4188,18 @@ Nicht sofort nötig, aber für Lesbarkeit sinnvoll.
 
 Wichtig:
 
-```text
-Erst umbenennen, wenn Projektfluss, Chunk-Provisioning und Editor-Embed stabil sind.
+```text id="acfr2g"
+Erst umbenennen, wenn Projektfluss, Chunk-Provisioning, Editor-Embed, Publication und Invitations stabil sind.
 Keine gleichzeitige Umbenennung während Fehleranalyse.
 ```
 
 ---
 
-## 30. Was später entfernt oder deaktiviert werden sollte
+## 32. Was später entfernt oder deaktiviert werden sollte
 
 Prüfen und ggf. entfernen:
 
-```text
+```text id="o3tnzm"
 routes/embed.py
 routes/speckle_upload.py
 routes/vectoplan_ingest.py
@@ -2906,7 +4208,7 @@ routes/vectoplan_align.py
 
 Zusätzlich neutralisieren:
 
-```text
+```text id="owkahh"
 speckle_project_id
 speckle_model_id
 speckle_version_id
@@ -2920,20 +4222,22 @@ VECTOPLAN_EMBED_TOKEN
 
 Prüfen:
 
-```text
+```text id="xtw40x"
 routes/state.py
 state_api_bp Registrierung
 alte Chat-State-APIs
 alte Transcript-Versionierung
+alte /ui/project/<id>/editor-Fallbacks
+alte /ui/chat/<chat_id>/editor-Fallbacks
 ```
 
 Nicht entfernen, solange noch UI oder Legacy-Pfade darauf zugreifen.
 
 ---
 
-## 31. Aktueller primärer Projektfluss
+## 33. Aktueller primärer Projektfluss
 
-```text
+```text id="j8i5ef"
 Browser
   ↓
 http://localhost:5103/
@@ -2944,13 +4248,18 @@ chat_viewer.html als App-Shell
   ↓
 Projekt-Sidebar + Workspace
   ↓
-/ui/project/new oder /ui/project/<project_public_id>/project
+/ui/project/new/project
+oder /ui/project/<project_public_id>/project
+  ↓
+routes/viewer.py
   ↓
 viewer/project.html
   ↓
 project_form.js
   ↓
 POST/PATCH /v1/projects
+  ↓
+routes/projects_api.py
   ↓
 project_service.py
   ↓
@@ -2965,9 +4274,9 @@ Sidebar Refresh
 
 ---
 
-## 32. Aktueller primärer App↔Chunk-Provisioning-Flow
+## 34. Aktueller primärer App↔Chunk-Provisioning-Flow
 
-```text
+```text id="teykbk"
 App-Projekt wird erstellt oder geöffnet
   ↓
 vectoplan-app services/chunk_client.py
@@ -2994,21 +4303,21 @@ Editor kann Chunks laden
 
 Getesteter Chunk-Aufruf aus Editor-Kontext:
 
-```text
+```text id="e2asrl"
 POST /projects/<chunk_project_id>/worlds/world_spawn/chunks/batch
 ```
 
 Ergebnis:
 
-```text
+```text id="7eqvms"
 HTTP 200
 ```
 
 ---
 
-## 33. Aktueller primärer 3D-Flow
+## 35. Aktueller primärer 3D-Flow
 
-```text
+```text id="8ypqzy"
 Browser
   ↓
 http://localhost:5103/project=<project_public_id>
@@ -3019,13 +4328,23 @@ User klickt 3D
   ↓
 static/js/chat/main.js
   ↓
-iframe src = /ui/project/<project_public_id>/editor
+iframe src = /ui/project/<project_public_id>/editor3d
   ↓
-routes/ui/editor.py
+routes/viewer.py
   ↓
-vectoplan-editor Public URL
+Projekt laden
   ↓
-http://localhost:5100/editor?embed=1&project_id=...
+Berechtigung prüfen
+  ↓
+Workspace-Zugriff prüfen
+  ↓
+services/workspace_embed_service.py
+  ↓
+Public-Editor-URL bauen
+  ↓
+302 Redirect
+  ↓
+http://localhost:5100/editor?embed=1&app_project_public_id=...
   ↓
 vectoplan-editor rendert 3D-Editor
   ↓
@@ -3034,11 +4353,35 @@ vectoplan-editor fragt vectoplan-chunk
 world_spawn / chunks/batch
 ```
 
+Wichtig:
+
+```text id="dadxvc"
+/ui/project/<project_public_id>/editor3d ist App-Gateway.
+http://localhost:5100/editor ist Browser-Public-Ziel.
+http://vectoplan-editor:5000 ist niemals Browser-Ziel.
+```
+
+Query-Parameter können enthalten:
+
+```text id="6cv5nc"
+embed=1
+source=vectoplan-app
+workspace=editor3d
+app_project_public_id=<project_public_id>
+project_public_id=<project_public_id>
+context_url=http://localhost:5103/ui/project/<project_public_id>/context.json
+return_url=http://localhost:5103/project=<project_public_id>
+read_only=0|1
+chunk_project_id=<chunk_project_id>
+chunk_universe_id=<chunk_universe_id>
+chunk_world_id=world_spawn
+```
+
 ---
 
-## 34. Aktueller primärer Map-Flow
+## 36. Aktueller primärer Map-Flow
 
-```text
+```text id="v8t9e8"
 Browser
   ↓
 http://localhost:5103/project=<project_public_id>
@@ -3051,18 +4394,25 @@ static/js/chat/main.js
   ↓
 iframe src = /ui/project/<project_public_id>/map
   ↓
-routes/ui/map.py
+routes/viewer.py oder bestehender Map-Gateway
   ↓
 OpenLayer Public URL
   ↓
-http://localhost:5190/map?embed=1&project_id=...
+http://localhost:5190/map?embed=1&project_public_id=...
+```
+
+Regel:
+
+```text id="9q3k27"
+Browser bekommt nur OPENLAYER_PUBLIC_URL.
+Browser bekommt nie http://openlayer:8090.
 ```
 
 ---
 
-## 35. Aktueller primärer 2D-Flow
+## 37. Aktueller primärer 2D-Flow
 
-```text
+```text id="n4uhaf"
 Browser
   ↓
 http://localhost:5103/project=<project_public_id>
@@ -3071,18 +4421,22 @@ Projekt ist konfiguriert
   ↓
 User klickt 2D
   ↓
+static/js/chat/main.js
+  ↓
 iframe src = /ui/project/<project_public_id>/cad2d
   ↓
-routes/ui/viewer2d.py
+routes/viewer.py oder routes/ui/viewer2d.py
   ↓
 2D-/CAD-Workspace oder locked response
 ```
 
+Aktuell ist der 2D-Flow vorbereitet, aber fachliche 2D-Daten bleiben außerhalb der App.
+
 ---
 
-## 36. Aktueller primärer LV-Flow
+## 38. Aktueller primärer LV-Flow
 
-```text
+```text id="pe9bd9"
 Browser
   ↓
 http://localhost:5103/project=<project_public_id>
@@ -3091,18 +4445,131 @@ Projekt ist konfiguriert
   ↓
 User klickt LV
   ↓
+static/js/chat/main.js
+  ↓
 iframe src = /ui/project/<project_public_id>/lv
   ↓
-routes/ui/projects.py
+routes/viewer.py
   ↓
 aktuell Platzhalter / später LV-Service
 ```
 
+Wichtig:
+
+```text id="80a7pc"
+vectoplan-app speichert keine LV-Fachdaten.
+vectoplan-app speichert nur lv_id / Service-Links / Referenzen.
+```
+
 ---
 
-## 37. Aktueller Workspace-State-Flow
+## 39. Aktueller Publication-Flow
 
-```text
+Projektverwalter öffnet Projekt-Workspace:
+
+```text id="59r74i"
+Browser
+  ↓
+/project=<project_public_id>
+  ↓
+Projekt-Workspace
+  ↓
+project_publication.html
+  ↓
+project_publication.js
+  ↓
+GET /v1/projects/<project_id>/publication
+```
+
+Beim Speichern:
+
+```text id="e48fz0"
+project_publication.js
+  ↓
+PATCH /v1/projects/<project_id>/publication
+  ↓
+routes/projects_api.py
+  ↓
+project_publication_service.py
+  ↓
+ProjectEmbedPolicy / metadata / settings defensiv aktualisieren
+  ↓
+Audit-Event
+```
+
+Publizierbare Workspaces:
+
+```text id="1okut9"
+project
+map
+editor3d
+cad2d
+lv
+versions
+```
+
+Nie publizierbar:
+
+```text id="543tkc"
+admin
+team
+settings
+permissions
+system
+```
+
+---
+
+## 40. Aktueller Team-/Invitation-Flow
+
+Projektverwalter öffnet Team-Bereich:
+
+```text id="yz0qt9"
+Browser
+  ↓
+/project=<project_public_id>
+  ↓
+Projekt-Workspace
+  ↓
+project_team.html
+  ↓
+project_team.js
+  ↓
+GET /v1/projects/<project_id>/members
+GET /v1/projects/<project_id>/invitations
+```
+
+Einladung:
+
+```text id="p1ocxx"
+User gibt E-Mail + Rolle ein
+  ↓
+POST /v1/projects/<project_id>/invitations
+  ↓
+project_invitation_service.py
+  ↓
+AuthIdentityClient prüft E-Mail
+  ↓
+nur wenn registriert:
+  ProjectInvitation wird erstellt
+  optional dispatch
+  Audit-Event
+```
+
+Nicht erlaubt:
+
+```text id="lnnv91"
+Demo-Kontext
+Owner per Einladung
+unregistrierte E-Mail
+echte Useraccount-Erstellung in vectoplan-app
+```
+
+---
+
+## 41. Aktueller Workspace-State-Flow
+
+```text id="hfrd4v"
 User wechselt Workspace-Modus
   ↓
 static/js/chat/main.js
@@ -3118,7 +4585,7 @@ conversation_states.state wird aktualisiert
 
 Gespeicherte Werte sind neutral:
 
-```text
+```text id="9rh6ua"
 mode
 workspace_mode
 viewer_selection
@@ -3130,7 +4597,7 @@ last_workspace_error
 
 Nicht gespeichert werden sollen:
 
-```text
+```text id="znezxv"
 speckle_*
 legacy_viewer*
 viewer_url
@@ -3141,13 +4608,13 @@ chunk snapshot internals
 
 ---
 
-## 38. Aktuelle Tests / Smoke-Checks
+## 42. Aktuelle Tests / Smoke-Checks
 
-### 38.1 App-Start
+### 42.1 App-Start
 
 Erwartet:
 
-```text
+```text id="mr3kf9"
 Gunicorn startet.
 Worker booten.
 Keine ConversationState AttributeError mehr.
@@ -3155,7 +4622,7 @@ Keine ConversationState AttributeError mehr.
 
 Noch möglich:
 
-```text
+```text id="c23q3c"
 blueprint state_api_bp unavailable; skipped
 ```
 
@@ -3163,18 +4630,18 @@ Diese Warnung ist aktuell kein Blocker.
 
 ---
 
-### 38.2 Chunk-Status
+### 42.2 Chunk-Status
 
 Erwartet:
 
-```text
+```text id="f580c5"
 GET /projects/_status → 200
 GET /chunks/_status   → 200
 ```
 
 Chunk-Readiness:
 
-```text
+```text id="ftc2el"
 schemaReady = true
 seedReady = true
 defaultProjectReady = true
@@ -3184,44 +4651,70 @@ defaultWorldReady = true
 
 ---
 
-### 38.3 App↔Chunk-Provisioning
+### 42.3 App↔Chunk-Provisioning
 
 Erwartet:
 
-```text
+```text id="afsw84"
 PUT /projects/by-app/<app_project_public_id> → 201 oder 200
 ```
 
 Je nach Zustand:
 
-```text
+```text id="s5o3r7"
 201 = neu erstellt
 200 = bereits vorhanden / idempotent zurückgegeben
 ```
 
 ---
 
-### 38.4 Editor↔Chunk
+### 42.4 Editor↔Chunk
 
 Erwartet:
 
-```text
+```text id="gv7tsi"
 POST /projects/<chunk_project_id>/worlds/world_spawn/chunks/batch → 200
 ```
 
 ---
 
-### 38.5 Viewer-Selection-State
+### 42.5 3D-Editor über App-Shell
 
 Erwartet:
 
-```text
+```text id="8f6owk"
+GET /project=<project_public_id>
+  ↓
+3D klicken
+  ↓
+iframe lädt /ui/project/<project_public_id>/editor3d
+  ↓
+302 auf http://localhost:5100/editor?embed=1&...
+  ↓
+Editor wird im iframe sichtbar
+```
+
+Nicht mehr erwartet:
+
+```text id="q7t7j9"
+generischer Workspace-Platzhalter im 3D-Reiter
+/ui/project/<id>/editor als primärer 3D-Pfad
+http://vectoplan-editor:5000 im Browser
+```
+
+---
+
+### 42.6 Viewer-Selection-State
+
+Erwartet:
+
+```text id="6dop4m"
 PUT /v1/chats/<chat_id>/viewer/selection → 200
 ```
 
 Nicht mehr erwartet:
 
-```text
+```text id="8zp19g"
 ConversationState.merge_patch failed
 ConversationState fallback merge failed
 AttributeError: ConversationState has no attribute merge_patch
@@ -3230,13 +4723,76 @@ AttributeError: ConversationState has no attribute get_or_create
 
 ---
 
-## 39. Offene Punkte
+### 42.7 Projektformular
 
-### 39.1 `app.py` weiter prüfen
+Erwartet:
+
+```text id="vb9hbw"
+sichtbares Feld address_text
+keine sichtbaren Einzeladressfelder
+keine sichtbaren Koordinatenfelder
+kein sichtbarer Systemreferenzbereich
+```
+
+Payload:
+
+```text id="9ib1ba"
+name
+description
+address_text
+visibility
+```
+
+---
+
+### 42.8 Publication
+
+Erwartet:
+
+```text id="z2go7a"
+GET /v1/projects/<project_id>/publication → 200
+PATCH /v1/projects/<project_id>/publication → 200
+```
+
+Nicht erwartet:
+
+```text id="qvfjmm"
+Admin/Team/Settings werden public sichtbar
+private Projekt-Workspaces werden trotz private effektiv veröffentlicht
+```
+
+---
+
+### 42.9 Invitations
+
+Erwartet:
+
+```text id="7bad7k"
+GET /v1/projects/<project_id>/invitations → 200
+POST /v1/projects/<project_id>/invitations → 200 oder kontrollierter 4xx
+DELETE /v1/projects/<project_id>/invitations/<id> → 200
+```
+
+Kontrollierte Ablehnungen:
+
+```text id="1uljin"
+Demo-Kontext
+fehlende manage/team-Berechtigung
+unregistrierte E-Mail
+bereits bestehendes Mitglied
+duplizierte Pending-Einladung
+Owner-Rolle per Einladung
+```
+
+---
+
+## 43. Offene Punkte
+
+### 43.1 `app.py` weiter prüfen
 
 Noch sinnvoll:
 
-```text
+```text id="echzsb"
 Blueprint-Registrierung final prüfen
 state_api_bp Warnung entfernen oder sauber hinter Feature-Flag legen
 alte Chat-/Speckle-Routen hinter Feature-Flags legen
@@ -3244,15 +4800,23 @@ globale CSP final abstimmen
 Dev-Reset-Option prüfen
 ```
 
+Aktueller wichtiger Stand:
+
+```text id="mn91oj"
+ui_projects_bp muss vor viewer_bp registriert sein,
+damit /project=<id> die Shell rendert.
+viewer_bp liefert danach /ui/project/... iframe-Workspaces.
+```
+
 ---
 
-### 39.2 Route-Namen vereinheitlichen
+### 43.2 Route-Namen vereinheitlichen
 
 Aktuell existieren noch Chat-Begriffe in Pfaden und Dateien.
 
 Später:
 
-```text
+```text id="nsw5sy"
 chat_viewer.html → app_shell.html
 static/js/chat/main.js → static/js/shell/main.js
 routes/ui/chat.py → entfernen oder legacy_redirects.py
@@ -3260,13 +4824,13 @@ routes/ui/chat.py → entfernen oder legacy_redirects.py
 
 ---
 
-### 39.3 Conversation-Abhängigkeit reduzieren
+### 43.3 Conversation-Abhängigkeit reduzieren
 
 Aktuell existiert `conversation_id` noch in mehreren Kontexten.
 
 Später prüfen:
 
-```text
+```text id="ljpmeu"
 Projekt-State direkt an Project binden
 Chat-State-Routen entfernen
 Conversation nur behalten, wenn fachlich benötigt
@@ -3275,11 +4839,11 @@ viewer_selection.py langfristig in workspace_state.py überführen
 
 ---
 
-### 39.4 Alte Chat-Module entfernen
+### 43.4 Alte Chat-Module entfernen
 
 Prüfen:
 
-```text
+```text id="n89zut"
 routes/chat/
 static/js/chat/composer.js
 static/js/chat/transcript.js
@@ -3291,13 +4855,13 @@ Wenn sie nicht mehr geladen werden, können sie später entfernt oder archiviert
 
 ---
 
-### 39.5 Versionierung finalisieren
+### 43.5 Versionierung finalisieren
 
 Aktuell gibt es `ProjectVersion` als neue zentrale Tabelle.
 
 Noch zu tun:
 
-```text
+```text id="b07a0h"
 alte transcript-basierte Versionierung entfernen
 Versionen vollständig auf ProjectVersion umstellen
 Service-Artefakte sauber referenzieren
@@ -3306,13 +4870,13 @@ Chunk-/2D-/LV-Snapshots als Referenzen einbinden
 
 ---
 
-### 39.6 Service-Links produktiv anbinden
+### 43.6 Service-Links produktiv anbinden
 
 Aktuell sind `ProjectServiceLink` und Referenzfelder vorbereitet.
 
 Teilweise erreicht:
 
-```text
+```text id="g1ixkz"
 chunk_project_id automatisch aus Chunk-Service
 chunk_universe_id automatisch aus Chunk-Service
 chunk_world_id automatisch aus Chunk-Service
@@ -3320,7 +4884,7 @@ chunk_world_id automatisch aus Chunk-Service
 
 Noch zu tun:
 
-```text
+```text id="klm9ys"
 plan2d_id aus 2D-Service setzen
 lv_id aus LV-Service setzen
 OpenLayer-Layer/Dataset verknüpfen
@@ -3330,13 +4894,13 @@ Service-Link-Status regelmäßig validieren
 
 ---
 
-### 39.7 App-Schema sauber stabilisieren
+### 43.7 App-Schema sauber stabilisieren
 
 Bei lokalen DB-Altständen können Schemafehler auftreten.
 
 Noch sinnvoll:
 
-```text
+```text id="llhak5"
 App-DB-Initialisierung prüfen
 fehlende App-Spalten erkennen
 Entscheidung: Dev-Repair-Script oder weiterhin docker compose down -v
@@ -3345,64 +4909,114 @@ keine stillen Runtime-Mutationen in produktiver Runtime
 
 Wichtig:
 
-```text
+```text id="6p9oan"
 Der zuvor angedachte schema_contract.py-Pfad wurde nicht umgesetzt.
 ```
 
 ---
 
-## 40. Was aktuell als stabil gilt
+### 43.8 Editor-Kontextverarbeitung finalisieren
+
+Aktuell baut die App den 3D-Embed mit Parametern wie:
+
+```text id="ukma1b"
+app_project_public_id
+project_public_id
+context_url
+chunk_project_id
+chunk_universe_id
+chunk_world_id
+```
+
+Noch zu prüfen:
+
+```text id="it38l0"
+liest vectoplan-editor context_url vollständig aus?
+priorisiert editor app_project_public_id korrekt?
+lädt editor immer world_spawn?
+funktioniert read_only bei Public/Demo-Kontext?
+```
+
+---
+
+### 43.9 Public/Unlisted Ende-zu-Ende testen
+
+Noch zu testen:
+
+```text id="febr4o"
+public Projekt ohne Login
+unlisted Projekt ohne Listing
+published project workspace
+published map workspace
+published editor3d workspace
+nicht veröffentlichte Workspaces blockiert
+Admin/Team/Settings immer blockiert
+```
+
+---
+
+## 44. Was aktuell als stabil gilt
 
 Stabil genug für nächsten Entwicklungsstand:
 
-```text
+```text id="mb1hcr"
 Projekt-Shell
 Projekt-Sidebar
 Projektformular
+vereinfachtes address_text Formular
 Projekt-API
 modulare App-Models
-Current-User-Platzhalter
+Current-User-/Demo-Kontext
 Projekt-Berechtigungen
 Embed-Policy-Grundlage
+Publication-Service-Grundlage
+ProjectInvitation-Grundlage
 ProjectServiceLink-Grundlage
 ProjectVersion-Grundlage
 ProjectAuditEvent-Grundlage
 App↔Chunk-Provisioning-Grundlage
 Editor↔Chunk world_spawn Flow
+3D-Gateway über /ui/project/<id>/editor3d
+workspace_embed_service.py
 ConversationState-Kompatibilität
 ```
 
 Nicht final, aber funktionsfähig:
 
-```text
+```text id="h1ctmc"
 Legacy-State-Routen
 alte Chat-Kompatibilität
 alte Versionierungsrouten
 LV-Platzhalter
 2D-Gateway
 OpenLayer-Gateway
+AuthIdentityClient im Dev-/Placeholder-Modus
+Einladungsdispatch als Placeholder
+Publication-Ende-zu-Ende Public-Flow
 ```
 
 ---
 
-## 41. Gesamtfazit
+## 45. Gesamtfazit
 
 Die `vectoplan-app` ist jetzt deutlich näher am gewünschten Architekturziel.
 
 Vorher:
 
-```text
+```text id="25skl8"
 Chat-Shell mit Workspace
 sichtbarer VectoAI-Chat
 3D/Map stark aus Chat-Kontext gedacht
 Models noch zentral/monolithisch
 keine stabile App↔Chunk-Provisioning-Kette
 ConversationState API-Mismatch
+3D-Reiter konnte Platzhalter statt Editor zeigen
+Projektformular war zu technisch
 ```
 
 Jetzt:
 
-```text
+```text id="cvc30q"
 Projekt-Shell mit Workspace
 sichtbarer Chat entfernt
 Projektliste links
@@ -3410,8 +5024,13 @@ Workspace rechts
 Projekt-API vorhanden
 modulare Models vorhanden
 Projekt-Berechtigungen vorhanden
+Demo-/Auth-Kontext vorbereitet
+Einladungsmodell vorbereitet
+Publication-Service vorbereitet
 Service-Link-/Version-/Audit-Struktur vorhanden
 Map/3D/2D/LV projektgeführt
+3D öffnet über App-Gateway /ui/project/<id>/editor3d
+workspace_embed_service.py baut Public-Editor-Ziel
 App↔Chunk-Provisioning funktioniert
 Chunk world_spawn ist korrekt angebunden
 Editor lädt Chunks aus world_spawn
@@ -3420,53 +5039,56 @@ ConversationState-Kompatibilität repariert
 
 Der wichtigste aktuelle Einstieg ist:
 
-```text
+```text id="cq56u7"
 http://localhost:5103/
 ```
 
 und für ein Projekt:
 
-```text
+```text id="m3vhh4"
 http://localhost:5103/project=<project_public_id>
 ```
 
 Der neue Kern der App ist nicht mehr Chat, sondern:
 
-```text
+```text id="x9edcm"
 Project
 ProjectMembership
+ProjectInvitation
 ProjectEmbedPolicy
 ProjectServiceLink
 ProjectVersion
 ProjectAuditEvent
 Chunk-Referenzen
 Workspace-State
+Publication
+Workspace-Gateway
 ```
 
 Nächster sinnvoller technischer Schritt:
 
-```text
+```text id="tocjbi"
 app.py und verbleibende Legacy-Routen prüfen
 state_api_bp-Warnung bereinigen
 ```
 
 Danach:
 
-```text
+```text id="swdp2g"
 alte Chat-/Speckle-/Transcript-Pfade systematisch entfernen oder hinter Feature-Flags legen
 ```
 
 ---
 
-## 42. Ordner- und Filestruktur als Übersicht
+## 46. Ordner- und Filestruktur als Übersicht
 
 Die `vectoplan-app` ist aktuell in Schichten aufgebaut. Die App selbst ist die Projekt-, Portal- und Workspace-Shell. Fachliche Daten wie 3D-Welt, Chunk-State, CAD-Geometrie oder LV-Inhalte liegen nicht in der App, sondern in den jeweiligen Microservices.
 
 ---
 
-### 42.1 Architektur-Schema
+### 46.1 Architektur-Schema
 
-```text
+```text id="xzbvjj"
 Browser
   │
   │  http://localhost:5103/
@@ -3477,9 +5099,15 @@ vectoplan-app
   │
   ├─ UI-Schicht
   │    ├─ routes/ui/projects.py
+  │    ├─ routes/viewer.py
   │    ├─ templates/chat_viewer.html
   │    ├─ templates/partials/project_sidebar.html
+  │    ├─ templates/partials/demo_banner.html
   │    ├─ templates/viewer/project.html
+  │    ├─ templates/viewer/partials/project_address.html
+  │    ├─ templates/viewer/partials/project_visibility.html
+  │    ├─ templates/viewer/partials/project_publication.html
+  │    ├─ templates/viewer/partials/project_team.html
   │    ├─ static/css/chat.css
   │    ├─ static/css/project_sidebar.css
   │    ├─ static/css/project_workspace.css
@@ -3487,16 +5115,23 @@ vectoplan-app
   │    ├─ static/js/chat/project_sidebar_data.js
   │    ├─ static/js/chat/project_sidebar_resize.js
   │    ├─ static/js/chat/project_sidebar.js
-  │    └─ static/js/project/project_form.js
+  │    ├─ static/js/project/project_form.js
+  │    ├─ static/js/project/project_publication.js
+  │    └─ static/js/project/project_team.js
   │
   ├─ API-Schicht
   │    ├─ routes/projects_api.py
+  │    ├─ routes/viewer.py
   │    └─ routes/viewer_selection.py
   │
   ├─ Service-Schicht
   │    ├─ services/current_user.py
+  │    ├─ services/auth_identity_client.py
   │    ├─ services/project_permissions.py
   │    ├─ services/project_service.py
+  │    ├─ services/project_invitation_service.py
+  │    ├─ services/project_publication_service.py
+  │    ├─ services/workspace_embed_service.py
   │    └─ services/chunk_client.py
   │
   ├─ Model-Schicht
@@ -3505,6 +5140,7 @@ vectoplan-app
   │    ├─ models/legacy.py
   │    ├─ models/projects.py
   │    ├─ models/project_access.py
+  │    ├─ models/project_invitations.py
   │    ├─ models/project_embed.py
   │    ├─ models/project_links.py
   │    ├─ models/project_versions.py
@@ -3518,14 +5154,15 @@ vectoplan-app
        ├─ vectoplan-2d          → CAD/2D
        ├─ vectoplan-lv          → Leistungsverzeichnis
        ├─ vectoplan-chunk       → Chunk-Welt
-       └─ vectoplan-library     → Assets/Inventory
+       ├─ vectoplan-library     → Assets/Inventory
+       └─ zukünftiger Auth-Service → Login/Registrierung/Account
 ```
 
 ---
 
-### 42.2 Vereinfachter Runtime-Flow
+### 46.2 Vereinfachter Runtime-Flow
 
-```text
+```text id="uj5dvb"
 Browser
   ↓
 GET /
@@ -3538,336 +5175,21 @@ Projekt-Sidebar + Workspace-Shell
   ↓
 static/js/chat/main.js
   ↓
-iframe src = /ui/project/new
+iframe src = /ui/project/new/project
         oder /ui/project/<project_public_id>/project
-        oder /ui/project/<project_public_id>/editor
+        oder /ui/project/<project_public_id>/editor3d
         oder /ui/project/<project_public_id>/map
         oder /ui/project/<project_public_id>/cad2d
         oder /ui/project/<project_public_id>/lv
+        oder /ui/project/<project_public_id>/versions
+        oder /ui/project/<project_public_id>/admin
 ```
 
 ---
 
-### 42.3 Ordnerstruktur – aktueller Kern
+### 46.3 Workspace-Routing als Schema
 
-```text
-services/vectoplan-app/
-│
-├── app.py
-├── config.py
-├── extensions.py
-├── auth.py
-├── versioning.py
-├── seed_templates.py
-│
-├── models/
-│   ├── __init__.py
-│   ├── base.py
-│   ├── users.py
-│   ├── legacy.py
-│   ├── projects.py
-│   ├── project_access.py
-│   ├── project_embed.py
-│   ├── project_links.py
-│   ├── project_versions.py
-│   ├── project_audit.py
-│   └── core.py
-│
-├── services/
-│   ├── current_user.py
-│   ├── project_permissions.py
-│   ├── project_service.py
-│   └── chunk_client.py
-│
-├── routes/
-│   ├── projects_api.py
-│   ├── viewer_selection.py
-│   │
-│   ├── ui/
-│   │   ├── projects.py
-│   │   ├── chat.py
-│   │   ├── editor.py
-│   │   ├── map.py
-│   │   ├── viewer2d.py
-│   │   ├── crawlab.py
-│   │   └── superset.py
-│   │
-│   ├── chat/
-│   │   ├── __init__.py
-│   │   ├── crud.py
-│   │   ├── helpers.py
-│   │   ├── sync.py
-│   │   └── stream.py
-│   │
-│   ├── files.py
-│   ├── blobs_base64.py
-│   ├── versions_api.py
-│   ├── templates.py
-│   ├── state.py
-│   │
-│   ├── embed.py
-│   ├── speckle_upload.py
-│   ├── vectoplan_ingest.py
-│   └── vectoplan_align.py
-│
-├── templates/
-│   ├── chat_viewer.html
-│   │
-│   ├── partials/
-│   │   └── project_sidebar.html
-│   │
-│   └── viewer/
-│       ├── project.html
-│       ├── admin.html
-│       ├── cad2d.html
-│       ├── lv.html
-│       └── map.html
-│
-└── static/
-    ├── css/
-    │   ├── chat.css
-    │   ├── project_sidebar.css
-    │   ├── project_workspace.css
-    │   └── cards.css
-    │
-    └── js/
-        ├── chat/
-        │   ├── main.js
-        │   ├── project_sidebar_data.js
-        │   ├── project_sidebar_resize.js
-        │   └── project_sidebar.js
-        │
-        └── project/
-            └── project_form.js
-```
-
----
-
-### 42.4 Dateibeschreibung – App-Wurzel
-
-```text
-services/vectoplan-app/
-```
-
-| Datei               | Aufgabe                                                                                                               | Status                                        |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| `app.py`            | Flask-App-Factory, Blueprint-Registrierung, Startup-Checks, DB-Initialisierung, Health/Ready-Routen, Header/CSP-Basis | aktiv, später State-/Legacy-Blueprints prüfen |
-| `config.py`         | ENV-/Konfigurationswerte, Public/Internal-URL-Trennung, Editor/OpenLayer/Chunk/Library-Konfig                         | aktiv, um Chunk-Konfig erweitert              |
-| `extensions.py`     | zentrale Flask-Erweiterungen, insbesondere `db`                                                                       | aktiv                                         |
-| `auth.py`           | vorhandene Auth-/Kompatibilitätsbasis                                                                                 | vorhanden                                     |
-| `versioning.py`     | ältere Versionierungslogik, teilweise noch Übergang/Legacy                                                            | später bereinigen                             |
-| `seed_templates.py` | Template-Seeds, noch auf Altlasten prüfen                                                                             | später bereinigen                             |
-
----
-
-### 42.5 Dateibeschreibung – Models
-
-| Datei                 | Aufgabe                                | Wichtige Inhalte                                             |
-| --------------------- | -------------------------------------- | ------------------------------------------------------------ |
-| `__init__.py`         | zentraler Model-Import-Hub             | exportiert alle produktiven Models                           |
-| `base.py`             | gemeinsame Model-Basis                 | `db`, JSON-Typ, Mixins, `safe_*`, ID-Generatoren             |
-| `users.py`            | App-User / Platzhalter-User            | `AppUser`, `ensure_default_user()`                           |
-| `legacy.py`           | technische Basis-/Altmodelle           | `Client`, `Blob`, `Conversation`, `Job`, `ConversationState` |
-| `projects.py`         | zentrales Projektmodell                | `Project`, inkl. Chunk-Referenzfelder                        |
-| `project_access.py`   | Projektrechte und Mitgliedschaften     | `ProjectMembership`                                          |
-| `project_embed.py`    | iframe-/Embed-Policy                   | `ProjectEmbedPolicy`                                         |
-| `project_links.py`    | Referenzen auf Microservices           | `ProjectServiceLink`                                         |
-| `project_versions.py` | Version-/Snapshot-/Artefakt-Referenzen | `ProjectVersion`                                             |
-| `project_audit.py`    | Audit-Events                           | `ProjectAuditEvent`                                          |
-| `core.py`             | Kompatibilitäts-Export                 | re-exportiert modulare Models                                |
-
----
-
-### 42.6 Model-Beziehungsübersicht
-
-```text
-AppUser
-  │
-  ├─ owns
-  ▼
-Project
-  │
-  ├─ has many ───────► ProjectMembership
-  │                    └─ user_id → AppUser.id
-  │
-  ├─ has one/maybe ───► ProjectEmbedPolicy
-  │
-  ├─ has many ───────► ProjectServiceLink
-  │                    ├─ chunk_project_id
-  │                    ├─ chunk_universe_id
-  │                    ├─ chunk_world_id
-  │                    ├─ plan2d_id
-  │                    ├─ lv_id
-  │                    └─ externe Service-Referenzen
-  │
-  ├─ has many ───────► ProjectVersion
-  │                    └─ Version-/Snapshot-/Artefakt-Referenzen
-  │
-  ├─ has many ───────► ProjectAuditEvent
-  │                    └─ created / updated / linked / permission_changed / ...
-  │
-  └─ optional ───────► Conversation
-                       └─ technischer State-/Historien-Kontext
-                            └─ ConversationState
-```
-
----
-
-### 42.7 Service-Schicht als Schema
-
-```text
-routes/projects_api.py
-routes/ui/projects.py
-        │
-        ▼
-services/project_service.py
-        │
-        ├─ nutzt current_user.py
-        ├─ nutzt project_permissions.py
-        ├─ nutzt chunk_client.py
-        └─ nutzt models/
-              ├─ Project
-              ├─ ProjectMembership
-              ├─ ProjectEmbedPolicy
-              ├─ ProjectServiceLink
-              ├─ ProjectVersion
-              ├─ ProjectAuditEvent
-              └─ Conversation / ConversationState
-```
-
----
-
-### 42.8 Frontend-Schema
-
-```text
-chat_viewer.html
-  │
-  ├─ lädt APP_CONFIG
-  │
-  ├─ lädt CSS
-  │    ├─ chat.css
-  │    └─ project_sidebar.css
-  │
-  ├─ lädt Sidebar-JS
-  │    ├─ project_sidebar_data.js
-  │    ├─ project_sidebar_resize.js
-  │    └─ project_sidebar.js
-  │
-  └─ lädt Workspace-Orchestrator
-       └─ main.js
-            ├─ initProjectSidebar()
-            ├─ wireWorkspaceToolbar()
-            ├─ setWorkspaceMode("project" | "map" | "3d" | "2d" | "lv" | "admin")
-            ├─ syncWorkspaceGating()
-            ├─ wireProjectEventBridge()
-            ├─ wireVersionsDropdown()
-            └─ wireThemeToggle()
-```
-
----
-
-### 42.9 Projektformular-Schema
-
-```text
-viewer/project.html
-  │
-  └─ project/project_form.js
-       │
-       ├─ liest Formularfelder
-       ├─ baut JSON-Payload
-       ├─ POST /v1/projects
-       ├─ PATCH /v1/projects/<public_id>
-       ├─ sendet vectoplan:project:saved an Parent
-       ├─ aktualisiert Sidebar
-       └─ navigiert Parent auf /project=<public_id>
-```
-
----
-
-### 42.10 Projekt-Erstellungsfluss als Textdiagramm
-
-```text
-User klickt "Neues Projekt"
-  ↓
-/project=new
-  ↓
-routes/ui/projects.py
-  ↓
-chat_viewer.html
-  ↓
-iframe: /ui/project/new
-  ↓
-viewer/project.html
-  ↓
-project_form.js
-  ↓
-POST /v1/projects
-  ↓
-routes/projects_api.py
-  ↓
-services/project_service.py
-  ↓
-Project wird erstellt
-  ↓
-Conversation wird technisch erstellt
-  ↓
-Owner ProjectMembership wird erstellt
-  ↓
-ProjectEmbedPolicy wird erstellt
-  ↓
-ProjectAuditEvent wird geschrieben
-  ↓
-Chunk-Provisioning erzeugt oder findet Chunk-Projektgraph
-  ↓
-Project.chunk_project_id / chunk_universe_id / chunk_world_id werden gesetzt
-  ↓
-API antwortet mit project + redirect_url
-  ↓
-project_form.js sendet Event an Parent
-  ↓
-main.js aktualisiert APP_CONFIG + Gating + Sidebar
-  ↓
-Browser navigiert auf /project=<project_public_id>
-```
-
----
-
-### 42.11 Workspace-Gating als Schema
-
-```text
-Projekt neu / nicht gespeichert
-  ├─ Projekt: aktiv
-  ├─ Admin: deaktiviert
-  ├─ Versionen: deaktiviert
-  ├─ Map: deaktiviert
-  ├─ 3D: deaktiviert
-  ├─ 2D: deaktiviert
-  └─ LV: deaktiviert
-
-Projekt gespeichert, aber nicht konfiguriert
-  ├─ Projekt: aktiv
-  ├─ Admin: aktiv
-  ├─ Versionen: aktiv
-  ├─ Map: deaktiviert
-  ├─ 3D: deaktiviert
-  ├─ 2D: deaktiviert
-  └─ LV: deaktiviert
-
-Projekt konfiguriert
-  ├─ Projekt: aktiv
-  ├─ Admin: aktiv
-  ├─ Versionen: aktiv
-  ├─ Map: aktiv
-  ├─ 3D: aktiv
-  ├─ 2D: aktiv
-  └─ LV: aktiv
-```
-
----
-
-### 42.12 Workspace-Routing als Schema
-
-```text
+```text id="yucag1"
 Toolbar "Projekt"
   ↓
 /ui/project/<project_public_id>/project
@@ -3880,7 +5202,11 @@ vectoplan-openLayer Public URL
 
 Toolbar "3D"
   ↓
-/ui/project/<project_public_id>/editor
+/ui/project/<project_public_id>/editor3d
+  ↓
+routes/viewer.py
+  ↓
+workspace_embed_service.py
   ↓
 vectoplan-editor Public URL
   ↓
@@ -3894,6 +5220,11 @@ Toolbar "LV"
   ↓
 /ui/project/<project_public_id>/lv
 
+Toolbar "Versionen"
+  ↓
+/ui/project/<project_public_id>/versions
+oder Versionen-Dropdown
+
 Toolbar "Admin"
   ↓
 /ui/project/<project_public_id>/admin
@@ -3901,9 +5232,9 @@ Toolbar "Admin"
 
 ---
 
-### 42.13 API-/Service-/Model-Fluss
+### 46.4 API-/Service-/Model-Fluss
 
-```text
+```text id="0nb0f5"
 POST /v1/projects
   ↓
 routes/projects_api.py
@@ -3931,30 +5262,29 @@ db.session.commit()
 
 ---
 
-### 42.14 Berechtigungsfluss
+### 46.5 Berechtigungsfluss
 
-```text
+```text id="5mnlyk"
 Route braucht Zugriff
   ↓
-require_project_permission(project, "edit", user_id)
-  ↓
-services/project_permissions.py
+project_permissions.py
   ↓
 1. Ist Projekt gelöscht?
 2. Ist User owner_user_id?
 3. Hat User ProjectMembership?
-4. Ist Projekt public und view erlaubt?
+4. Ist Projekt public/unlisted und Workspace veröffentlicht?
+5. Ist Admin/Team/Settings/System betroffen?
   ↓
-PermissionResult
+PermissionResult / WorkspaceAccessResult
   ↓
-Route erlaubt oder wirft PermissionDenied
+Route erlaubt oder liefert kontrollierten Fehler
 ```
 
 ---
 
-### 42.15 Datenfluss zwischen Projektformular und Shell
+### 46.6 Datenfluss zwischen Projektformular und Shell
 
-```text
+```text id="w9yph9"
 project_form.js speichert Projekt
   ↓
 API antwortet mit:
@@ -3976,9 +5306,9 @@ refreshVersionsUI()
 
 ---
 
-### 42.16 Externe Services im Verhältnis zur App
+### 46.7 Externe Services im Verhältnis zur App
 
-```text
+```text id="k3ktde"
 vectoplan-app
   │
   ├─ speichert Project.chunk_project_id
@@ -3996,7 +5326,7 @@ vectoplan-app
   ├─ speichert Project.lv_id
   │      └─ verweist auf vectoplan-lv
   │
-  ├─ öffnet /ui/project/<id>/editor
+  ├─ öffnet /ui/project/<id>/editor3d
   │      └─ Browser-Public-Route zu vectoplan-editor
   │
   └─ öffnet /ui/project/<id>/map
@@ -4005,25 +5335,34 @@ vectoplan-app
 
 ---
 
-### 42.17 Was im aktuellen Projektfluss primär ist
+### 46.8 Was im aktuellen Projektfluss primär ist
 
 Primär:
 
-```text
+```text id="lcr92y"
 routes/ui/projects.py
+routes/viewer.py
 routes/projects_api.py
 routes/viewer_selection.py
 services/project_service.py
 services/project_permissions.py
 services/current_user.py
+services/auth_identity_client.py
+services/project_invitation_service.py
+services/project_publication_service.py
+services/workspace_embed_service.py
 services/chunk_client.py
 models/
 templates/chat_viewer.html
 templates/partials/project_sidebar.html
+templates/partials/demo_banner.html
 templates/viewer/project.html
+templates/viewer/partials/project_*.html
 static/js/chat/main.js
 static/js/chat/project_sidebar*.js
 static/js/project/project_form.js
+static/js/project/project_publication.js
+static/js/project/project_team.js
 static/css/chat.css
 static/css/project_sidebar.css
 static/css/project_workspace.css
@@ -4031,22 +5370,23 @@ static/css/project_workspace.css
 
 Nicht mehr primär:
 
-```text
+```text id="ltemvv"
 routes/ui/chat.py
 routes/chat/
 alte Chat-Composer-Module
 alte Transcript-Module
 Speckle-Routen
 alte Viewer-Routen
+/ui/project/<id>/editor als Hauptpfad
 ```
 
 ---
 
-### 42.18 Spätere Umbenennung zur besseren Lesbarkeit
+### 46.9 Spätere Umbenennung zur besseren Lesbarkeit
 
 Aktuell funktionieren diese Namen, sind aber historisch:
 
-```text
+```text id="jxwxdo"
 templates/chat_viewer.html
 static/css/chat.css
 static/js/chat/main.js
@@ -4057,7 +5397,7 @@ static/js/chat/project_sidebar.js
 
 Später lesbarer:
 
-```text
+```text id="gfkrgx"
 templates/app_shell.html
 static/css/app_shell.css
 static/js/shell/main.js
@@ -4070,39 +5410,107 @@ Die Umbenennung ist nicht dringend, aber sinnvoll, sobald der Projektfluss stabi
 
 ---
 
-## 43. Abschlussstand
+## 47. Abschlussstand
 
 Aktueller Status:
 
-```text
+```text id="l57xzp"
 vectoplan-app startet.
 Projekt-Shell ist aktiv.
+Projektformular ist vereinfacht.
+address_text ist das sichtbare Adressfeld.
+Projekt-Sichtbarkeit private/unlisted/public ist vorbereitet.
+Workspace-Veröffentlichung ist vorbereitet.
+Team-/Invitation-UI ist vorbereitet.
+Demo-/Auth-Kontext ist vorbereitet.
 Chunk-Provisioning funktioniert.
 Editor lädt world_spawn aus Chunk.
+3D-Reiter öffnet über /ui/project/<id>/editor3d den echten Editor.
 ConversationState-Fehler ist repariert.
 ```
 
 Aktuell noch nicht final:
 
-```text
+```text id="d1gywr"
 state_api_bp Warnung
 Legacy-Chat-Routen
 Speckle-/Altviewer-Routen
 alte Versionierungsreste
 Namensbereinigung chat_* → shell_*
+echter Auth-/Registrierungsdienst
+echter Einladungsversand
+vollständiger Public/Unlisted-Ende-zu-Ende-Test
+produktive 2D-/LV-Serviceintegration
 ```
 
 Empfohlener nächster Schritt:
 
-```text
+```text id="o5809f"
 services/vectoplan-app/app.py prüfen
 ```
 
 Ziel:
 
-```text
+```text id="n5a3ep"
 Blueprint-Registrierung final verstehen
 state_api_bp Warnung entfernen oder bewusst dokumentieren
 Legacy-Routen sauber hinter Feature-Flags legen
+CSP/Frame-Ancestors final stabilisieren
 ```
-****
+
+Danach:
+
+```text id="e4jwah"
+Public/Unlisted-Flow testen
+Invitation-Flow mit echtem Auth-Service testen
+2D/LV-Gateways produktiv anbinden
+alte Chat-/Speckle-Reste entfernen
+```
+
+---
+
+## 48. Fertigstellung dieser IST-Aktualisierung
+
+Diese IST-Aktualisierung wurde in drei Teilen neu gegliedert:
+
+```text id="12swwk"
+Teil 1:
+  Zweck
+  Kurzbefund
+  Kernprobleme
+  Service-Rollen
+  Architekturentscheidung
+  UI-Fluss
+  Projekt-Konfiguration
+  3D-Flow
+  App↔Chunk
+  Models
+  Services
+  Routes
+  Templates
+  Static
+
+Teil 2:
+  Ordner-/Filestruktur
+  Endpoints
+  Projekt-Beispiele
+  Publication
+  Invitations
+  Workspace-State
+  Frontend-Eventfluss
+  UI-Zielzustand
+  Runtime-Hinweise
+
+Teil 3:
+  Altlasten
+  Behalten/Umbenennen/Entfernen
+  Ziel-Flows
+  Tests
+  Offene Punkte
+  Stabilitätsbewertung
+  Fazit
+  Architekturübersicht
+  Abschlussstand
+```
+
+Damit ist die Aktualisierung der `IST-Zustand-vectoplan-app.md` vollständig.
