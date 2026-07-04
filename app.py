@@ -672,7 +672,64 @@ def create_app() -> Flask:
             except Exception:
                 csp = ""
 
-            csp_has_frame_ancestors = "frame-ancestors" in csp.lower() if csp else False
+            try:
+                allowed_frame_ancestors = (
+                    "'self' "
+                    "http://localhost:5103 "
+                    "http://127.0.0.1:5103 "
+                    "http://localhost:5200 "
+                    "http://127.0.0.1:5200"
+                )
+
+                # Wenn ENV/Config vorhanden ist, zusätzlich berücksichtigen.
+                try:
+                    extra = (
+                            app.config.get("APP_FRAME_ANCESTORS")
+                            or app.config.get("VECTOPLAN_ALLOWED_FRAME_PARENTS")
+                            or app.config.get("VECTOPLAN_EDITOR_FRAME_ANCESTORS")
+                            or ""
+                    )
+                    extra = str(extra or "").strip()
+                    if extra:
+                        allowed_frame_ancestors = f"{allowed_frame_ancestors} {extra}"
+                except Exception:
+                    pass
+
+                # Deduplizieren, Reihenfolge erhalten.
+                deduped = []
+                for item in allowed_frame_ancestors.split():
+                    item = item.strip()
+                    if item and item not in deduped:
+                        deduped.append(item)
+
+                frame_ancestors_directive = "frame-ancestors " + " ".join(deduped)
+
+                if csp:
+                    directives = []
+                    replaced = False
+
+                    for directive in csp.split(";"):
+                        directive = directive.strip()
+                        if not directive:
+                            continue
+
+                        if directive.lower().startswith("frame-ancestors"):
+                            directives.append(frame_ancestors_directive)
+                            replaced = True
+                        else:
+                            directives.append(directive)
+
+                    if not replaced:
+                        directives.append(frame_ancestors_directive)
+
+                    resp.headers["Content-Security-Policy"] = "; ".join(directives)
+                else:
+                    resp.headers["Content-Security-Policy"] = frame_ancestors_directive
+
+            except Exception:
+                pass
+
+            csp_has_frame_ancestors = True
 
             if not allow_embed and not csp_has_frame_ancestors:
                 resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
