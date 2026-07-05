@@ -1,24 +1,31 @@
 # services/vectoplan-app/services/project_invitation_service.py
+from __future__ import annotations
+
 """
 VECTOPLAN project invitation service.
 
 Zweck:
 - Fachliche Service-Schicht für Projekt-Einladungen.
 - Prüft Projektberechtigungen.
-- Prüft E-Mail-Adressen gegen den späteren Auth-/Registrierungsdienst.
-- Erzeugt KEINE lokalen Benutzeraccounts.
+- Prüft E-Mail-Adressen gegen vectoplan-auth.
+- Erzeugt keine lokalen Benutzeraccounts.
+- Erzeugt keinen Default-User.
+- Nutzt AppUser nur als bestehenden lokalen Link.
 - Speichert ProjectInvitation-Datensätze.
-- Stößt optional einen externen/platzhalterhaften Einladungsversand an.
-- Bereitet die spätere Annahme einer Einladung durch bereits verknüpfte AppUser vor.
+- Stößt optional Einladungsversand über vectoplan-auth an.
+- Nimmt Einladungen nur an, wenn der eingeloggte Auth-User bereits einen lokalen
+  AppUser-Link in vectoplan-app besitzt.
 - Schreibt, wenn verfügbar, Audit-Events.
 
 Architekturregel:
-- vectoplan-app verwaltet Projektrollen, Sichtbarkeit, Veröffentlichungen und Projektfrontend.
-- Registrierung, Login, Account-Typ, Abo-Status und Bigdata-Zugriff liegen außerhalb von vectoplan-app.
-- Eine Einladung per E-Mail ist nur möglich, wenn der Auth-/Registrierungsdienst diese E-Mail als registriert kennt.
+- vectoplan-auth verwaltet Registrierung, Login, Account, Plan, Entitlements,
+  Blocked/Banned und User-Identität.
+- vectoplan-app verwaltet Projektrollen, Sichtbarkeit, Veröffentlichungen und
+  Projektfrontend.
+- ProjectInvitation ist App-seitiger Projektzugang, nicht Auth-Wahrheit.
+- Demo-Guests dürfen keine Einladungen oder Rollenänderungen ausführen.
+- Blocked/Banned/Auth-unavailable erhält keinen Fallback.
 """
-
-from __future__ import annotations
 
 import datetime as _dt
 import json
@@ -50,9 +57,7 @@ except Exception:  # pragma: no cover
         try:
             from extensions import db  # type: ignore
         except Exception as exc:  # pragma: no cover
-            raise RuntimeError(
-                "project_invitation_service requires SQLAlchemy db."
-            ) from exc
+            raise RuntimeError("project_invitation_service requires SQLAlchemy db.") from exc
 
 
 try:
@@ -95,7 +100,6 @@ try:
     from models.project_invitations import (  # type: ignore
         DEFAULT_INVITATION_EXPIRY_DAYS,
         DEFAULT_INVITATION_ROLE,
-        DISPATCH_FAILED,
         INVITABLE_PROJECT_ROLES,
         ProjectInvitation,
         ROLE_ADMIN,
@@ -121,7 +125,6 @@ except Exception:  # pragma: no cover
         from ..models.project_invitations import (  # type: ignore
             DEFAULT_INVITATION_EXPIRY_DAYS,
             DEFAULT_INVITATION_ROLE,
-            DISPATCH_FAILED,
             INVITABLE_PROJECT_ROLES,
             ProjectInvitation,
             ROLE_ADMIN,
@@ -143,32 +146,40 @@ except Exception:  # pragma: no cover
             serialize_project_invitations,
         )
     except Exception as exc:  # pragma: no cover
-        raise RuntimeError(
-            "project_invitation_service requires models.project_invitations."
-        ) from exc
+        raise RuntimeError("project_invitation_service requires models.project_invitations.") from exc
 
 
 try:
     from services.auth_identity_client import (  # type: ignore
-        dispatch_project_invitation_identity,
-        get_auth_identity_status,
-        require_registered_email_identity,
+        dispatch_project_invitation_identity as legacy_dispatch_project_invitation_identity,
+        get_auth_identity_status as legacy_get_auth_identity_status,
+        require_registered_email_identity as legacy_require_registered_email_identity,
     )
 except Exception:  # pragma: no cover
     try:
         from .auth_identity_client import (  # type: ignore
-            dispatch_project_invitation_identity,
-            get_auth_identity_status,
-            require_registered_email_identity,
+            dispatch_project_invitation_identity as legacy_dispatch_project_invitation_identity,
+            get_auth_identity_status as legacy_get_auth_identity_status,
+            require_registered_email_identity as legacy_require_registered_email_identity,
         )
     except Exception:
-        dispatch_project_invitation_identity = None  # type: ignore
-        get_auth_identity_status = None  # type: ignore
-        require_registered_email_identity = None  # type: ignore
+        legacy_dispatch_project_invitation_identity = None  # type: ignore
+        legacy_get_auth_identity_status = None  # type: ignore
+        legacy_require_registered_email_identity = None  # type: ignore
+
+
+try:
+    from services.auth_context_client import get_auth_context_client  # type: ignore
+except Exception:  # pragma: no cover
+    try:
+        from .auth_context_client import get_auth_context_client  # type: ignore
+    except Exception:
+        get_auth_context_client = None  # type: ignore
 
 
 try:
     from services.project_permissions import (  # type: ignore
+        PermissionDenied,
         can_manage_project,
         get_project_permission_result,
         require_project_permission,
@@ -176,6 +187,7 @@ try:
 except Exception:  # pragma: no cover
     try:
         from .project_permissions import (  # type: ignore
+            PermissionDenied,
             can_manage_project,
             get_project_permission_result,
             require_project_permission,
@@ -185,21 +197,45 @@ except Exception:  # pragma: no cover
         get_project_permission_result = None  # type: ignore
         require_project_permission = None  # type: ignore
 
+        class PermissionDenied(RuntimeError):  # type: ignore
+            def __init__(
+                self,
+                message: str = "permission denied",
+                *,
+                code: str = "project_permission_denied",
+                status_code: int = 403,
+                permission: str = "manage",
+                project_id: Any = None,
+                user_id: Any = None,
+            ) -> None:
+                super().__init__(message)
+                self.message = message
+                self.code = code
+                self.status_code = status_code
+                self.permission = permission
+                self.project_id = project_id
+                self.user_id = user_id
+
+            def to_dict(self) -> Dict[str, Any]:
+                return {
+                    "ok": False,
+                    "code": self.code,
+                    "error": self.message,
+                    "message": self.message,
+                    "status_code": self.status_code,
+                    "permission": self.permission,
+                    "project_id": self.project_id,
+                    "user_id": self.user_id,
+                }
+
 
 try:
-    from services.current_user import (  # type: ignore
-        get_current_user_context,
-        get_current_user_id,
-    )
+    from services.current_user import get_current_user_context  # type: ignore
 except Exception:  # pragma: no cover
     try:
-        from .current_user import (  # type: ignore
-            get_current_user_context,
-            get_current_user_id,
-        )
+        from .current_user import get_current_user_context  # type: ignore
     except Exception:
         get_current_user_context = None  # type: ignore
-        get_current_user_id = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -259,11 +295,13 @@ ROLE_PERMISSION_MATRIX = {
     },
 }
 
+DEFAULT_AUTH_IDENTITY_LOOKUP_PATH = "/auth/identity/lookup"
+DEFAULT_AUTH_INVITATION_DISPATCH_PATH = "/auth/project-invitations/dispatch"
+
 
 # ---------------------------------------------------------------------------
 # Small safe helpers
 # ---------------------------------------------------------------------------
-
 
 def utcnow() -> _dt.datetime:
     try:
@@ -335,9 +373,10 @@ def _safe_str(value: Any, default: str = "", max_len: Optional[int] = None) -> s
 
 def _safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
     try:
-        if value is None or value == "":
+        if value is None or value == "" or isinstance(value, bool):
             return default
-        return int(value)
+        parsed = int(value)
+        return parsed if parsed > 0 else default
     except Exception:
         return default
 
@@ -462,10 +501,271 @@ def _session_add(obj: Any) -> None:
         pass
 
 
+def _project_is_demo(project: Any) -> bool:
+    try:
+        if project is None:
+            return False
+
+        if _safe_bool(getattr(project, "is_demo", False), False):
+            return True
+
+        if _safe_str(getattr(project, "project_scope", ""), default="", max_len=40).lower() == "demo":
+            return True
+
+        metadata = _safe_dict(getattr(project, "metadata_json", None))
+        demo_meta = _safe_dict(metadata.get("vectoplan_demo"))
+
+        return _safe_bool(demo_meta.get("enabled"), False)
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Auth client adapters
+# ---------------------------------------------------------------------------
+
+def _auth_client() -> Any:
+    try:
+        if get_auth_context_client is None:
+            return None
+        return get_auth_context_client()
+    except Exception:
+        return None
+
+
+def _auth_client_post(path: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    client = _auth_client()
+    if client is None:
+        return {
+            "ok": False,
+            "code": "auth_context_client_unavailable",
+            "message": "vectoplan-auth client unavailable.",
+        }
+
+    clean_path = _safe_str(path, default="", max_len=500)
+    clean_payload = _safe_dict(payload)
+
+    for kwargs in (
+        {"json": clean_payload},
+        {"body": clean_payload},
+        {"payload": clean_payload},
+        {"data": clean_payload},
+    ):
+        try:
+            response = client.post(clean_path, **kwargs)
+            return _safe_dict(response)
+        except TypeError:
+            continue
+        except Exception as exc:
+            return {
+                "ok": False,
+                "code": "auth_client_post_failed",
+                "message": str(exc),
+                "error": str(exc),
+            }
+
+    try:
+        response = client.post(clean_path, clean_payload)
+        return _safe_dict(response)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "code": "auth_client_post_failed",
+            "message": str(exc),
+            "error": str(exc),
+        }
+
+
+def _auth_client_get_status() -> Dict[str, Any]:
+    client = _auth_client()
+    if client is None:
+        return {
+            "ok": False,
+            "code": "auth_context_client_unavailable",
+            "message": "vectoplan-auth client unavailable.",
+        }
+
+    try:
+        if hasattr(client, "ready"):
+            ready = client.ready()
+            ready_payload = _safe_dict(ready)
+            if ready_payload:
+                ready_payload.setdefault("ok", True)
+                return ready_payload
+            return {"ok": bool(ready), "ready": bool(ready)}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "code": "auth_ready_check_failed",
+            "error": str(exc),
+        }
+
+    return {
+        "ok": True,
+        "code": "auth_client_available",
+    }
+
+
+def get_auth_identity_status() -> Dict[str, Any]:
+    if legacy_get_auth_identity_status is not None:
+        try:
+            return _safe_dict(legacy_get_auth_identity_status())
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "source": "vectoplan-auth",
+        "client": _auth_client_get_status(),
+        "identity_lookup_path": _safe_str(
+            _read_config("VECTOPLAN_AUTH_IDENTITY_LOOKUP_PATH", DEFAULT_AUTH_IDENTITY_LOOKUP_PATH),
+            default=DEFAULT_AUTH_IDENTITY_LOOKUP_PATH,
+            max_len=500,
+        ),
+        "invitation_dispatch_path": _safe_str(
+            _read_config("VECTOPLAN_AUTH_INVITATION_DISPATCH_PATH", DEFAULT_AUTH_INVITATION_DISPATCH_PATH),
+            default=DEFAULT_AUTH_INVITATION_DISPATCH_PATH,
+            max_len=500,
+        ),
+    }
+
+
+def require_registered_email_identity(email: Any) -> Dict[str, Any]:
+    normalized_email = normalize_email(email)
+
+    if not is_valid_email(normalized_email):
+        return {
+            "ok": False,
+            "registered": False,
+            "code": "invalid_email",
+            "message": "Die E-Mail-Adresse ist ungültig.",
+            "email": normalized_email,
+        }
+
+    if legacy_require_registered_email_identity is not None:
+        try:
+            return _safe_dict(legacy_require_registered_email_identity(normalized_email))
+        except Exception as exc:
+            return {
+                "ok": False,
+                "registered": False,
+                "code": "auth_identity_lookup_failed",
+                "message": "Die Registrierungsprüfung ist fehlgeschlagen.",
+                "error": str(exc),
+                "email": normalized_email,
+            }
+
+    path = _safe_str(
+        _read_config("VECTOPLAN_AUTH_IDENTITY_LOOKUP_PATH", DEFAULT_AUTH_IDENTITY_LOOKUP_PATH),
+        default=DEFAULT_AUTH_IDENTITY_LOOKUP_PATH,
+        max_len=500,
+    )
+
+    payload = _auth_client_post(
+        path,
+        {
+            "email": normalized_email,
+            "require_registered": True,
+            "source": "vectoplan-app.project_invitation_service",
+        },
+    )
+
+    identity = _safe_dict(payload.get("identity") or payload.get("user") or payload.get("data"))
+    registered = _safe_bool(
+        payload.get("registered")
+        if "registered" in payload
+        else identity.get("registered")
+        if "registered" in identity
+        else bool(identity.get("id") or identity.get("auth_user_id") or identity.get("user_id")),
+        False,
+    )
+
+    auth_user_id = (
+        _safe_str(payload.get("auth_user_id"), default="", max_len=160)
+        or _safe_str(identity.get("auth_user_id"), default="", max_len=160)
+        or _safe_str(identity.get("user_id"), default="", max_len=160)
+        or _safe_str(identity.get("id"), default="", max_len=160)
+    )
+
+    return {
+        **payload,
+        "ok": _safe_bool(payload.get("ok"), registered),
+        "registered": registered,
+        "email": normalized_email,
+        "auth_user_id": auth_user_id or None,
+        "identity": identity,
+        "code": _safe_str(payload.get("code"), "registered_identity_loaded" if registered else "user_not_registered", 120),
+        "message": _safe_str(
+            payload.get("message"),
+            "Registrierte Identität gefunden." if registered else "Einladungen sind nur an bereits registrierte Accounts möglich.",
+            500,
+        ),
+    }
+
+
+def dispatch_project_invitation_identity(
+    *,
+    email: Any,
+    project_public_id: Any,
+    role: Any,
+    invited_by_auth_user_id: Any = None,
+    invitation_id: Any = None,
+    invitation_url: Any = None,
+    message: Any = None,
+    metadata: Optional[Mapping[str, Any]] = None,
+    require_registered: bool = False,
+) -> Dict[str, Any]:
+    normalized_email = normalize_email(email)
+
+    if legacy_dispatch_project_invitation_identity is not None:
+        try:
+            return _safe_dict(
+                legacy_dispatch_project_invitation_identity(
+                    email=normalized_email,
+                    project_public_id=project_public_id,
+                    role=role,
+                    invited_by_auth_user_id=invited_by_auth_user_id,
+                    invitation_id=invitation_id,
+                    invitation_url=invitation_url,
+                    message=message,
+                    metadata=metadata,
+                    require_registered=require_registered,
+                )
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "code": "auth_invitation_dispatch_failed",
+                "message": "Der externe Einladungsversand ist fehlgeschlagen.",
+                "error": str(exc),
+            }
+
+    path = _safe_str(
+        _read_config("VECTOPLAN_AUTH_INVITATION_DISPATCH_PATH", DEFAULT_AUTH_INVITATION_DISPATCH_PATH),
+        default=DEFAULT_AUTH_INVITATION_DISPATCH_PATH,
+        max_len=500,
+    )
+
+    return _auth_client_post(
+        path,
+        {
+            "email": normalized_email,
+            "project_public_id": _safe_str(project_public_id, default="", max_len=160),
+            "role": normalize_invitation_role(role, allow_owner=False),
+            "invited_by_auth_user_id": _safe_str(invited_by_auth_user_id, default="", max_len=160) or None,
+            "invitation_id": _safe_str(invitation_id, default="", max_len=160) or None,
+            "invitation_url": _safe_str(invitation_url, default="", max_len=2000) or None,
+            "message": _safe_str(message, default="", max_len=4000) or None,
+            "metadata": _safe_dict(metadata),
+            "require_registered": bool(require_registered),
+            "source": "vectoplan-app.project_invitation_service",
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Result object
 # ---------------------------------------------------------------------------
-
 
 @dataclass
 class ProjectInvitationServiceResult:
@@ -555,51 +855,51 @@ def _result(
 # Actor / Auth context helpers
 # ---------------------------------------------------------------------------
 
+def _context_to_dict(value: Any) -> Dict[str, Any]:
+    try:
+        if value is None:
+            return {}
+        if hasattr(value, "to_dict") and callable(value.to_dict):
+            return _safe_dict(value.to_dict())
+        return _safe_dict(value)
+    except Exception:
+        return {}
+
 
 def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
     """
-    Liefert aktuellen Actor-Kontext robust.
+    Liefert aktuellen Actor-Kontext.
 
-    Aktuell kann current_user.py noch den Dev-User id=1 liefern.
-    Später soll diese Funktion automatisch AuthContext-Werte aus Login/
-    Registrierungsdienst durchreichen.
+    Kein Default-User.
+    Kein Fallback auf id=1.
+    Explizites user_id wird nur als lokaler AppUser-Link verstanden.
     """
     context: Dict[str, Any] = {}
 
     try:
         if get_current_user_context is not None:
-            maybe_context = get_current_user_context()
-            context = _safe_dict(maybe_context)
+            try:
+                maybe_context = get_current_user_context(ensure=False)
+            except TypeError:
+                maybe_context = get_current_user_context()
+            context = _context_to_dict(maybe_context)
     except Exception:
         context = {}
 
-    if user_id is not None:
-        context["user_id"] = _safe_int(user_id)
-        context["id"] = _safe_int(user_id)
-
-    if not context.get("user_id") and not context.get("id"):
-        try:
-            if get_current_user_id is not None:
-                resolved_user_id = get_current_user_id()
-                if resolved_user_id is not None:
-                    context["user_id"] = _safe_int(resolved_user_id)
-                    context["id"] = _safe_int(resolved_user_id)
-        except Exception:
-            pass
+    explicit_user_id = _safe_int(user_id, default=None)
+    if explicit_user_id:
+        context["user_id"] = explicit_user_id
+        context["id"] = explicit_user_id
+        context.setdefault("persistent", True)
+        context.setdefault("authenticated", True)
+        context.setdefault("demo_mode", False)
 
     actor_user_id = _safe_int(
         context.get("user_id") or context.get("id"),
         default=None,
     )
 
-    auth_user_id = _safe_str(
-        context.get("auth_user_id")
-        or context.get("external_user_id")
-        or context.get("sub")
-        or context.get("subject"),
-        default="",
-        max_len=160,
-    )
+    blocked = _safe_bool(context.get("blocked"), default=False)
 
     demo_mode = _safe_bool(
         context.get("demo_mode")
@@ -612,11 +912,38 @@ def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
         context.get("authenticated")
         or context.get("is_authenticated")
         or context.get("logged_in"),
-        default=bool(actor_user_id),
+        default=False,
     )
+
+    persistent = _safe_bool(
+        context.get("persistent"),
+        default=bool(actor_user_id and authenticated and not demo_mode and not blocked),
+    )
+
+    if blocked or demo_mode or not persistent:
+        actor_user_id = None if user_id is None else actor_user_id
+
+    auth_user_id = _safe_str(
+        context.get("auth_user_id")
+        or context.get("authUserId")
+        or context.get("external_user_id")
+        or context.get("sub")
+        or context.get("subject"),
+        default="",
+        max_len=160,
+    )
+
+    email = _safe_str(
+        context.get("email")
+        or context.get("auth_email")
+        or context.get("authEmail"),
+        default="",
+        max_len=320,
+    ).lower()
 
     account_plan = _safe_str(
         context.get("account_plan")
+        or context.get("accountPlan")
         or context.get("plan")
         or context.get("subscription_plan"),
         default="",
@@ -628,21 +955,34 @@ def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
         "user_id": actor_user_id,
         "id": actor_user_id,
         "auth_user_id": auth_user_id or None,
-        "demo_mode": bool(demo_mode),
-        "authenticated": bool(authenticated),
+        "email": email or None,
+        "demo_mode": bool(demo_mode and not blocked),
+        "authenticated": bool(authenticated and not blocked),
+        "persistent": bool(persistent and actor_user_id and not blocked and not demo_mode),
+        "blocked": bool(blocked),
+        "blocked_reason": context.get("blocked_reason") or context.get("blockedReason"),
         "account_plan": account_plan or None,
     }
 
 
 def _actor_user_id(actor_context: Optional[Mapping[str, Any]]) -> Optional[int]:
     data = _safe_dict(actor_context)
+    if _safe_bool(data.get("blocked"), False):
+        return None
+    if _safe_bool(data.get("demo_mode") or data.get("is_demo"), False):
+        return None
+    if not _safe_bool(data.get("persistent"), False):
+        return None
     return _safe_int(data.get("user_id") or data.get("id"), default=None)
 
 
 def _actor_auth_user_id(actor_context: Optional[Mapping[str, Any]]) -> Optional[str]:
     data = _safe_dict(actor_context)
+    if _safe_bool(data.get("blocked"), False):
+        return None
     value = _safe_str(
         data.get("auth_user_id")
+        or data.get("authUserId")
         or data.get("external_user_id")
         or data.get("sub")
         or data.get("subject"),
@@ -652,15 +992,33 @@ def _actor_auth_user_id(actor_context: Optional[Mapping[str, Any]]) -> Optional[
     return value or None
 
 
+def _actor_email(actor_context: Optional[Mapping[str, Any]]) -> Optional[str]:
+    data = _safe_dict(actor_context)
+    if _safe_bool(data.get("blocked"), False):
+        return None
+    value = _safe_str(
+        data.get("email") or data.get("auth_email") or data.get("authEmail"),
+        default="",
+        max_len=320,
+    ).lower()
+    return value or None
+
+
 def _actor_is_demo(actor_context: Optional[Mapping[str, Any]]) -> bool:
     data = _safe_dict(actor_context)
+    if _safe_bool(data.get("blocked"), False):
+        return False
     return _safe_bool(data.get("demo_mode") or data.get("is_demo") or data.get("demo"), default=False)
+
+
+def _actor_is_blocked(actor_context: Optional[Mapping[str, Any]]) -> bool:
+    data = _safe_dict(actor_context)
+    return _safe_bool(data.get("blocked"), default=False)
 
 
 # ---------------------------------------------------------------------------
 # Project resolving
 # ---------------------------------------------------------------------------
-
 
 def resolve_project(project_or_id: Any) -> Optional[Any]:
     """
@@ -718,7 +1076,6 @@ def _project_id(project: Any) -> Optional[int]:
 # Permission helpers
 # ---------------------------------------------------------------------------
 
-
 def _permission_denied_result(project: Any, permission: str = "manage") -> ProjectInvitationServiceResult:
     return _result(
         ok=False,
@@ -736,16 +1093,17 @@ def _require_manage_permission(project: Any, actor_context: Mapping[str, Any]) -
     """
     actor_user_id = _actor_user_id(actor_context)
 
-    if not actor_user_id:
+    if _actor_is_blocked(actor_context):
         return _result(
             ok=False,
-            code="authentication_required",
-            message="Für diese Aktion ist ein eingeloggter Benutzer erforderlich.",
+            code=_safe_str(actor_context.get("blocked_reason"), default="auth_blocked", max_len=120),
+            message="Der Zugriff ist gesperrt.",
             project=project,
-            status_code=401,
+            status_code=403,
+            data={"blocked": True},
         )
 
-    if _actor_is_demo(actor_context):
+    if _project_is_demo(project) or _actor_is_demo(actor_context):
         return _result(
             ok=False,
             code="demo_mode_not_allowed",
@@ -755,22 +1113,39 @@ def _require_manage_permission(project: Any, actor_context: Mapping[str, Any]) -
             data={"demo_mode": True},
         )
 
+    if not _safe_bool(actor_context.get("authenticated"), False):
+        return _result(
+            ok=False,
+            code="authentication_required",
+            message="Für diese Aktion ist ein eingeloggter Benutzer erforderlich.",
+            project=project,
+            status_code=401,
+        )
+
+    if not actor_user_id or not _safe_bool(actor_context.get("persistent"), False):
+        return _result(
+            ok=False,
+            code="local_user_link_required",
+            message="Für diese Aktion ist eine lokale AppUser-Verknüpfung erforderlich.",
+            project=project,
+            status_code=403,
+        )
+
     try:
         if require_project_permission is not None:
-            maybe = require_project_permission(project, "manage", user_id=actor_user_id)
-            if maybe is None:
-                return None
-
-            maybe_dict = _safe_dict(maybe)
-            if not maybe_dict:
-                return None
-
-            if _safe_bool(maybe_dict.get("ok"), default=True):
-                return None
-
+            require_project_permission(project, "manage", user_id=actor_user_id, allow_public_view=False)
+            return None
+    except PermissionDenied:
+        return _permission_denied_result(project, "manage")
+    except TypeError:
+        try:
+            require_project_permission(project, "manage", actor_user_id)
+            return None
+        except PermissionDenied:
             return _permission_denied_result(project, "manage")
+        except Exception:
+            pass
     except Exception:
-        # Einige Implementierungen werfen bei Verweigerung. Dann fallback prüfen.
         pass
 
     try:
@@ -783,8 +1158,12 @@ def _require_manage_permission(project: Any, actor_context: Mapping[str, Any]) -
 
     try:
         if get_project_permission_result is not None:
-            perm = get_project_permission_result(project, actor_user_id)
-            perm_dict = _safe_dict(perm)
+            try:
+                perm = get_project_permission_result(project, user_id=actor_user_id, allow_public_view=False)
+            except TypeError:
+                perm = get_project_permission_result(project, actor_user_id)
+
+            perm_dict = _safe_dict(perm.to_dict() if hasattr(perm, "to_dict") else perm)
 
             if _safe_bool(perm_dict.get("can_manage"), default=False):
                 return None
@@ -798,7 +1177,6 @@ def _require_manage_permission(project: Any, actor_context: Mapping[str, Any]) -
     except Exception:
         pass
 
-    # Minimaler Fallback für Dev: owner_user_id darf verwalten.
     try:
         owner_user_id = _safe_int(getattr(project, "owner_user_id", None))
         if owner_user_id is not None and actor_user_id == owner_user_id:
@@ -806,7 +1184,6 @@ def _require_manage_permission(project: Any, actor_context: Mapping[str, Any]) -
     except Exception:
         pass
 
-    # Fallback über ProjectMembership.
     try:
         membership = _find_membership(_project_id(project), actor_user_id)
         if membership is not None and _membership_has_manage(membership):
@@ -821,7 +1198,6 @@ def _require_manage_permission(project: Any, actor_context: Mapping[str, Any]) -
 # AppUser lookup only, no creation
 # ---------------------------------------------------------------------------
 
-
 def find_linked_app_user(
     auth_user_id: Any = None,
     email: Any = None,
@@ -830,7 +1206,7 @@ def find_linked_app_user(
     Sucht einen bereits existierenden lokalen AppUser-Link.
 
     Wichtig:
-    Diese Funktion erzeugt KEINEN AppUser.
+    Diese Funktion erzeugt keinen AppUser.
     """
     if AppUser is None:
         return None
@@ -863,7 +1239,6 @@ def find_linked_app_user(
 # ---------------------------------------------------------------------------
 # Membership helpers
 # ---------------------------------------------------------------------------
-
 
 def _permission_flags_for_role(role: Any) -> Dict[str, bool]:
     normalized = normalize_invitation_role(role, allow_owner=True)
@@ -1065,7 +1440,6 @@ def _create_or_update_membership_from_invitation(
 # Audit helpers
 # ---------------------------------------------------------------------------
 
-
 def _write_audit_event(
     project: Any,
     action: str,
@@ -1117,7 +1491,6 @@ def _write_audit_event(
 # Invitation URL
 # ---------------------------------------------------------------------------
 
-
 def build_invitation_url(
     invitation: ProjectInvitation,
     plain_token: Optional[str] = None,
@@ -1126,11 +1499,8 @@ def build_invitation_url(
     """
     Baut eine vorbereitete Einladungs-URL.
 
-    Standardmäßig OHNE Token, damit keine geheimen Tokens versehentlich in
+    Standardmäßig ohne Token, damit keine geheimen Tokens versehentlich in
     dispatch_response_json, Logs oder UI landen.
-
-    Der spätere echte Mail-Service kann include_token=True verwenden, wenn der
-    Token kontrolliert und nicht persistiert weitergegeben wird.
     """
     public_base = _safe_str(
         _read_config("VECTOPLAN_APP_PUBLIC_URL", "")
@@ -1163,7 +1533,6 @@ def build_invitation_url(
 # Core service
 # ---------------------------------------------------------------------------
 
-
 class ProjectInvitationService:
     """
     Service-Objekt für Projekt-Einladungen.
@@ -1176,8 +1545,7 @@ class ProjectInvitationService:
         auth_status: Dict[str, Any] = {}
 
         try:
-            if get_auth_identity_status is not None:
-                auth_status = _safe_dict(get_auth_identity_status())
+            auth_status = get_auth_identity_status()
         except Exception as exc:
             auth_status = {
                 "ok": False,
@@ -1188,6 +1556,8 @@ class ProjectInvitationService:
         return {
             "ok": True,
             "service": "project_invitation_service",
+            "phase": "vectoplan-auth-no-default-user",
+            "default_user_removed": True,
             "project_model_available": Project is not None,
             "membership_model_available": ProjectMembership is not None,
             "audit_model_available": ProjectAuditEvent is not None,
@@ -1195,6 +1565,13 @@ class ProjectInvitationService:
             "project_invitation_model_available": ProjectInvitation is not None,
             "auth_identity": auth_status,
             "invitable_roles": sorted(INVITABLE_PROJECT_ROLES),
+            "rules": {
+                "creates_app_user": False,
+                "allows_demo": False,
+                "requires_manage_permission": True,
+                "requires_registered_email": True,
+                "accept_requires_local_app_user_link": True,
+            },
         }
 
     def list_invitations(
@@ -1308,25 +1685,7 @@ class ProjectInvitationService:
         if normalized_role not in INVITABLE_PROJECT_ROLES:
             normalized_role = DEFAULT_INVITATION_ROLE
 
-        if require_registered_email_identity is None:
-            return _result(
-                ok=False,
-                code="auth_identity_client_unavailable",
-                message="Der Auth-Identity-Client ist nicht verfügbar.",
-                project=project,
-                status_code=503,
-            )
-
-        try:
-            identity = _safe_dict(require_registered_email_identity(normalized_email))
-        except Exception as exc:
-            _log_exception("auth identity lookup failed", email=normalized_email)
-            identity = {
-                "ok": False,
-                "code": "auth_identity_lookup_failed",
-                "message": "Die Registrierungsprüfung ist fehlgeschlagen.",
-                "error": str(exc),
-            }
+        identity = require_registered_email_identity(normalized_email)
 
         if not _safe_bool(identity.get("ok"), default=False) or not _safe_bool(identity.get("registered"), default=False):
             code = _safe_str(identity.get("code"), default="user_not_registered")
@@ -1413,6 +1772,7 @@ class ProjectInvitationService:
                 metadata={
                     **_safe_dict(metadata),
                     "created_by_service": "project_invitation_service",
+                    "default_user_removed": True,
                 },
                 expires_in_days=expires_in_days,
                 generate_token=True,
@@ -1438,30 +1798,21 @@ class ProjectInvitationService:
             dispatch_result: Dict[str, Any] = {}
 
             if dispatch:
-                if dispatch_project_invitation_identity is None:
-                    dispatch_result = {
-                        "ok": False,
-                        "code": "auth_invitation_dispatch_client_unavailable",
-                        "message": "Der externe Einladungsversand ist nicht verfügbar.",
-                    }
-                else:
-                    dispatch_result = _safe_dict(
-                        dispatch_project_invitation_identity(
-                            email=normalized_email,
-                            project_public_id=_project_public_id(project),
-                            role=normalized_role,
-                            invited_by_auth_user_id=actor_auth_user_id,
-                            invitation_id=invitation.public_id,
-                            invitation_url=invitation_url,
-                            message=_safe_str(message, default=None),  # type: ignore[arg-type]
-                            metadata={
-                                "project_id": _project_id(project),
-                                "project_public_id": _project_public_id(project),
-                                "invitation_public_id": invitation.public_id,
-                            },
-                            require_registered=False,
-                        )
-                    )
+                dispatch_result = dispatch_project_invitation_identity(
+                    email=normalized_email,
+                    project_public_id=_project_public_id(project),
+                    role=normalized_role,
+                    invited_by_auth_user_id=actor_auth_user_id,
+                    invitation_id=invitation.public_id,
+                    invitation_url=invitation_url,
+                    message=_safe_str(message, default=None),  # type: ignore[arg-type]
+                    metadata={
+                        "project_id": _project_id(project),
+                        "project_public_id": _project_public_id(project),
+                        "invitation_public_id": invitation.public_id,
+                    },
+                    require_registered=False,
+                )
 
                 invitation.apply_dispatch_result(dispatch_result)
 
@@ -1666,6 +2017,17 @@ class ProjectInvitationService:
         reason: Any = None,
         commit: bool = True,
     ) -> ProjectInvitationServiceResult:
+        actor_context = get_actor_context(None)
+
+        if _actor_is_blocked(actor_context):
+            return _result(
+                ok=False,
+                code=_safe_str(actor_context.get("blocked_reason"), default="auth_blocked", max_len=120),
+                message="Der Zugriff ist gesperrt.",
+                status_code=403,
+                data={"blocked": True},
+            )
+
         invitation = ProjectInvitation.find_by_public_id(invitation_id)
         if invitation is None:
             return _result(
@@ -1677,7 +2039,20 @@ class ProjectInvitationService:
 
         project = resolve_project(invitation.project_id)
 
-        if not invitation.can_accept(auth_user_id=auth_user_id, email=email):
+        effective_auth_user_id = auth_user_id or _actor_auth_user_id(actor_context)
+        effective_email = email or _actor_email(actor_context)
+
+        if not effective_auth_user_id and not effective_email:
+            return _result(
+                ok=False,
+                code="auth_identity_required",
+                message="Zum Ablehnen der Einladung ist eine Auth-Identität erforderlich.",
+                project=project,
+                invitation=invitation,
+                status_code=401,
+            )
+
+        if not invitation.can_accept(auth_user_id=effective_auth_user_id, email=effective_email):
             return _result(
                 ok=False,
                 code="project_invitation_not_rejectable",
@@ -1698,7 +2073,7 @@ class ProjectInvitationService:
                 metadata={
                     "invitation_id": invitation.public_id,
                     "email": invitation.email_normalized,
-                    "auth_user_id": _safe_str(auth_user_id),
+                    "auth_user_id": _safe_str(effective_auth_user_id),
                     "reason": _safe_str(reason),
                 },
             )
@@ -1741,10 +2116,30 @@ class ProjectInvitationService:
 
         Wichtig:
         - Erzeugt keinen AppUser.
-        - local_user_id muss bereits durch den Login-/Auth-Sync existieren
+        - local_user_id muss bereits durch den Auth-Sync existieren
           oder über auth_user_id/email auffindbar sein.
         - Erst dann wird ProjectMembership erzeugt/aktiviert.
         """
+        actor_context = get_actor_context(actor_user_id or local_user_id)
+
+        if _actor_is_blocked(actor_context):
+            return _result(
+                ok=False,
+                code=_safe_str(actor_context.get("blocked_reason"), default="auth_blocked", max_len=120),
+                message="Der Zugriff ist gesperrt.",
+                status_code=403,
+                data={"blocked": True},
+            )
+
+        if _actor_is_demo(actor_context):
+            return _result(
+                ok=False,
+                code="demo_mode_not_allowed",
+                message="Im Demo-Modus können keine Projekteinladungen angenommen werden.",
+                status_code=403,
+                data={"demo_mode": True},
+            )
+
         invitation = ProjectInvitation.find_by_public_id(invitation_id)
         if invitation is None:
             return _result(
@@ -1792,7 +2187,20 @@ class ProjectInvitationService:
                     status_code=403,
                 )
 
-        if not invitation.can_accept(auth_user_id=auth_user_id, email=email):
+        effective_auth_user_id = auth_user_id or _actor_auth_user_id(actor_context) or invitation.auth_user_id
+        effective_email = email or _actor_email(actor_context) or invitation.email_normalized
+
+        if not effective_auth_user_id and not effective_email:
+            return _result(
+                ok=False,
+                code="auth_identity_required",
+                message="Zum Annehmen der Einladung ist eine Auth-Identität erforderlich.",
+                project=project,
+                invitation=invitation,
+                status_code=401,
+            )
+
+        if not invitation.can_accept(auth_user_id=effective_auth_user_id, email=effective_email):
             return _result(
                 ok=False,
                 code="project_invitation_identity_mismatch",
@@ -1805,9 +2213,12 @@ class ProjectInvitationService:
         resolved_local_user_id = _safe_int(local_user_id)
 
         if not resolved_local_user_id:
+            resolved_local_user_id = _actor_user_id(actor_context)
+
+        if not resolved_local_user_id:
             linked_user = find_linked_app_user(
-                auth_user_id=auth_user_id or invitation.auth_user_id,
-                email=email or invitation.email_normalized,
+                auth_user_id=effective_auth_user_id,
+                email=effective_email,
             )
             if linked_user is not None:
                 resolved_local_user_id = _safe_int(getattr(linked_user, "id", None))
@@ -1818,20 +2229,34 @@ class ProjectInvitationService:
                 code="local_user_link_required",
                 message=(
                     "Die Einladung ist gültig, aber es existiert noch keine lokale "
-                    "AppUser-Verknüpfung. Der Login-/Registrierungsdienst muss den "
-                    "User zuerst mit vectoplan-app synchronisieren."
+                    "AppUser-Verknüpfung. vectoplan-auth muss den User zuerst mit "
+                    "vectoplan-app synchronisieren."
                 ),
                 project=project,
                 invitation=invitation,
                 status_code=409,
                 data={
-                    "auth_user_id": auth_user_id or invitation.auth_user_id,
-                    "email": email or invitation.email_normalized,
+                    "auth_user_id": effective_auth_user_id,
+                    "email": effective_email,
                     "no_user_created": True,
                 },
             )
 
-        actor_context = get_actor_context(actor_user_id or resolved_local_user_id)
+        if not _safe_bool(actor_context.get("persistent"), False):
+            refreshed_context = get_actor_context(resolved_local_user_id)
+            if not _safe_bool(refreshed_context.get("persistent"), False):
+                return _result(
+                    ok=False,
+                    code="persistent_user_required",
+                    message="Zum Annehmen der Einladung ist ein persistenter AppUser-Link erforderlich.",
+                    project=project,
+                    invitation=invitation,
+                    status_code=403,
+                    data={
+                        "local_user_id": resolved_local_user_id,
+                    },
+                )
+            actor_context = refreshed_context
 
         try:
             ok, membership, membership_code = _create_or_update_membership_from_invitation(
@@ -1852,7 +2277,7 @@ class ProjectInvitationService:
 
             invitation.mark_accepted(
                 accepted_by_user_id=resolved_local_user_id,
-                accepted_by_auth_user_id=auth_user_id or invitation.auth_user_id,
+                accepted_by_auth_user_id=effective_auth_user_id,
                 membership_id=getattr(membership, "id", None),
             )
 
@@ -1887,7 +2312,7 @@ class ProjectInvitationService:
             _log_exception(
                 "accept_invitation failed",
                 invitation_id=_safe_str(invitation_id),
-                auth_user_id=_safe_str(auth_user_id),
+                auth_user_id=_safe_str(effective_auth_user_id),
                 local_user_id=resolved_local_user_id,
             )
             return _result(
@@ -2096,14 +2521,17 @@ __all__ = [
     "ProjectInvitationServiceResult",
     "accept_project_invitation",
     "build_invitation_url",
+    "dispatch_project_invitation_identity",
     "expire_project_invitations",
     "find_linked_app_user",
     "get_actor_context",
+    "get_auth_identity_status",
     "get_project_invitation_service",
     "get_project_invitation_service_status",
     "invite_registered_email_to_project",
     "list_project_invitations",
     "reject_project_invitation",
+    "require_registered_email_identity",
     "resolve_project",
     "revoke_project_invitation",
 ]

@@ -9,14 +9,18 @@ Zweck:
 - Zentrale Gateway-Logik für routes.viewer.
 - Der Browser bekommt immer PUBLIC_URL-Ziele.
 - INTERNAL_URL-Ziele bleiben ausschließlich für Server-zu-Server-Kommunikation.
-- Aktuell wichtigster Workspace: editor3d → vectoplan-editor.
-- Später erweiterbar für Map/OpenLayer, 2D, LV, Versionen.
+- Wichtigste externe Workspaces:
+    - editor3d → vectoplan-editor
+    - map      → vectoplan-openlayer
+- Später erweiterbar für 2D, LV, Versionen.
 
 Sicherheitsregeln:
-- Keine Tokens, Secrets oder INTERNAL_URLs an den Browser geben.
+- Keine Tokens, Secrets, Auth-Header, User-E-Mails oder INTERNAL_URLs an den Browser geben.
 - App-interne Rechteprüfung bleibt in routes.viewer / project_permissions.
 - Diese Datei baut nur Ziel-URLs nach erfolgreicher Zugriffskontrolle.
 - Admin/System/Settings/Team werden nicht als externe Public-Embeds gebaut.
+- Blocked/Banned/Auth-unavailable erzeugt keine externe Embed-URL.
+- Demo-Projekte dürfen externe Workspaces öffnen, bleiben aber temporär und nicht persistent.
 
 Wichtige Editor-Regel:
 - app_project_public_id / project_public_id bleiben App-Projekt-IDs.
@@ -100,11 +104,50 @@ DOCKER_INTERNAL_HOSTS = {
     "vectoplan_openlayer",
 }
 
+SECRET_QUERY_KEYS = {
+    "token",
+    "access_token",
+    "refresh_token",
+    "jwt",
+    "secret",
+    "password",
+    "api_key",
+    "apikey",
+    "key",
+    "authorization",
+    "auth",
+    "cookie",
+    "session",
+    "session_id",
+    "sessionid",
+    "sid",
+    "csrf",
+    "csrf_token",
+    "auth_user_id",
+    "authuserid",
+    "authUserId",
+    "user_id",
+    "userId",
+    "email",
+    "auth_email",
+    "authEmail",
+    "account_id",
+    "accountId",
+    "internal_url",
+    "internalUrl",
+    "internal_base_url",
+    "internalBaseUrl",
+    "redirect",
+    "redirect_url",
+    "return",
+    "next",
+    "url",
+}
+
 ALLOWED_CHUNK_STATUS_READY = {"ready", "active", "linked", "created", "provisioned", "ok", "available"}
 ALLOWED_CHUNK_STATUS_PENDING = {"pending", "waiting", "queued", "initializing", "unknown"}
 ALLOWED_CHUNK_STATUS_ERROR = {"error", "failed", "failure", "unavailable"}
 ALLOWED_CHUNK_STATUS_DISABLED = {"disabled", "off"}
-
 
 _MODULE_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -352,12 +395,10 @@ def normalize_workspace(value: Any, default: str = WORKSPACE_PROJECT) -> str:
             "info": WORKSPACE_PROJECT,
             "overview": WORKSPACE_PROJECT,
             "details": WORKSPACE_PROJECT,
-
             "map": WORKSPACE_MAP,
             "karte": WORKSPACE_MAP,
             "openlayer": WORKSPACE_MAP,
             "openlayers": WORKSPACE_MAP,
-
             "3d": WORKSPACE_EDITOR3D,
             "editor": WORKSPACE_EDITOR3D,
             "editor3d": WORKSPACE_EDITOR3D,
@@ -365,23 +406,19 @@ def normalize_workspace(value: Any, default: str = WORKSPACE_PROJECT) -> str:
             "viewer": WORKSPACE_EDITOR3D,
             "viewer3d": WORKSPACE_EDITOR3D,
             "model": WORKSPACE_EDITOR3D,
-
             "2d": WORKSPACE_CAD2D,
             "cad": WORKSPACE_CAD2D,
             "cad2d": WORKSPACE_CAD2D,
             "cad_2d": WORKSPACE_CAD2D,
             "plan": WORKSPACE_CAD2D,
             "plan2d": WORKSPACE_CAD2D,
-
             "lv": WORKSPACE_LV,
             "boq": WORKSPACE_LV,
             "leistungsverzeichnis": WORKSPACE_LV,
-
             "versions": WORKSPACE_VERSIONS,
             "version": WORKSPACE_VERSIONS,
             "versionen": WORKSPACE_VERSIONS,
             "history": WORKSPACE_VERSIONS,
-
             "admin": WORKSPACE_ADMIN,
             "settings": WORKSPACE_ADMIN,
             "team": WORKSPACE_ADMIN,
@@ -621,7 +658,7 @@ def clear_workspace_embed_cache() -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# Project extraction helpers
+# Project/Auth extraction helpers
 # ─────────────────────────────────────────────────────────────
 
 def _mapping_value(mapping: Mapping[str, Any], *keys: str, default: Any = "") -> Any:
@@ -783,12 +820,31 @@ def _current_user_payload(current_user: Optional[Mapping[str, Any]] = None) -> D
         return {}
 
 
+def _is_blocked_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
+    try:
+        user = _current_user_payload(current_user)
+        return _safe_bool(user.get("blocked"), False)
+    except Exception:
+        return False
+
+
+def _blocked_reason(current_user: Optional[Mapping[str, Any]] = None) -> str:
+    try:
+        user = _current_user_payload(current_user)
+        return _safe_str(user.get("blocked_reason") or user.get("blockedReason") or user.get("auth_state"), "blocked", 160)
+    except Exception:
+        return "blocked"
+
+
 def _is_demo_mode(
     *,
     current_user: Optional[Mapping[str, Any]] = None,
     project_payload: Optional[Mapping[str, Any]] = None,
 ) -> bool:
     try:
+        if _is_blocked_context(current_user):
+            return False
+
         user = _current_user_payload(current_user)
         payload = _safe_dict(project_payload)
 
@@ -797,10 +853,24 @@ def _is_demo_mode(
             or user.get("demoMode")
             or user.get("is_demo")
             or payload.get("demo_mode")
-            or payload.get("demoMode"),
+            or payload.get("demoMode")
+            or payload.get("is_demo")
+            or payload.get("isDemo"),
             False,
         )
 
+    except Exception:
+        return False
+
+
+def _is_persistent_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
+    try:
+        user = _current_user_payload(current_user)
+
+        if _is_blocked_context(user) or _is_demo_mode(current_user=user):
+            return False
+
+        return _safe_bool(user.get("persistent"), False)
     except Exception:
         return False
 
@@ -1202,8 +1272,6 @@ def _chunk_hint_payload(
 
         if chunk_project_id:
             result["chunk_project_id"] = chunk_project_id
-
-            # Critical editor compatibility.
             result["project_id"] = chunk_project_id
 
         if chunk_universe_id:
@@ -1212,8 +1280,6 @@ def _chunk_hint_payload(
 
         if chunk_world_id:
             result["chunk_world_id"] = chunk_world_id
-
-            # Critical editor compatibility.
             result["world_id"] = chunk_world_id
 
         if chunk_project_id and chunk_world_id and chunk_status not in {"error", "disabled"}:
@@ -1334,6 +1400,11 @@ def _clean_query_params(params: Mapping[str, Any]) -> Dict[str, Any]:
             if not key_text:
                 continue
 
+            key_lower = key_text.lower()
+
+            if key_lower in {item.lower() for item in SECRET_QUERY_KEYS}:
+                continue
+
             if value is None:
                 continue
 
@@ -1353,12 +1424,30 @@ def _clean_query_params(params: Mapping[str, Any]) -> Dict[str, Any]:
 
             value_text = _safe_str(value, "", MAX_QUERY_VALUE_LENGTH)
             if value_text:
+                if _looks_like_internal_url(value_text):
+                    continue
                 clean[key_text] = value_text
 
         return clean
 
     except Exception:
         return clean
+
+
+def _looks_like_internal_url(value: str) -> bool:
+    try:
+        text = _safe_str(value, "", 4000)
+        if not text:
+            return False
+
+        parsed = urlsplit(text)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return False
+
+        host = _safe_str(parsed.hostname, "", 255).lower()
+        return host in DOCKER_INTERNAL_HOSTS
+    except Exception:
+        return False
 
 
 def _append_query_params(url: str, params: Mapping[str, Any]) -> str:
@@ -1598,8 +1687,9 @@ def _base_embed_params(
         conversation_id = _project_conversation_id(project=project, project_payload=payload)
 
         demo_mode = _is_demo_mode(current_user=current_user, project_payload=payload)
+        persistent = _is_persistent_context(current_user)
         can_edit = _can_edit_project(payload)
-        read_only = bool(demo_mode or not can_edit)
+        read_only = bool(not can_edit)
 
         params: Dict[str, Any] = {
             "embed": "1",
@@ -1609,9 +1699,10 @@ def _base_embed_params(
             "project_public_id": project_public_id,
             "read_only": read_only,
             "readonly": read_only,
+            "persistent": "1" if persistent else "0",
         }
 
-        if conversation_id:
+        if conversation_id and persistent:
             params["conversation_id"] = conversation_id
             params["chat_id"] = conversation_id
 
@@ -1641,6 +1732,7 @@ def _base_embed_params(
 
         if demo_mode:
             params["demo_mode"] = "1"
+            params["ephemeral"] = "1"
 
         if include_chunk_hints is None:
             include_chunk_hints = _config_bool("VECTOPLAN_EMBED_INCLUDE_CHUNK_QUERY_PARAMS", True)
@@ -1670,6 +1762,17 @@ def build_workspace_embed_result(
     normalized_workspace = normalize_workspace(workspace)
 
     try:
+        current_user_payload = _current_user_payload(current_user)
+
+        if _is_blocked_context(current_user_payload):
+            return WorkspaceEmbedResult(
+                ok=False,
+                workspace=normalized_workspace,
+                code="auth_blocked",
+                message="Der Zugriff ist gesperrt.",
+                error=_blocked_reason(current_user_payload),
+            )
+
         if normalized_workspace in FORBIDDEN_EXTERNAL_WORKSPACES:
             return WorkspaceEmbedResult(
                 ok=False,
@@ -1738,7 +1841,7 @@ def build_workspace_embed_result(
             workspace=normalized_workspace,
             project=project,
             project_payload=payload,
-            current_user=current_user,
+            current_user=current_user_payload,
             request_obj=request_obj,
             include_context=include_context,
             include_return_url=include_return_url,
@@ -1903,6 +2006,7 @@ def get_workspace_embed_status() -> Dict[str, Any]:
         return {
             "ok": True,
             "service": "workspace_embed_service",
+            "phase": "vectoplan-auth-safe-embed",
             "cache": {
                 "module_cache_keys": sorted(_MODULE_CACHE.keys()),
                 "ttl_seconds": _cache_max_age_seconds(),
@@ -1917,6 +2021,10 @@ def get_workspace_embed_status() -> Dict[str, Any]:
             "rules": {
                 "browser_uses_public_url": True,
                 "internal_urls_exposed": False,
+                "tokens_exposed": False,
+                "auth_identity_exposed": False,
+                "blocked_gets_embed_url": False,
+                "demo_is_ephemeral": True,
                 "admin_is_never_external_embed": True,
                 "editor_project_id_is_chunk_project_id": True,
                 "editor_world_id_is_chunk_world_id": True,

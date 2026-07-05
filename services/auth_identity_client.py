@@ -1,23 +1,27 @@
 # services/vectoplan-app/services/auth_identity_client.py
+from __future__ import annotations
+
 """
 VECTOPLAN auth identity client.
 
 Zweck:
-- Adapter-Schicht von vectoplan-app zum späteren Auth-/Registrierungsdienst.
-- Prüft, ob eine E-Mail-Adresse als Account im externen Auth-System registriert ist.
+- Adapter-Schicht von vectoplan-app zu vectoplan-auth.
+- Prüft, ob eine E-Mail-Adresse als Account in vectoplan-auth registriert ist.
 - Liefert Auth-Identitätsdaten zurück, ohne in vectoplan-app echte User anzulegen.
-- Stellt einen robusten Platzhaltermodus für die aktuelle Entwicklungsphase bereit.
-- Kann später ohne großen Umbau an den echten Login-/Registrierungscontainer angebunden werden.
+- Stößt optional Einladungsversand über vectoplan-auth an.
+- Erzeugt keine lokalen Benutzeraccounts.
+- Erzeugt keinen Default-User.
+- Enthält keinen Dev-Allowlist-Modus.
+- Enthält keinen Accept-All-Registrierungsmodus.
+- Enthält keinen Platzhalterversand.
 
 Wichtige Architekturregel:
-- vectoplan-app erzeugt KEINE echten Benutzeraccounts.
+- vectoplan-app erzeugt keine echten Benutzeraccounts.
 - vectoplan-app verwaltet Projektrollen, Sichtbarkeit, Einladungen und Projektmitgliedschaften.
-- Registrierung, Login, Account-Status, Abo-Status und Bigdata-Zugriff gehören zum Auth-/Registrierungsdienst.
+- Registrierung, Login, Account-Status, Abo-Status, Entitlements und Blocked/Banned
+  gehören zu vectoplan-auth.
 """
 
-from __future__ import annotations
-
-import hashlib
 import json
 import logging
 import os
@@ -29,16 +33,25 @@ from typing import Any, Dict, Iterable, Mapping, MutableMapping, Optional, Tuple
 
 try:
     import requests  # type: ignore
-except Exception:  # pragma: no cover - requests sollte vorhanden sein, aber Client darf nicht hart brechen.
+except Exception:  # pragma: no cover
     requests = None  # type: ignore
 
 try:
     from flask import current_app, has_app_context
-except Exception:  # pragma: no cover - Datei soll auch außerhalb Flask importierbar bleiben.
+except Exception:  # pragma: no cover
     current_app = None  # type: ignore
 
     def has_app_context() -> bool:  # type: ignore
         return False
+
+
+try:
+    from services.auth_context_client import get_auth_context_client  # type: ignore
+except Exception:  # pragma: no cover
+    try:
+        from .auth_context_client import get_auth_context_client  # type: ignore
+    except Exception:
+        get_auth_context_client = None  # type: ignore
 
 
 EMAIL_RE = re.compile(
@@ -53,15 +66,12 @@ DEFAULT_TIMEOUT_SECONDS = 4.0
 DEFAULT_CACHE_TTL_SECONDS = 120
 DEFAULT_NEGATIVE_CACHE_TTL_SECONDS = 30
 
-DEFAULT_REGISTERED_EMAILS_ENV = "AUTH_IDENTITY_DEV_REGISTERED_EMAILS"
-
 LOGGER_NAME = "vectoplan.auth_identity_client"
 
 
 # ---------------------------------------------------------------------------
 # Small safe helpers
 # ---------------------------------------------------------------------------
-
 
 def _logger() -> logging.Logger:
     try:
@@ -104,7 +114,10 @@ def _compact_json(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except Exception:
-        return str(value)
+        try:
+            return str(value)
+        except Exception:
+            return ""
 
 
 def _safe_str(value: Any, default: str = "", max_len: Optional[int] = None) -> str:
@@ -201,33 +214,9 @@ def _join_url(base_url: str, path: str) -> str:
     return base + "/" + p.lstrip("/")
 
 
-def _parse_csv_set(value: Any) -> set:
-    try:
-        if value is None:
-            return set()
-        if isinstance(value, (list, tuple, set)):
-            return {
-                _normalize_email(item)
-                for item in value
-                if _normalize_email(item)
-            }
-        text = str(value)
-        parts = re.split(r"[,\n;\s]+", text)
-        return {
-            _normalize_email(part)
-            for part in parts
-            if _normalize_email(part)
-        }
-    except Exception:
-        return set()
-
-
 def _read_config(name: str, default: Any = None) -> Any:
     """
     Liest zuerst Flask current_app.config, dann Environment.
-
-    Die Funktion ist absichtlich defensiv, damit Imports/Scripts/Tests nicht
-    abbrechen, wenn kein Flask-App-Kontext aktiv ist.
     """
     try:
         if has_app_context() and current_app is not None:
@@ -259,8 +248,11 @@ def _normalize_email(email: Any) -> str:
     text = _safe_str(email, default="", max_len=320).lower()
     if not text:
         return ""
-    # Sehr einfache Normalisierung. Keine Gmail-spezifischen Regeln.
     return text
+
+
+def normalize_email(email: Any) -> str:
+    return _normalize_email(email)
 
 
 def is_valid_email(email: Any) -> bool:
@@ -275,12 +267,6 @@ def is_valid_email(email: Any) -> bool:
         return False
 
 
-def _dev_auth_user_id_for_email(email: str) -> str:
-    normalized = _normalize_email(email)
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:18]
-    return "auth_dev_" + digest
-
-
 def _display_name_from_email(email: str) -> str:
     normalized = _normalize_email(email)
     local_part = normalized.split("@", 1)[0] if "@" in normalized else normalized
@@ -290,14 +276,6 @@ def _display_name_from_email(email: str) -> str:
 
 
 def _extract_nested_bool(data: Mapping[str, Any], *paths: str, default: bool = False) -> bool:
-    """
-    Liest boolsche Werte aus flachen oder punktgetrennten Pfaden.
-
-    Beispiele:
-      can_use_bigdata
-      features.bigdata
-      account.bigdata_access
-    """
     for path in paths:
         try:
             current: Any = data
@@ -317,7 +295,6 @@ def _extract_nested_bool(data: Mapping[str, Any], *paths: str, default: bool = F
 # TTL cache
 # ---------------------------------------------------------------------------
 
-
 @dataclass
 class _CacheEntry:
     value: Any
@@ -334,11 +311,7 @@ class _TTLCache:
     """
     Kleiner Thread-sicherer In-Memory-TTL-Cache.
 
-    Zweck:
-    - Entlastet später den Auth-Service bei wiederholten E-Mail-Lookups.
-    - Cacht auch negative Ergebnisse kurz, damit Tippfehler nicht sofort
-      mehrfach externe Calls erzeugen.
-    - Ist bewusst lokal und unverbindlich. Keine Persistenz, keine Wahrheit.
+    Keine Persistenz, keine Auth-Wahrheit.
     """
 
     def __init__(self) -> None:
@@ -415,24 +388,20 @@ _CLIENT_SINGLETON: Optional["AuthIdentityClient"] = None
 # Result models
 # ---------------------------------------------------------------------------
 
-
 @dataclass
 class AuthIdentityResult:
     """
     Ergebnis eines E-Mail-/Identity-Lookups.
 
     ok:
-      Gibt an, ob die Anfrage technisch erfolgreich verarbeitet wurde.
-      Ein nicht registrierter User ist für lookup_email() technisch ok,
-      aber registered=False.
+      Gibt an, ob die Anfrage technisch und fachlich für den jeweiligen Flow
+      nutzbar ist.
 
     registered:
-      Gibt an, ob der Auth-/Registrierungsdienst die E-Mail als registrierten
-      Account kennt.
+      Gibt an, ob vectoplan-auth die E-Mail als registrierten Account kennt.
 
     auth_user_id:
-      Externe User-ID aus dem Auth-/Registrierungsdienst.
-      Nicht identisch mit lokaler vectoplan-app User-ID.
+      User-ID aus vectoplan-auth. Nicht identisch mit lokaler vectoplan-app User-ID.
     """
 
     ok: bool
@@ -444,6 +413,8 @@ class AuthIdentityResult:
     account_plan: Optional[str] = None
     account_status: Optional[str] = None
     can_use_bigdata: bool = False
+    blocked: bool = False
+    blocked_reason: Optional[str] = None
     source: str = "unknown"
     message: str = ""
     raw: Dict[str, Any] = field(default_factory=dict)
@@ -462,6 +433,8 @@ class AuthIdentityResult:
             "account_plan": self.account_plan,
             "account_status": self.account_status,
             "can_use_bigdata": bool(self.can_use_bigdata),
+            "blocked": bool(self.blocked),
+            "blocked_reason": self.blocked_reason,
             "source": self.source,
             "message": self.message,
             "raw": self.raw,
@@ -486,7 +459,7 @@ class AuthIdentityResult:
     def not_registered(
         cls,
         email: Any,
-        source: str = "auth_identity",
+        source: str = "vectoplan-auth",
         message: str = "Für diese E-Mail-Adresse ist kein registrierter Account vorhanden.",
         raw: Optional[Dict[str, Any]] = None,
         status_code: Optional[int] = None,
@@ -511,14 +484,16 @@ class AuthIdentityResult:
         account_plan: Optional[str] = None,
         account_status: Optional[str] = None,
         can_use_bigdata: bool = False,
-        source: str = "auth_identity",
+        blocked: bool = False,
+        blocked_reason: Optional[str] = None,
+        source: str = "vectoplan-auth",
         raw: Optional[Dict[str, Any]] = None,
         status_code: Optional[int] = None,
     ) -> "AuthIdentityResult":
         normalized = _normalize_email(email)
         return cls(
-            ok=True,
-            code="user_registered",
+            ok=not bool(blocked),
+            code="auth_identity_blocked" if blocked else "user_registered",
             email=normalized,
             registered=True,
             auth_user_id=_safe_str(auth_user_id, default=None),  # type: ignore[arg-type]
@@ -526,8 +501,10 @@ class AuthIdentityResult:
             account_plan=_safe_str(account_plan, default=None),  # type: ignore[arg-type]
             account_status=_safe_str(account_status, default=None),  # type: ignore[arg-type]
             can_use_bigdata=bool(can_use_bigdata),
+            blocked=bool(blocked),
+            blocked_reason=_safe_str(blocked_reason, default=None),  # type: ignore[arg-type]
             source=source,
-            message="Die E-Mail-Adresse gehört zu einem registrierten Account.",
+            message="Die E-Mail-Adresse gehört zu einem registrierten Account." if not blocked else "Dieser Account ist gesperrt.",
             raw=raw or {},
             status_code=status_code,
         )
@@ -537,8 +514,8 @@ class AuthIdentityResult:
         cls,
         email: Any,
         code: str = "auth_identity_unavailable",
-        message: str = "Der Auth-/Registrierungsdienst ist nicht verfügbar.",
-        source: str = "auth_identity",
+        message: str = "vectoplan-auth ist nicht verfügbar.",
+        source: str = "vectoplan-auth",
         error: Optional[str] = None,
         status_code: Optional[int] = None,
         raw: Optional[Dict[str, Any]] = None,
@@ -561,12 +538,8 @@ class AuthInvitationDispatchResult:
     """
     Ergebnis des externen Einladungsversands.
 
-    Diese Klasse versendet/verwaltet keine ProjectInvitation in der App-DB.
-    Das übernimmt später project_invitation_service.py.
-
-    Dieser Client kann nur:
-    - den späteren Auth-/Mail-Service anstoßen,
-    - oder im aktuellen Entwicklungsmodus einen Platzhalter-Erfolg zurückgeben.
+    Diese Klasse speichert keine ProjectInvitation in der App-DB.
+    Das übernimmt project_invitation_service.py.
     """
 
     ok: bool
@@ -630,7 +603,6 @@ class AuthInvitationDispatchResult:
 # Configuration
 # ---------------------------------------------------------------------------
 
-
 @dataclass(frozen=True)
 class AuthIdentityClientConfig:
     """
@@ -638,37 +610,22 @@ class AuthIdentityClientConfig:
 
     Unterstützte ENV-/Flask-Config-Werte:
 
-    AUTH_IDENTITY_INTERNAL_URL
-      Bevorzugte interne URL des Auth-/Registrierungsdienstes.
-
     VECTOPLAN_AUTH_INTERNAL_URL
+      Interne URL von vectoplan-auth.
+
+    AUTH_IDENTITY_INTERNAL_URL
     AUTH_SERVICE_INTERNAL_URL
     REGISTRATION_INTERNAL_URL
-      Fallback-Namen, damit die Datei robust in bestehende ENV-Strukturen passt.
+      Kompatible Fallback-Namen.
 
     AUTH_IDENTITY_LOOKUP_PATH
       Lookup-Pfad. Default: /v1/auth/identity/lookup-email
 
     AUTH_IDENTITY_INVITATION_DISPATCH_PATH
-      Pfad für späteren externen Einladungsversand.
+      Pfad für Einladungsversand.
 
     AUTH_IDENTITY_API_TOKEN
       Optionaler Bearer-Token für server-to-server Calls.
-
-    AUTH_IDENTITY_DEV_MODE
-      Aktiviert Dev-Fallback, wenn kein echter Auth-Service vorhanden ist.
-
-    AUTH_IDENTITY_DEV_REGISTERED_EMAILS
-      Kommagetrennte E-Mail-Allowlist für den Dev-Modus.
-      Nur diese Adressen gelten als registriert, sofern ACCEPT_ALL nicht aktiv ist.
-
-    AUTH_IDENTITY_DEV_ACCEPT_ALL_REGISTERED
-      Nur für lokale Entwicklung. Wenn true, gilt jede syntaktisch valide E-Mail
-      als registriert. Standard: false.
-
-    AUTH_IDENTITY_PLACEHOLDER_INVITES
-      Wenn true, gibt dispatch_project_invitation() im Dev-Modus einen
-      Platzhalter-Erfolg zurück.
     """
 
     base_url: str = ""
@@ -679,39 +636,19 @@ class AuthIdentityClientConfig:
     api_token: str = ""
     cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS
     negative_cache_ttl_seconds: int = DEFAULT_NEGATIVE_CACHE_TTL_SECONDS
-    dev_mode: bool = True
-    dev_registered_emails: frozenset = field(default_factory=frozenset)
-    dev_accept_all_registered: bool = False
-    placeholder_invites_enabled: bool = True
-    service_name: str = "auth_identity"
+    service_name: str = "vectoplan-auth"
 
     @classmethod
     def from_runtime(cls) -> "AuthIdentityClientConfig":
         base_url = _normalize_url_base(
             _read_first_config(
                 [
-                    "AUTH_IDENTITY_INTERNAL_URL",
                     "VECTOPLAN_AUTH_INTERNAL_URL",
+                    "AUTH_IDENTITY_INTERNAL_URL",
                     "AUTH_SERVICE_INTERNAL_URL",
                     "REGISTRATION_INTERNAL_URL",
                 ],
                 default="",
-            )
-        )
-
-        explicit_dev_mode = _read_config("AUTH_IDENTITY_DEV_MODE", None)
-        if explicit_dev_mode is None:
-            # Solange noch kein Auth-Service konfiguriert ist, ist Dev-Modus sinnvoll.
-            dev_mode = not bool(base_url)
-        else:
-            dev_mode = _safe_bool(explicit_dev_mode, default=not bool(base_url))
-
-        dev_registered_emails = frozenset(
-            _parse_csv_set(
-                _read_config(
-                    DEFAULT_REGISTERED_EMAILS_ENV,
-                    "",
-                )
             )
         )
 
@@ -751,19 +688,9 @@ class AuthIdentityClientConfig:
                 ),
                 default=DEFAULT_NEGATIVE_CACHE_TTL_SECONDS,
             ),
-            dev_mode=dev_mode,
-            dev_registered_emails=dev_registered_emails,
-            dev_accept_all_registered=_safe_bool(
-                _read_config("AUTH_IDENTITY_DEV_ACCEPT_ALL_REGISTERED", False),
-                default=False,
-            ),
-            placeholder_invites_enabled=_safe_bool(
-                _read_config("AUTH_IDENTITY_PLACEHOLDER_INVITES", True),
-                default=True,
-            ),
             service_name=_safe_str(
-                _read_config("AUTH_IDENTITY_SERVICE_NAME", "auth_identity"),
-                default="auth_identity",
+                _read_config("AUTH_IDENTITY_SERVICE_NAME", "vectoplan-auth"),
+                default="vectoplan-auth",
             ),
         )
 
@@ -772,16 +699,15 @@ class AuthIdentityClientConfig:
 # Client
 # ---------------------------------------------------------------------------
 
-
 class AuthIdentityClient:
     """
-    Robuster Client für den späteren Auth-/Registrierungsdienst.
+    Strenger Client für vectoplan-auth.
 
-    Dieser Client ist bewusst streng:
-    - Bei Einladungen werden nicht registrierte E-Mails nicht akzeptiert.
-    - Ohne Auth-Service werden nur konfigurierte Dev-Allowlist-Adressen als
-      registriert behandelt.
+    Regeln:
+    - Nicht registrierte E-Mails werden für Einladungen nicht akzeptiert.
+    - Wenn vectoplan-auth nicht konfiguriert/erreichbar ist, gibt es keinen Dev-Fallback.
     - Es werden keine lokalen AppUser erzeugt.
+    - Es gibt keinen Platzhalterversand.
     """
 
     def __init__(self, config: Optional[AuthIdentityClientConfig] = None) -> None:
@@ -800,34 +726,40 @@ class AuthIdentityClient:
         return {
             "ok": True,
             "service": cfg.service_name,
+            "phase": "vectoplan-auth-strict",
             "base_url_configured": bool(cfg.base_url),
             "lookup_path": cfg.lookup_path,
             "invitation_dispatch_path": cfg.invitation_dispatch_path,
-            "dev_mode": bool(cfg.dev_mode),
-            "dev_registered_email_count": len(cfg.dev_registered_emails),
-            "dev_accept_all_registered": bool(cfg.dev_accept_all_registered),
-            "placeholder_invites_enabled": bool(cfg.placeholder_invites_enabled),
+            "dev_mode": False,
+            "dev_accept_all_registered": False,
+            "placeholder_invites_enabled": False,
             "cache_ttl_seconds": cfg.cache_ttl_seconds,
             "negative_cache_ttl_seconds": cfg.negative_cache_ttl_seconds,
             "requests_available": requests is not None,
+            "auth_context_client_available": get_auth_context_client is not None,
+            "rules": {
+                "creates_app_user": False,
+                "default_user": False,
+                "accept_all_registered": False,
+                "placeholder_dispatch": False,
+                "source_of_truth": "vectoplan-auth",
+            },
         }
 
     def lookup_email(
         self,
         email: Any,
         use_cache: bool = True,
-        allow_dev_fallback: bool = True,
+        allow_dev_fallback: bool = False,
     ) -> AuthIdentityResult:
         """
-        Prüft eine E-Mail-Adresse gegen den Auth-/Registrierungsdienst.
+        Prüft eine E-Mail-Adresse gegen vectoplan-auth.
 
         Rückgabe:
-        - registered=True, wenn der externe Auth-Dienst oder Dev-Fallback
-          die E-Mail als registriert kennt.
+        - registered=True, wenn vectoplan-auth die E-Mail als registriert kennt.
         - registered=False mit code=user_not_registered, wenn nicht registriert.
         - ok=False bei technischer Nichtverfügbarkeit oder ungültiger E-Mail.
 
-        WICHTIG:
         Diese Methode erzeugt keine lokalen User.
         """
         normalized_email = _normalize_email(email)
@@ -849,38 +781,13 @@ class AuthIdentityClient:
 
         if self.config.base_url:
             result = self._lookup_email_remote(normalized_email)
-
-            if result.ok:
-                self._cache_lookup_result(cache_key, result)
-                return result
-
-            # Remote technisch nicht verfügbar.
-            # In der aktuellen Entwicklungsphase darf optional auf Dev-Fallback
-            # gefallen werden, aber nur wenn dev_mode aktiv ist.
-            if allow_dev_fallback and self.config.dev_mode:
-                _log_warning(
-                    "auth identity remote lookup failed; falling back to dev lookup",
-                    email=normalized_email,
-                    code=result.code,
-                    error=result.error,
-                    status_code=result.status_code,
-                )
-                fallback = self._lookup_email_dev(normalized_email, source="dev_fallback")
-                self._cache_lookup_result(cache_key, fallback)
-                return fallback
-
-            self._cache_lookup_result(cache_key, result)
-            return result
-
-        if self.config.dev_mode:
-            result = self._lookup_email_dev(normalized_email, source="dev")
             self._cache_lookup_result(cache_key, result)
             return result
 
         result = AuthIdentityResult.unavailable(
             normalized_email,
             code="auth_identity_not_configured",
-            message="Es ist kein Auth-/Registrierungsdienst konfiguriert.",
+            message="vectoplan-auth ist nicht konfiguriert.",
             source="config",
         )
         self._cache_lookup_result(cache_key, result)
@@ -896,7 +803,8 @@ class AuthIdentityClient:
 
         Gibt ok=True nur zurück, wenn:
         - E-Mail syntaktisch gültig ist,
-        - und die Adresse registriert ist.
+        - die Adresse registriert ist,
+        - der Account nicht gesperrt ist.
         """
         identity = self.lookup_email(email=email, use_cache=use_cache)
 
@@ -911,6 +819,25 @@ class AuthIdentityClient:
                 registered=False,
                 source=identity.source,
                 message="Einladungen sind nur an bereits registrierte Accounts möglich.",
+                raw=identity.raw,
+                status_code=identity.status_code,
+                cached=identity.cached,
+            )
+
+        if identity.blocked:
+            return AuthIdentityResult(
+                ok=False,
+                code="auth_identity_blocked",
+                email=identity.email,
+                registered=True,
+                auth_user_id=identity.auth_user_id,
+                display_name=identity.display_name,
+                account_plan=identity.account_plan,
+                account_status=identity.account_status,
+                blocked=True,
+                blocked_reason=identity.blocked_reason,
+                source=identity.source,
+                message="Dieser Account ist gesperrt.",
                 raw=identity.raw,
                 status_code=identity.status_code,
                 cached=identity.cached,
@@ -931,16 +858,9 @@ class AuthIdentityClient:
         require_registered: bool = True,
     ) -> AuthInvitationDispatchResult:
         """
-        Stößt später den externen Einladungsversand an.
+        Stößt den externen Einladungsversand über vectoplan-auth an.
 
-        Aktuell:
-        - prüft optional, ob die E-Mail registriert ist,
-        - ruft bei konfiguriertem Auth-Service den Dispatch-Endpunkt auf,
-        - liefert sonst im Dev-Modus einen robusten Platzhalter-Erfolg.
-
-        WICHTIG:
         Diese Methode speichert keine ProjectInvitation in der App-DB.
-        Das macht später project_invitation_service.py.
         """
         normalized_email = _normalize_email(email)
         safe_project_public_id = _safe_str(project_public_id, max_len=120)
@@ -968,59 +888,33 @@ class AuthIdentityClient:
                     role=safe_role,
                 )
 
-        if self.config.base_url:
-            remote_result = self._dispatch_project_invitation_remote(
+        if not self.config.base_url:
+            return AuthInvitationDispatchResult(
+                ok=False,
+                code="invitation_dispatch_not_configured",
                 email=normalized_email,
                 project_public_id=safe_project_public_id,
                 role=safe_role,
-                invited_by_auth_user_id=invited_by_auth_user_id,
-                invitation_id=invitation_id,
-                invitation_url=invitation_url,
-                message=message,
-                metadata=metadata,
-                identity=identity,
-            )
-            if remote_result.ok:
-                return remote_result
-
-            if not self.config.dev_mode and not self.config.placeholder_invites_enabled:
-                return remote_result
-
-            _log_warning(
-                "auth invitation dispatch failed; using placeholder dispatch",
-                email=normalized_email,
-                project_public_id=safe_project_public_id,
-                role=safe_role,
-                code=remote_result.code,
-                error=remote_result.error,
-                status_code=remote_result.status_code,
+                auth_user_id=identity.auth_user_id if identity else None,
+                external_sent=False,
+                placeholder=False,
+                source="config",
+                message="vectoplan-auth Invitation-Dispatch ist nicht konfiguriert.",
             )
 
-        if self.config.placeholder_invites_enabled:
-            return self._dispatch_project_invitation_placeholder(
-                email=normalized_email,
-                project_public_id=safe_project_public_id,
-                role=safe_role,
-                invited_by_auth_user_id=invited_by_auth_user_id,
-                invitation_id=invitation_id,
-                invitation_url=invitation_url,
-                message=message,
-                metadata=metadata,
-                identity=identity,
-            )
-
-        return AuthInvitationDispatchResult(
-            ok=False,
-            code="invitation_dispatch_not_configured",
+        remote_result = self._dispatch_project_invitation_remote(
             email=normalized_email,
             project_public_id=safe_project_public_id,
             role=safe_role,
-            auth_user_id=identity.auth_user_id if identity else None,
-            external_sent=False,
-            placeholder=False,
-            source="config",
-            message="Kein Einladungsversand konfiguriert.",
+            invited_by_auth_user_id=invited_by_auth_user_id,
+            invitation_id=invitation_id,
+            invitation_url=invitation_url,
+            message=message,
+            metadata=metadata,
+            identity=identity,
         )
+
+        return remote_result
 
     def clear_cache(self) -> None:
         _LOOKUP_CACHE.clear()
@@ -1047,7 +941,10 @@ class AuthIdentityClient:
                 source="config",
             )
 
-        payload = {"email": email}
+        payload = {
+            "email": email,
+            "source": "vectoplan-app.auth_identity_client",
+        }
 
         try:
             response = requests.post(
@@ -1061,7 +958,7 @@ class AuthIdentityClient:
             return AuthIdentityResult.unavailable(
                 email,
                 code="auth_identity_request_failed",
-                message="Der Auth-/Registrierungsdienst konnte nicht erreicht werden.",
+                message="vectoplan-auth konnte nicht erreicht werden.",
                 source="http",
                 error=str(exc),
             )
@@ -1089,7 +986,7 @@ class AuthIdentityClient:
             return AuthIdentityResult.unavailable(
                 email,
                 code="auth_identity_access_denied",
-                message="Der Auth-/Registrierungsdienst hat den serverseitigen Zugriff verweigert.",
+                message="vectoplan-auth hat den serverseitigen Zugriff verweigert.",
                 source="remote",
                 status_code=status_code,
                 raw=data,
@@ -1099,7 +996,7 @@ class AuthIdentityClient:
             return AuthIdentityResult.unavailable(
                 email,
                 code="auth_identity_server_error",
-                message="Der Auth-/Registrierungsdienst meldet einen Serverfehler.",
+                message="vectoplan-auth meldet einen Serverfehler.",
                 source="remote",
                 status_code=status_code,
                 raw=data,
@@ -1111,7 +1008,7 @@ class AuthIdentityClient:
                 code=_safe_str(data.get("code"), default="auth_identity_http_error"),
                 message=_safe_str(
                     data.get("message"),
-                    default="Der Auth-/Registrierungsdienst meldet einen Fehler.",
+                    default="vectoplan-auth meldet einen Fehler.",
                 ),
                 source="remote",
                 status_code=status_code,
@@ -1134,7 +1031,7 @@ class AuthIdentityClient:
             return AuthIdentityResult.unavailable(
                 email,
                 code="auth_identity_parse_failed",
-                message="Die Antwort des Auth-/Registrierungsdienstes konnte nicht ausgewertet werden.",
+                message="Die Antwort von vectoplan-auth konnte nicht ausgewertet werden.",
                 source="remote",
                 error=str(exc),
                 status_code=status_code,
@@ -1164,7 +1061,7 @@ class AuthIdentityClient:
                 code=code,
                 message=_safe_str(
                     payload.get("message"),
-                    default="Der Auth-/Registrierungsdienst hat die Anfrage abgelehnt.",
+                    default="vectoplan-auth hat die Anfrage abgelehnt.",
                 ),
                 source=source,
                 raw=payload,
@@ -1209,7 +1106,7 @@ class AuthIdentityClient:
             return AuthIdentityResult.unavailable(
                 email,
                 code="auth_identity_missing_auth_user_id",
-                message="Der Auth-/Registrierungsdienst meldet einen User, aber keine auth_user_id.",
+                message="vectoplan-auth meldet einen User, aber keine auth_user_id.",
                 source=source,
                 raw=payload,
                 status_code=status_code,
@@ -1252,6 +1149,23 @@ class AuthIdentityClient:
             default=False,
         )
 
+        blocked = _safe_bool(
+            payload.get("blocked")
+            or payload.get("banned")
+            or identity.get("blocked")
+            or identity.get("banned"),
+            default=False,
+        )
+
+        blocked_reason = _first_non_empty(
+            payload.get("blocked_reason"),
+            payload.get("blockedReason"),
+            payload.get("ban_reason"),
+            identity.get("blocked_reason"),
+            identity.get("blockedReason"),
+            identity.get("ban_reason"),
+        )
+
         return AuthIdentityResult.registered_identity(
             email=email,
             auth_user_id=auth_user_id,
@@ -1259,61 +1173,11 @@ class AuthIdentityClient:
             account_plan=account_plan or None,
             account_status=account_status or None,
             can_use_bigdata=can_use_bigdata,
+            blocked=blocked,
+            blocked_reason=blocked_reason or None,
             source=source,
             raw=payload,
             status_code=status_code,
-        )
-
-    # ---------------------------------------------------------------------
-    # Dev lookup
-    # ---------------------------------------------------------------------
-
-    def _lookup_email_dev(self, email: str, source: str = "dev") -> AuthIdentityResult:
-        normalized = _normalize_email(email)
-
-        if self.config.dev_accept_all_registered:
-            return AuthIdentityResult.registered_identity(
-                email=normalized,
-                auth_user_id=_dev_auth_user_id_for_email(normalized),
-                display_name=_display_name_from_email(normalized),
-                account_plan="dev",
-                account_status="active",
-                can_use_bigdata=False,
-                source=source,
-                raw={
-                    "dev": True,
-                    "accept_all": True,
-                    "warning": "AUTH_IDENTITY_DEV_ACCEPT_ALL_REGISTERED is enabled.",
-                },
-            )
-
-        if normalized in self.config.dev_registered_emails:
-            return AuthIdentityResult.registered_identity(
-                email=normalized,
-                auth_user_id=_dev_auth_user_id_for_email(normalized),
-                display_name=_display_name_from_email(normalized),
-                account_plan="dev",
-                account_status="active",
-                can_use_bigdata=False,
-                source=source,
-                raw={
-                    "dev": True,
-                    "registered_email_allowlist": True,
-                },
-            )
-
-        return AuthIdentityResult.not_registered(
-            email=normalized,
-            source=source,
-            message=(
-                "Die E-Mail-Adresse ist im aktuellen Dev-/Platzhaltermodus "
-                "nicht als registrierter Account hinterlegt."
-            ),
-            raw={
-                "dev": True,
-                "registered_email_allowlist": sorted(self.config.dev_registered_emails),
-                "accept_all": False,
-            },
         )
 
     # ---------------------------------------------------------------------
@@ -1366,6 +1230,7 @@ class AuthIdentityClient:
             "invitation_url": invitation_url,
             "message": message,
             "metadata": _safe_dict(metadata),
+            "source": "vectoplan-app.auth_identity_client",
         }
 
         if identity is not None:
@@ -1389,7 +1254,7 @@ class AuthIdentityClient:
                 role=role,
                 auth_user_id=identity.auth_user_id if identity else None,
                 source="http",
-                message="Der externe Einladungsdienst konnte nicht erreicht werden.",
+                message="vectoplan-auth Einladungsversand konnte nicht erreicht werden.",
                 error=str(exc),
             )
 
@@ -1415,7 +1280,7 @@ class AuthIdentityClient:
                 source="remote",
                 message=_safe_str(
                     data.get("message"),
-                    default="Der externe Einladungsdienst meldet einen Fehler.",
+                    default="vectoplan-auth Einladungsversand meldet einen Fehler.",
                 ),
                 raw=data,
                 status_code=status_code,
@@ -1435,7 +1300,7 @@ class AuthIdentityClient:
                 source="remote",
                 message=_safe_str(
                     data.get("message"),
-                    default="Der externe Einladungsdienst hat die Anfrage abgelehnt.",
+                    default="vectoplan-auth hat den Einladungsversand abgelehnt.",
                 ),
                 raw=data,
                 status_code=status_code,
@@ -1465,64 +1330,10 @@ class AuthIdentityClient:
             source="remote",
             message=_safe_str(
                 data.get("message"),
-                default="Die Einladung wurde an den externen Einladungsdienst übergeben.",
+                default="Die Einladung wurde an vectoplan-auth übergeben.",
             ),
             raw=data,
             status_code=status_code,
-        )
-
-    def _dispatch_project_invitation_placeholder(
-        self,
-        email: str,
-        project_public_id: str,
-        role: str,
-        invited_by_auth_user_id: Optional[str],
-        invitation_id: Optional[str],
-        invitation_url: Optional[str],
-        message: Optional[str],
-        metadata: Optional[Mapping[str, Any]],
-        identity: Optional[AuthIdentityResult],
-    ) -> AuthInvitationDispatchResult:
-        generated_invitation_id = invitation_id or self._placeholder_invitation_id(
-            email=email,
-            project_public_id=project_public_id,
-            role=role,
-        )
-
-        raw = {
-            "placeholder": True,
-            "email": email,
-            "project_public_id": project_public_id,
-            "role": role,
-            "invited_by_auth_user_id": invited_by_auth_user_id,
-            "invitation_url": invitation_url,
-            "message_present": bool(_safe_str(message)),
-            "metadata": _safe_dict(metadata),
-            "note": (
-                "Kein echter Mail-/Auth-Einladungsversand. "
-                "Diese Antwort dient nur der aktuellen Entwicklungsphase."
-            ),
-        }
-
-        if identity is not None:
-            raw["identity"] = identity.to_dict()
-
-        return AuthInvitationDispatchResult(
-            ok=True,
-            code="invitation_placeholder_dispatched",
-            email=email,
-            project_public_id=project_public_id,
-            role=role,
-            invitation_id=generated_invitation_id,
-            auth_user_id=identity.auth_user_id if identity else None,
-            external_sent=False,
-            placeholder=True,
-            source="placeholder",
-            message=(
-                "Die Einladung wurde im Platzhaltermodus akzeptiert. "
-                "Es wurde noch keine echte E-Mail versendet."
-            ),
-            raw=raw,
         )
 
     # ---------------------------------------------------------------------
@@ -1555,7 +1366,6 @@ class AuthIdentityClient:
             if ttl <= 0:
                 return
 
-            # Im Cache keine mutable cached=True-Variante ablegen.
             cached_copy = AuthIdentityResult(
                 ok=result.ok,
                 code=result.code,
@@ -1566,6 +1376,8 @@ class AuthIdentityClient:
                 account_plan=result.account_plan,
                 account_status=result.account_status,
                 can_use_bigdata=result.can_use_bigdata,
+                blocked=result.blocked,
+                blocked_reason=result.blocked_reason,
                 source=result.source,
                 message=result.message,
                 raw=dict(result.raw or {}),
@@ -1577,28 +1389,10 @@ class AuthIdentityClient:
         except Exception:
             pass
 
-    def _placeholder_invitation_id(
-        self,
-        email: str,
-        project_public_id: str,
-        role: str,
-    ) -> str:
-        seed = "|".join(
-            [
-                _normalize_email(email),
-                _safe_str(project_public_id),
-                _safe_str(role),
-                str(int(time.time())),
-            ]
-        )
-        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
-        return "pinv_" + digest
-
 
 # ---------------------------------------------------------------------------
 # Module-level convenience API
 # ---------------------------------------------------------------------------
-
 
 def get_auth_identity_client(refresh: bool = False) -> AuthIdentityClient:
     """
@@ -1615,7 +1409,6 @@ def get_auth_identity_client(refresh: bool = False) -> AuthIdentityClient:
                 _CLIENT_SINGLETON = AuthIdentityClient()
             return _CLIENT_SINGLETON
     except Exception:
-        # Fallback ohne Singleton, damit Aufrufer nicht hart brechen.
         return AuthIdentityClient()
 
 
@@ -1697,7 +1490,7 @@ def dispatch_project_invitation_identity(
     require_registered: bool = True,
 ) -> Dict[str, Any]:
     """
-    Dict-Wrapper für späteren project_invitation_service.py.
+    Dict-Wrapper für project_invitation_service.py.
     """
     try:
         result = get_auth_identity_client().dispatch_project_invitation(
@@ -1741,5 +1534,6 @@ __all__ = [
     "get_auth_identity_status",
     "is_valid_email",
     "lookup_email_identity",
+    "normalize_email",
     "require_registered_email_identity",
 ]

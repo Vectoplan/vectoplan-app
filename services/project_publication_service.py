@@ -1,4 +1,6 @@
 # services/vectoplan-app/services/project_publication_service.py
+from __future__ import annotations
+
 """
 VECTOPLAN project publication service.
 
@@ -10,11 +12,15 @@ Zweck:
 - Bleibt kompatibel mit vorhandenen Projektfeldern wie visibility/is_public.
 - Speichert keine Fachdaten aus 3D/Map/2D/LV.
 - Erzeugt keine Benutzeraccounts.
+- Erzeugt keinen Default-User.
+- Kein Fallback auf AppUser id=1.
+- Demo-Projekte sind nie öffentlich/veröffentlichbar.
 
 Architektur:
 - vectoplan-app ist zuständig für Projektfrontend, Rollen, Sichtbarkeit,
   Veröffentlichungs-/Embed-Policy und Workspace-Orchestrierung.
-- Auth/Login/Registrierung/Abo/Bigdata-Zugriff liegen später in separaten Services.
+- vectoplan-auth ist zuständig für Login, Guest, Blocked/Banned, Account,
+  Plan, Rollen und Entitlements.
 - Fachliche Daten liegen in Editor, Chunk, OpenLayer, 2D, LV, Library usw.
 
 Begriffe:
@@ -27,8 +33,6 @@ Begriffe:
 - nie öffentlich:
     Admin, Team, Systemreferenzen, Berechtigungsverwaltung
 """
-
-from __future__ import annotations
 
 import datetime as _dt
 import json
@@ -62,9 +66,7 @@ except Exception:  # pragma: no cover
         try:
             from extensions import db  # type: ignore
         except Exception as exc:  # pragma: no cover
-            raise RuntimeError(
-                "project_publication_service requires SQLAlchemy db."
-            ) from exc
+            raise RuntimeError("project_publication_service requires SQLAlchemy db.") from exc
 
 
 try:
@@ -127,19 +129,12 @@ except Exception:  # pragma: no cover
 
 
 try:
-    from services.current_user import (  # type: ignore
-        get_current_user_context,
-        get_current_user_id,
-    )
+    from services.current_user import get_current_user_context  # type: ignore
 except Exception:  # pragma: no cover
     try:
-        from .current_user import (  # type: ignore
-            get_current_user_context,
-            get_current_user_id,
-        )
+        from .current_user import get_current_user_context  # type: ignore
     except Exception:
         get_current_user_context = None  # type: ignore
-        get_current_user_id = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +177,14 @@ PUBLICATION_WORKSPACES: Tuple[str, ...] = (
     WORKSPACE_VERSIONS,
 )
 
+DEMO_PUBLICATION_WORKSPACES: Tuple[str, ...] = (
+    WORKSPACE_PROJECT,
+    WORKSPACE_MAP,
+    WORKSPACE_EDITOR3D,
+    WORKSPACE_CAD2D,
+    WORKSPACE_LV,
+)
+
 NEVER_PUBLIC_WORKSPACES = {
     WORKSPACE_ADMIN,
     WORKSPACE_TEAM,
@@ -198,14 +201,12 @@ WORKSPACE_ALIASES = {
     "overview": WORKSPACE_PROJECT,
     "basis": WORKSPACE_PROJECT,
     "details": WORKSPACE_PROJECT,
-
     "map": WORKSPACE_MAP,
     "maps": WORKSPACE_MAP,
     "karte": WORKSPACE_MAP,
     "openlayer": WORKSPACE_MAP,
     "openlayers": WORKSPACE_MAP,
     "gis": WORKSPACE_MAP,
-
     "3d": WORKSPACE_EDITOR3D,
     "editor": WORKSPACE_EDITOR3D,
     "editor3d": WORKSPACE_EDITOR3D,
@@ -213,24 +214,20 @@ WORKSPACE_ALIASES = {
     "viewer3d": WORKSPACE_EDITOR3D,
     "viewer_3d": WORKSPACE_EDITOR3D,
     "world": WORKSPACE_EDITOR3D,
-
     "2d": WORKSPACE_CAD2D,
     "cad": WORKSPACE_CAD2D,
     "cad2d": WORKSPACE_CAD2D,
     "cad_2d": WORKSPACE_CAD2D,
     "plan": WORKSPACE_CAD2D,
     "plan2d": WORKSPACE_CAD2D,
-
     "lv": WORKSPACE_LV,
     "boq": WORKSPACE_LV,
     "leistungsverzeichnis": WORKSPACE_LV,
     "bill_of_quantities": WORKSPACE_LV,
-
     "versions": WORKSPACE_VERSIONS,
     "versionen": WORKSPACE_VERSIONS,
     "history": WORKSPACE_VERSIONS,
     "snapshots": WORKSPACE_VERSIONS,
-
     "admin": WORKSPACE_ADMIN,
     "management": WORKSPACE_ADMIN,
     "settings": WORKSPACE_SETTINGS,
@@ -288,7 +285,6 @@ DEFAULT_CACHE_TTL_SECONDS = 10
 # ---------------------------------------------------------------------------
 # Small safe helpers
 # ---------------------------------------------------------------------------
-
 
 def utcnow() -> _dt.datetime:
     try:
@@ -360,9 +356,10 @@ def _safe_str(value: Any, default: str = "", max_len: Optional[int] = None) -> s
 
 def _safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
     try:
-        if value is None or value == "":
+        if value is None or value == "" or isinstance(value, bool):
             return default
-        return int(value)
+        parsed = int(value)
+        return parsed if parsed > 0 else default
     except Exception:
         return default
 
@@ -473,10 +470,27 @@ def _maybe_iso(value: Any) -> Optional[str]:
         return None
 
 
+def _is_demo_project(project: Any) -> bool:
+    try:
+        if project is None:
+            return False
+
+        if _safe_bool(getattr(project, "is_demo", False), False):
+            return True
+
+        if _safe_str(getattr(project, "project_scope", ""), "", 40).lower() == "demo":
+            return True
+
+        metadata = _safe_dict(getattr(project, "metadata_json", None))
+        demo_meta = _safe_dict(metadata.get("vectoplan_demo"))
+        return _safe_bool(demo_meta.get("enabled"), False)
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # TTL cache
 # ---------------------------------------------------------------------------
-
 
 @dataclass
 class _CacheEntry:
@@ -572,7 +586,6 @@ def clear_project_publication_cache(project_id: Any = None) -> None:
 # Normalization
 # ---------------------------------------------------------------------------
 
-
 def normalize_publication_visibility(value: Any, default: str = VISIBILITY_PRIVATE) -> str:
     text = _safe_str(value, default=default, max_len=40).lower().replace("-", "_")
 
@@ -585,11 +598,8 @@ def normalize_publication_visibility(value: Any, default: str = VISIBILITY_PRIVA
         "members": VISIBILITY_PRIVATE,
         "member": VISIBILITY_PRIVATE,
         "team": VISIBILITY_PRIVATE,
-        # Wichtig: altes "shared" nicht automatisch öffentlich machen.
-        # Teilen über Mitglieder bleibt privat/projektbasiert.
         "shared": VISIBILITY_PRIVATE,
         "geteilt": VISIBILITY_PRIVATE,
-
         "unlisted": VISIBILITY_UNLISTED,
         "not_listed": VISIBILITY_UNLISTED,
         "nicht_gelistet": VISIBILITY_UNLISTED,
@@ -598,7 +608,6 @@ def normalize_publication_visibility(value: Any, default: str = VISIBILITY_PRIVA
         "linkshare": VISIBILITY_UNLISTED,
         "link_shared": VISIBILITY_UNLISTED,
         "share_link": VISIBILITY_UNLISTED,
-
         "public": VISIBILITY_PUBLIC,
         "öffentlich": VISIBILITY_PUBLIC,
         "oeffentlich": VISIBILITY_PUBLIC,
@@ -646,17 +655,6 @@ def normalize_published_workspaces(
     existing: Optional[Mapping[str, Any]] = None,
     default: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, bool]:
-    """
-    Normalisiert published_workspaces.
-
-    Akzeptiert:
-    - dict: {"map": true, "3d": false}
-    - list: ["project", "map"]
-    - string: "project,map,3d"
-    - None: existing oder default
-
-    Admin/Team/System/Rechte werden nie als publizierbar übernommen.
-    """
     result: Dict[str, bool] = {}
 
     base = _safe_dict(default) or dict(DEFAULT_DESIRED_WORKSPACES)
@@ -683,7 +681,6 @@ def normalize_published_workspaces(
     else:
         items = _safe_list(value)
 
-    # Wenn eine Liste übergeben wird, bedeutet Vorkommen = true.
     list_result = {key: False for key in PUBLICATION_WORKSPACES}
     for raw_item in items:
         key = normalize_workspace_key(raw_item)
@@ -718,31 +715,48 @@ def publication_enabled(
 # Actor and permission helpers
 # ---------------------------------------------------------------------------
 
+def _context_to_dict(value: Any) -> Dict[str, Any]:
+    try:
+        if value is None:
+            return {}
+        if hasattr(value, "to_dict") and callable(value.to_dict):
+            return _safe_dict(value.to_dict())
+        return _safe_dict(value)
+    except Exception:
+        return {}
+
 
 def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
+    """
+    Liefert den aktuellen Actor-Kontext.
+
+    Kein Default-User.
+    Kein Fallback auf id=1.
+    Explizites user_id wird nur als lokaler AppUser-Link verstanden.
+    """
     context: Dict[str, Any] = {}
 
     try:
         if get_current_user_context is not None:
-            context = _safe_dict(get_current_user_context())
+            try:
+                maybe_context = get_current_user_context(ensure=False)
+            except TypeError:
+                maybe_context = get_current_user_context()
+            context = _context_to_dict(maybe_context)
     except Exception:
         context = {}
 
-    if user_id is not None:
-        context["user_id"] = _safe_int(user_id)
-        context["id"] = _safe_int(user_id)
-
-    if not context.get("user_id") and not context.get("id"):
-        try:
-            if get_current_user_id is not None:
-                resolved_user_id = get_current_user_id()
-                if resolved_user_id is not None:
-                    context["user_id"] = _safe_int(resolved_user_id)
-                    context["id"] = _safe_int(resolved_user_id)
-        except Exception:
-            pass
+    explicit_user_id = _safe_int(user_id, default=None)
+    if explicit_user_id:
+        context["user_id"] = explicit_user_id
+        context["id"] = explicit_user_id
+        context.setdefault("persistent", True)
+        context.setdefault("authenticated", True)
+        context.setdefault("demo_mode", False)
 
     actor_user_id = _safe_int(context.get("user_id") or context.get("id"), default=None)
+
+    blocked = _safe_bool(context.get("blocked"), default=False)
 
     demo_mode = _safe_bool(
         context.get("demo_mode")
@@ -755,35 +769,72 @@ def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
         context.get("authenticated")
         or context.get("is_authenticated")
         or context.get("logged_in"),
-        default=bool(actor_user_id),
+        default=False,
+    )
+
+    persistent = _safe_bool(
+        context.get("persistent"),
+        default=bool(actor_user_id and authenticated and not demo_mode and not blocked),
+    )
+
+    if blocked or demo_mode or not persistent:
+        actor_user_id = None if user_id is None else actor_user_id
+
+    auth_user_id = _safe_str(
+        context.get("auth_user_id")
+        or context.get("authUserId")
+        or context.get("external_user_id")
+        or context.get("sub")
+        or context.get("subject"),
+        default="",
+        max_len=160,
     )
 
     return {
         **context,
         "user_id": actor_user_id,
         "id": actor_user_id,
-        "demo_mode": bool(demo_mode),
-        "authenticated": bool(authenticated),
+        "auth_user_id": auth_user_id or None,
+        "demo_mode": bool(demo_mode and not blocked),
+        "authenticated": bool(authenticated and not blocked),
+        "persistent": bool(persistent and actor_user_id and not blocked and not demo_mode),
+        "blocked": bool(blocked),
+        "blocked_reason": context.get("blocked_reason") or context.get("blockedReason"),
     }
 
 
 def _actor_user_id(actor_context: Optional[Mapping[str, Any]]) -> Optional[int]:
     data = _safe_dict(actor_context)
+    if _safe_bool(data.get("blocked"), False):
+        return None
+    if _safe_bool(data.get("demo_mode") or data.get("is_demo"), False):
+        return None
+    if not _safe_bool(data.get("persistent"), False):
+        return None
     return _safe_int(data.get("user_id") or data.get("id"), default=None)
 
 
 def _actor_is_demo(actor_context: Optional[Mapping[str, Any]]) -> bool:
     data = _safe_dict(actor_context)
+    if _safe_bool(data.get("blocked"), False):
+        return False
     return _safe_bool(data.get("demo_mode") or data.get("is_demo") or data.get("demo"), default=False)
+
+
+def _actor_is_blocked(actor_context: Optional[Mapping[str, Any]]) -> bool:
+    data = _safe_dict(actor_context)
+    return _safe_bool(data.get("blocked"), default=False)
 
 
 def _actor_is_authenticated(actor_context: Optional[Mapping[str, Any]]) -> bool:
     data = _safe_dict(actor_context)
+    if _actor_is_blocked(data):
+        return False
     return _safe_bool(
         data.get("authenticated")
         or data.get("is_authenticated")
         or data.get("logged_in"),
-        default=bool(_actor_user_id(data)),
+        default=False,
     )
 
 
@@ -792,6 +843,12 @@ def _project_owner_user_id(project: Any) -> Optional[int]:
 
 
 def _can_view_project(project: Any, actor_context: Optional[Mapping[str, Any]]) -> bool:
+    if _actor_is_blocked(actor_context):
+        return False
+
+    if _project_is_demo(project):
+        return _actor_is_demo(actor_context)
+
     actor_user_id = _actor_user_id(actor_context)
 
     if not actor_user_id:
@@ -805,10 +862,16 @@ def _can_view_project(project: Any, actor_context: Optional[Mapping[str, Any]]) 
 
     try:
         if get_project_permission_result is not None:
-            permission = get_project_permission_result(project, actor_user_id)
-            data = _safe_dict(permission)
+            try:
+                permission = get_project_permission_result(project, user_id=actor_user_id, allow_public_view=False)
+            except TypeError:
+                permission = get_project_permission_result(project, actor_user_id)
+
+            data = _safe_dict(permission.to_dict() if hasattr(permission, "to_dict") else permission)
+
             if _safe_bool(data.get("can_view"), default=False):
                 return True
+
             permissions = _safe_dict(data.get("permissions"))
             if _safe_bool(permissions.get("view"), default=False):
                 return True
@@ -825,6 +888,9 @@ def _can_view_project(project: Any, actor_context: Optional[Mapping[str, Any]]) 
 
 
 def _can_manage_project(project: Any, actor_context: Optional[Mapping[str, Any]]) -> bool:
+    if _actor_is_blocked(actor_context) or _actor_is_demo(actor_context) or _project_is_demo(project):
+        return False
+
     actor_user_id = _actor_user_id(actor_context)
 
     if not actor_user_id:
@@ -838,25 +904,26 @@ def _can_manage_project(project: Any, actor_context: Optional[Mapping[str, Any]]
 
     try:
         if require_project_permission is not None:
-            maybe = require_project_permission(project, "manage", user_id=actor_user_id)
-            if maybe is None:
-                return True
-
-            maybe_dict = _safe_dict(maybe)
-            if not maybe_dict:
-                return True
-
-            if _safe_bool(maybe_dict.get("ok"), default=True):
-                return True
+            try:
+                require_project_permission(project, "manage", user_id=actor_user_id, allow_public_view=False)
+            except TypeError:
+                require_project_permission(project, "manage", actor_user_id)
+            return True
     except Exception:
         pass
 
     try:
         if get_project_permission_result is not None:
-            permission = get_project_permission_result(project, actor_user_id)
-            data = _safe_dict(permission)
+            try:
+                permission = get_project_permission_result(project, user_id=actor_user_id, allow_public_view=False)
+            except TypeError:
+                permission = get_project_permission_result(project, actor_user_id)
+
+            data = _safe_dict(permission.to_dict() if hasattr(permission, "to_dict") else permission)
+
             if _safe_bool(data.get("can_manage"), default=False):
                 return True
+
             permissions = _safe_dict(data.get("permissions"))
             if _safe_bool(permissions.get("manage"), default=False):
                 return True
@@ -876,6 +943,8 @@ def _access_payload(project: Any, actor_context: Optional[Mapping[str, Any]]) ->
     return {
         "authenticated": _actor_is_authenticated(actor_context),
         "demo_mode": _actor_is_demo(actor_context),
+        "blocked": _actor_is_blocked(actor_context),
+        "blocked_reason": _safe_dict(actor_context).get("blocked_reason"),
         "user_id": _actor_user_id(actor_context),
         "can_view": _can_view_project(project, actor_context),
         "can_manage": _can_manage_project(project, actor_context),
@@ -885,7 +954,6 @@ def _access_payload(project: Any, actor_context: Optional[Mapping[str, Any]]) ->
 # ---------------------------------------------------------------------------
 # Project / policy resolving
 # ---------------------------------------------------------------------------
-
 
 def resolve_project(project_or_id: Any) -> Optional[Any]:
     if project_or_id is None:
@@ -934,7 +1002,7 @@ def _project_public_id(project: Any) -> str:
 
 
 def get_or_create_publication_policy(project: Any) -> Optional[Any]:
-    if project is None or ProjectEmbedPolicy is None:
+    if project is None or _project_is_demo(project) or ProjectEmbedPolicy is None:
         return None
 
     try:
@@ -1042,12 +1110,6 @@ def _set_json_attr(policy: Any, attr: str, value: Mapping[str, Any]) -> bool:
 
 
 def _publication_extra(policy: Any) -> Dict[str, Any]:
-    """
-    Liest zusätzliche Publication-Daten aus metadata_json/settings/service_payload.
-
-    Nicht alle bestehenden Models haben dieselben JSON-Felder. Deshalb wird
-    defensiv über mehrere mögliche Felder gelesen.
-    """
     if policy is None:
         return {}
 
@@ -1120,12 +1182,14 @@ def _desired_workspaces_from_policy(policy: Any) -> Dict[str, bool]:
 
 
 def _visibility_from_project(project: Any) -> str:
+    if _project_is_demo(project):
+        return VISIBILITY_PRIVATE
     raw = getattr(project, "visibility", VISIBILITY_PRIVATE)
     return normalize_publication_visibility(raw)
 
 
 def _apply_visibility_to_project(project: Any, visibility: str) -> None:
-    normalized = normalize_publication_visibility(visibility)
+    normalized = VISIBILITY_PRIVATE if _project_is_demo(project) else normalize_publication_visibility(visibility)
 
     try:
         if hasattr(project, "visibility"):
@@ -1184,7 +1248,6 @@ def _apply_policy(
         if field:
             _set_policy_value(policy, field, bool(desired.get(workspace, False)))
 
-    # Harte Sicherheitsgrenze: Admin/System/Team nie öffentlich.
     for forbidden in ("allow_admin", "allow_team", "allow_settings", "allow_system", "allow_permissions"):
         _set_policy_value(policy, forbidden, False)
 
@@ -1213,7 +1276,6 @@ def _apply_policy(
 # ---------------------------------------------------------------------------
 # Serialization
 # ---------------------------------------------------------------------------
-
 
 def build_workspace_publication_items(
     desired: Mapping[str, Any],
@@ -1250,6 +1312,33 @@ def build_workspace_publication_items(
     return result
 
 
+def _demo_publication_payload(project: Any, actor_context: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    effective = {key: False for key in PUBLICATION_WORKSPACES}
+    desired = {key: False for key in PUBLICATION_WORKSPACES}
+    access = _access_payload(project, actor_context)
+
+    return {
+        "ok": True,
+        "project_id": _project_id(project),
+        "project_public_id": _project_public_id(project),
+        "visibility": VISIBILITY_PRIVATE,
+        "is_public": False,
+        "is_unlisted": False,
+        "publication_enabled": False,
+        "published_workspaces": desired,
+        "effective_published_workspaces": effective,
+        "require_auth": False,
+        "require_project_permission": True,
+        "access": access,
+        "workspaces": build_workspace_publication_items(
+            desired=desired,
+            effective=effective,
+            include_never_public=True,
+        ),
+        "reason": "demo_projects_are_not_publishable",
+    }
+
+
 def build_publication_payload(
     project: Any,
     policy: Any,
@@ -1257,6 +1346,31 @@ def build_publication_payload(
     include_private: bool = False,
     for_public: bool = False,
 ) -> Dict[str, Any]:
+    if _project_is_demo(project):
+        payload = _demo_publication_payload(project, actor_context)
+
+        if for_public and not include_private:
+            return {
+                "ok": True,
+                "project_id": _project_public_id(project),
+                "project_public_id": _project_public_id(project),
+                "publication": {
+                    "visibility": VISIBILITY_PRIVATE,
+                    "is_public": False,
+                    "is_unlisted": False,
+                    "publication_enabled": False,
+                    "require_auth": False,
+                    "require_project_permission": True,
+                    "effective_published_workspaces": {
+                        key: False for key in PUBLICATION_WORKSPACES
+                    },
+                    "workspaces": payload["workspaces"],
+                    "reason": "demo_projects_are_not_publishable",
+                },
+            }
+
+        return payload
+
     visibility = _visibility_from_project(project)
     desired = _desired_workspaces_from_policy(policy)
     effective = effective_published_workspaces(visibility, desired)
@@ -1325,7 +1439,6 @@ def build_publication_payload(
 # Result object
 # ---------------------------------------------------------------------------
 
-
 @dataclass
 class ProjectPublicationServiceResult:
     ok: bool
@@ -1384,7 +1497,6 @@ def _result(
 # Audit
 # ---------------------------------------------------------------------------
 
-
 def _write_audit_event(
     project: Any,
     action: str,
@@ -1434,7 +1546,6 @@ def _write_audit_event(
 # Core service
 # ---------------------------------------------------------------------------
 
-
 class ProjectPublicationService:
     """
     Zustandsloser Service für Sichtbarkeit und Veröffentlichung von Workspaces.
@@ -1444,13 +1555,23 @@ class ProjectPublicationService:
         return {
             "ok": True,
             "service": "project_publication_service",
+            "phase": "vectoplan-auth-no-default-user",
+            "default_user_removed": True,
             "project_model_available": Project is not None,
             "embed_policy_model_available": ProjectEmbedPolicy is not None,
             "audit_model_available": ProjectAuditEvent is not None,
             "valid_visibilities": sorted(VALID_PUBLICATION_VISIBILITIES),
             "publication_workspaces": list(PUBLICATION_WORKSPACES),
+            "demo_publication_workspaces": list(DEMO_PUBLICATION_WORKSPACES),
             "never_public_workspaces": sorted(NEVER_PUBLIC_WORKSPACES),
             "cache_ttl_seconds": _cache_ttl_seconds(),
+            "rules": {
+                "auth_truth": "vectoplan-auth",
+                "creates_users": False,
+                "default_user": False,
+                "demo_publishable": False,
+                "blocked_access": False,
+            },
         }
 
     def get_publication(
@@ -1473,6 +1594,35 @@ class ProjectPublicationService:
         actor_context = get_actor_context(actor_user_id)
         access = _access_payload(project, actor_context)
 
+        if access.get("blocked"):
+            return _result(
+                ok=False,
+                code=_safe_str(access.get("blocked_reason"), "auth_blocked", 120),
+                message="Der Zugriff ist gesperrt.",
+                project=project,
+                access=access,
+                status_code=403,
+            )
+
+        if _project_is_demo(project):
+            publication = build_publication_payload(
+                project=project,
+                policy=None,
+                actor_context=actor_context,
+                include_private=include_private,
+                for_public=for_public,
+            )
+            return _result(
+                ok=True,
+                code="demo_project_not_publishable",
+                message="Demo-Projekte können nicht veröffentlicht werden.",
+                project=project,
+                policy=None,
+                publication=publication,
+                access=access,
+                status_code=200,
+            )
+
         if include_private and not access.get("can_manage"):
             return _result(
                 ok=False,
@@ -1484,8 +1634,6 @@ class ProjectPublicationService:
             )
 
         if not for_public and not include_private and not access.get("can_view") and not access.get("can_manage"):
-            # Normale interne Route: mindestens view.
-            # Öffentliche Routen sollen for_public=True verwenden.
             return _result(
                 ok=False,
                 code="project_permission_denied",
@@ -1543,8 +1691,8 @@ class ProjectPublicationService:
         Aktualisiert Sichtbarkeit und veröffentlichte Reiter.
 
         Nur can_manage darf diese Aktion ausführen.
-        Demo-Modus wird abgelehnt, weil Veröffentlichung eine persistente
-        Projekteinstellung ist.
+        Demo-Modus und Demo-Projekte werden abgelehnt, weil Veröffentlichung
+        eine persistente Projekteinstellung ist.
         """
         project = resolve_project(project_or_id)
         if project is None:
@@ -1559,7 +1707,17 @@ class ProjectPublicationService:
         actor_id = _actor_user_id(actor_context)
         access = _access_payload(project, actor_context)
 
-        if _actor_is_demo(actor_context):
+        if access.get("blocked"):
+            return _result(
+                ok=False,
+                code=_safe_str(access.get("blocked_reason"), "auth_blocked", 120),
+                message="Der Zugriff ist gesperrt.",
+                project=project,
+                access=access,
+                status_code=403,
+            )
+
+        if _project_is_demo(project) or _actor_is_demo(actor_context):
             return _result(
                 ok=False,
                 code="demo_mode_not_allowed",
@@ -1568,6 +1726,26 @@ class ProjectPublicationService:
                 access=access,
                 status_code=403,
                 data={"demo_mode": True},
+            )
+
+        if not _actor_is_authenticated(actor_context):
+            return _result(
+                ok=False,
+                code="authentication_required",
+                message="Für diese Aktion ist Login erforderlich.",
+                project=project,
+                access=access,
+                status_code=401,
+            )
+
+        if not actor_id or not _safe_bool(actor_context.get("persistent"), False):
+            return _result(
+                ok=False,
+                code="persistent_user_required",
+                message="Für diese Aktion ist eine lokale AppUser-Verknüpfung erforderlich.",
+                project=project,
+                access=access,
+                status_code=403,
             )
 
         if not access.get("can_manage"):
@@ -1627,8 +1805,6 @@ class ProjectPublicationService:
             require_auth = True
             require_project_permission = True
         else:
-            # Für unlisted/public ist default: veröffentlichte Reiter ohne
-            # Projektmitgliedschaft sichtbar. Auth kann später optional erzwungen werden.
             require_auth = _safe_bool(require_auth_raw, default=False)
             require_project_permission = _safe_bool(require_permission_raw, default=False)
 
@@ -1733,6 +1909,18 @@ class ProjectPublicationService:
                 status_code=404,
             )
 
+        if _project_is_demo(project):
+            actor_context = get_actor_context(actor_user_id)
+            return _result(
+                ok=False,
+                code="demo_mode_not_allowed",
+                message="Demo-Projekte können nicht veröffentlicht werden.",
+                project=project,
+                publication=build_publication_payload(project, None, actor_context, include_private=True),
+                access=_access_payload(project, actor_context),
+                status_code=403,
+            )
+
         policy = get_or_create_publication_policy(project)
         existing = _desired_workspaces_from_policy(policy)
 
@@ -1777,6 +1965,17 @@ class ProjectPublicationService:
         actor_context = get_actor_context(actor_user_id)
         access = _access_payload(project, actor_context)
 
+        if access.get("blocked"):
+            return _result(
+                ok=False,
+                code=_safe_str(access.get("blocked_reason"), "auth_blocked", 120),
+                message="Der Zugriff ist gesperrt.",
+                project=project,
+                access=access,
+                status_code=403,
+                data={"workspace": workspace_key or _safe_str(workspace)},
+            )
+
         if not workspace_key:
             return _result(
                 ok=False,
@@ -1786,6 +1985,24 @@ class ProjectPublicationService:
                 access=access,
                 status_code=404,
                 data={"workspace": _safe_str(workspace)},
+            )
+
+        if _project_is_demo(project):
+            allowed = bool(_actor_is_demo(actor_context) and not public_request and workspace_key in DEMO_PUBLICATION_WORKSPACES)
+
+            return _result(
+                ok=allowed,
+                code="demo_workspace_allowed" if allowed else "demo_workspace_not_allowed",
+                message="Demo-Workspace ist zugänglich." if allowed else "Dieser Workspace ist im Demo-Modus nicht verfügbar.",
+                project=project,
+                publication=build_publication_payload(project, None, actor_context, include_private=False),
+                access=access,
+                status_code=200 if allowed else 403,
+                data={
+                    "workspace": workspace_key,
+                    "demo": True,
+                    "access_source": "demo_project" if allowed else "demo_denied",
+                },
             )
 
         if workspace_key in NEVER_PUBLIC_WORKSPACES:
@@ -1843,6 +2060,7 @@ class ProjectPublicationService:
             or publication.get("publication", {}).get("require_auth"),
             default=visibility == VISIBILITY_PRIVATE,
         )
+
         require_project_permission = _safe_bool(
             publication.get("require_project_permission")
             or publication.get("publication", {}).get("require_project_permission"),
@@ -2029,6 +2247,7 @@ def can_access_project_workspace(
 
 __all__ = [
     "DEFAULT_DESIRED_WORKSPACES",
+    "DEMO_PUBLICATION_WORKSPACES",
     "NEVER_PUBLIC_WORKSPACES",
     "PUBLICATION_WORKSPACES",
     "ProjectPublicationService",

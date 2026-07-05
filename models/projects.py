@@ -12,7 +12,6 @@ from .base import (
     json_type,
     merge_dicts,
     normalize_status,
-    normalize_visibility,
     project_public_id,
     safe_bool,
     safe_dict,
@@ -30,15 +29,39 @@ PROJECT_SETUP_CONFIGURED = "configured"
 PROJECT_STATUS_ACTIVE = "active"
 PROJECT_STATUS_ARCHIVED = "archived"
 PROJECT_STATUS_DELETED = "deleted"
+PROJECT_STATUS_EXPIRED = "expired"
 
 PROJECT_VISIBILITY_PRIVATE = "private"
-PROJECT_VISIBILITY_SHARED = "shared"
+PROJECT_VISIBILITY_UNLISTED = "unlisted"
 PROJECT_VISIBILITY_PUBLIC = "public"
+
+# Legacy alias. Keep exported so older imports do not break.
+PROJECT_VISIBILITY_SHARED = PROJECT_VISIBILITY_UNLISTED
+
+PROJECT_SCOPE_PERSONAL = "personal"
+PROJECT_SCOPE_ACCOUNT = "account"
+PROJECT_SCOPE_DEMO = "demo"
 
 CHUNK_STATUS_DISABLED = "disabled"
 CHUNK_STATUS_PENDING = "pending"
 CHUNK_STATUS_READY = "ready"
 CHUNK_STATUS_ERROR = "error"
+
+VALID_PROJECT_SCOPES = frozenset(
+    {
+        PROJECT_SCOPE_PERSONAL,
+        PROJECT_SCOPE_ACCOUNT,
+        PROJECT_SCOPE_DEMO,
+    }
+)
+
+VALID_PROJECT_VISIBILITIES = frozenset(
+    {
+        PROJECT_VISIBILITY_PRIVATE,
+        PROJECT_VISIBILITY_UNLISTED,
+        PROJECT_VISIBILITY_PUBLIC,
+    }
+)
 
 VALID_CHUNK_STATUSES = frozenset(
     {
@@ -87,11 +110,9 @@ def _core_model_if_registered(model_name: str, table_name: str) -> Any:
     """
     Transitional guard.
 
-    While models/core.py still defines Project, this module can return that
-    already registered model instead of defining a duplicate SQLAlchemy table.
-
-    However, if the registered model is missing the chunk-provisioning columns,
-    this module defines its own extended model with extend_existing=True.
+    If models/core.py already registered Project, reuse it only when it has
+    the required auth/demo/chunk columns. Otherwise define the extended model
+    with extend_existing=True.
     """
     try:
         if not _metadata_has_table(table_name):
@@ -104,6 +125,14 @@ def _core_model_if_registered(model_name: str, table_name: str) -> Any:
             if model is not None and _model_has_columns(
                 model,
                 [
+                    "owner_user_id",
+                    "auth_owner_user_id",
+                    "auth_account_id",
+                    "project_scope",
+                    "is_demo",
+                    "demo_client_identity_id",
+                    "demo_session_id",
+                    "demo_expires_at",
                     "chunk_project_id",
                     "chunk_universe_id",
                     "chunk_world_id",
@@ -185,6 +214,9 @@ def normalize_project_status(value: Any, default: str = PROJECT_STATUS_ACTIVE) -
         if text in {"delete", "deleted", "removed"}:
             return PROJECT_STATUS_DELETED
 
+        if text in {"expire", "expired", "ttl_expired"}:
+            return PROJECT_STATUS_EXPIRED
+
         if text in {"active", "enabled", "live"}:
             return PROJECT_STATUS_ACTIVE
 
@@ -192,6 +224,71 @@ def normalize_project_status(value: Any, default: str = PROJECT_STATUS_ACTIVE) -
 
     except Exception:
         return default
+
+
+def normalize_project_visibility(value: Any, default: str = PROJECT_VISIBILITY_PRIVATE) -> str:
+    try:
+        text = safe_str(value, default, 80).strip().lower().replace("-", "_").replace(" ", "_")
+
+        aliases = {
+            "": default,
+            "private": PROJECT_VISIBILITY_PRIVATE,
+            "hidden": PROJECT_VISIBILITY_PRIVATE,
+            "owner": PROJECT_VISIBILITY_PRIVATE,
+            "personal": PROJECT_VISIBILITY_PRIVATE,
+            "shared": PROJECT_VISIBILITY_UNLISTED,
+            "link": PROJECT_VISIBILITY_UNLISTED,
+            "link_only": PROJECT_VISIBILITY_UNLISTED,
+            "unlisted": PROJECT_VISIBILITY_UNLISTED,
+            "public_link": PROJECT_VISIBILITY_UNLISTED,
+            "public": PROJECT_VISIBILITY_PUBLIC,
+            "published": PROJECT_VISIBILITY_PUBLIC,
+            "discoverable": PROJECT_VISIBILITY_PUBLIC,
+        }
+
+        normalized = aliases.get(text, text or default)
+
+        if normalized not in VALID_PROJECT_VISIBILITIES:
+            return default
+
+        return normalized
+
+    except Exception:
+        return default
+
+
+def normalize_project_scope(value: Any, *, is_demo: bool = False, auth_account_id: Any = None) -> str:
+    try:
+        if is_demo:
+            return PROJECT_SCOPE_DEMO
+
+        text = safe_str(value, "", 80).strip().lower().replace("-", "_").replace(" ", "_")
+
+        aliases = {
+            "": PROJECT_SCOPE_ACCOUNT if safe_str(auth_account_id, "", 160) else PROJECT_SCOPE_PERSONAL,
+            "user": PROJECT_SCOPE_PERSONAL,
+            "owner": PROJECT_SCOPE_PERSONAL,
+            "personal": PROJECT_SCOPE_PERSONAL,
+            "private": PROJECT_SCOPE_PERSONAL,
+            "account": PROJECT_SCOPE_ACCOUNT,
+            "org": PROJECT_SCOPE_ACCOUNT,
+            "organization": PROJECT_SCOPE_ACCOUNT,
+            "team": PROJECT_SCOPE_ACCOUNT,
+            "tenant": PROJECT_SCOPE_ACCOUNT,
+            "demo": PROJECT_SCOPE_DEMO,
+            "guest": PROJECT_SCOPE_DEMO,
+            "temporary": PROJECT_SCOPE_DEMO,
+        }
+
+        normalized = aliases.get(text, text or PROJECT_SCOPE_PERSONAL)
+
+        if normalized not in VALID_PROJECT_SCOPES:
+            return PROJECT_SCOPE_PERSONAL
+
+        return normalized
+
+    except Exception:
+        return PROJECT_SCOPE_DEMO if is_demo else PROJECT_SCOPE_PERSONAL
 
 
 def normalize_chunk_status(
@@ -233,17 +330,18 @@ def normalize_chunk_status(
         return CHUNK_STATUS_READY if has_refs else default
 
 
-def _has_text(value: Any) -> bool:
-    try:
-        return bool(safe_str(value, "", 2000))
-    except Exception:
-        return False
-
-
 def _clean_ref_id(value: Any, max_len: int = 160) -> Optional[str]:
     try:
         text = safe_str(value, "", max_len).strip()
         return text or None
+    except Exception:
+        return None
+
+
+def _clean_user_id(value: Any) -> Optional[int]:
+    try:
+        parsed = safe_int(value, 0, minimum=1)
+        return int(parsed) if parsed else None
     except Exception:
         return None
 
@@ -253,6 +351,13 @@ def _safe_route_hints(value: Any) -> Dict[str, Any]:
         return safe_dict(value)
     except Exception:
         return {}
+
+
+def _safe_datetime_iso(value: Any) -> Optional[str]:
+    try:
+        return isoformat(value)
+    except Exception:
+        return None
 
 
 def _chunk_payload_from_mapping(value: Any) -> Dict[str, Any]:
@@ -500,6 +605,10 @@ def _chunk_refs_to_service_ref(chunk_refs: Mapping[str, Any]) -> Dict[str, Any]:
         }
 
 
+# ─────────────────────────────────────────────────────────────
+# URL/path helpers
+# ─────────────────────────────────────────────────────────────
+
 def _public_project_url(public_id: Any) -> str:
     try:
         value = safe_str(public_id, "", 180)
@@ -524,20 +633,20 @@ def _project_editor_path(public_id: Any) -> str:
     try:
         value = safe_str(public_id, "", 180)
         if not value or value == "new":
-            return "/ui/editor"
-        return f"/ui/project/{value}/editor"
+            return "/ui/project/new"
+        return f"/ui/project/{value}/editor3d"
     except Exception:
-        return "/ui/editor"
+        return "/ui/project/new"
 
 
 def _project_map_path(public_id: Any) -> str:
     try:
         value = safe_str(public_id, "", 180)
         if not value or value == "new":
-            return "/ui/map"
+            return "/ui/project/new"
         return f"/ui/project/{value}/map"
     except Exception:
-        return "/ui/map"
+        return "/ui/project/new"
 
 
 def _project_cad2d_path(public_id: Any) -> str:
@@ -579,6 +688,7 @@ def build_project_paths(public_id: Any) -> Dict[str, str]:
             "projectPagePath": _project_workspace_path(value),
             "projectUrl": _project_workspace_path(value),
             "editorPagePath": _project_editor_path(value),
+            "editor3dPagePath": _project_editor_path(value),
             "initialEditorUrl": _project_editor_path(value),
             "mapPagePath": _project_map_path(value),
             "cad2dPagePath": _project_cad2d_path(value),
@@ -586,6 +696,7 @@ def build_project_paths(public_id: Any) -> Dict[str, str]:
             "cadEmbedJsonPath": _project_cad_embed_json_path(value),
             "adminPagePath": f"/ui/project/{value}/admin" if value != "new" else "",
             "lvPagePath": f"/ui/project/{value}/lv" if value != "new" else "",
+            "versionsPagePath": f"/ui/project/{value}/versions" if value != "new" else "",
         }
 
     except Exception:
@@ -605,14 +716,17 @@ def _define_project_model(*, extend_existing: bool = False):
         """
         App-owned project shell model.
 
-        This model is the app portal's central project reference.
-        It stores:
-        - owner/user/project metadata
-        - address and coordinates
-        - visibility and access lifecycle
-        - references to microservice resources
+        Stores:
+        - local owner FK for vectoplan-app only
+        - canonical auth owner references from vectoplan-auth
+        - auth account reference from vectoplan-auth
+        - demo/temporary project state
+        - address/project metadata
+        - service references into Chunk, 3D, Map, 2D/CAD, LV
 
-        It does not store:
+        Does not store:
+        - auth truth
+        - passwords/sessions/tokens
         - chunk contents
         - 3D world truth
         - OpenLayer feature data
@@ -633,7 +747,24 @@ def _define_project_model(*, extend_existing: bool = False):
             default=project_public_id,
         )
 
-        owner_user_id = db.Column(db.Integer, nullable=False, default=1, index=True)
+        # Local FK into app_users. Nullable because Guest/Demo has no real local user.
+        # Persistent project creation must set this explicitly from the local AppUser link.
+        owner_user_id = db.Column(db.Integer, nullable=True, index=True)
+
+        # Canonical auth references. These are not foreign keys in vectoplan-app.
+        auth_owner_user_id = db.Column(db.String(160), nullable=True, index=True)
+        auth_account_id = db.Column(db.String(160), nullable=True, index=True)
+        owner_subject_type = db.Column(db.String(40), nullable=True, default="user", index=True)
+
+        # Project scope separates personal, account and demo data.
+        project_scope = db.Column(db.String(40), nullable=False, default=PROJECT_SCOPE_PERSONAL, index=True)
+
+        # Demo project lifecycle. Demo projects must never become normal persistent projects.
+        is_demo = db.Column(db.Boolean, nullable=False, default=False, index=True)
+        demo_client_identity_id = db.Column(db.String(180), nullable=True, index=True)
+        demo_session_id = db.Column(db.String(180), nullable=True, index=True)
+        demo_expires_at = db.Column(db.DateTime, nullable=True, index=True)
+
         client_id = db.Column(db.String(80), nullable=True, index=True)
         conversation_id = db.Column(db.String(80), nullable=True, index=True)
 
@@ -700,7 +831,10 @@ def _define_project_model(*, extend_existing: bool = False):
 
         def __repr__(self) -> str:
             try:
-                return f"<Project id={self.id!r} public_id={self.public_id!r} name={self.name!r}>"
+                return (
+                    f"<Project id={self.id!r} public_id={self.public_id!r} "
+                    f"scope={self.project_scope!r} demo={self.is_demo!r} name={self.name!r}>"
+                )
             except Exception:
                 return "<Project>"
 
@@ -734,12 +868,26 @@ def _define_project_model(*, extend_existing: bool = False):
                 return False
 
         @property
+        def is_expired(self) -> bool:
+            try:
+                if self.status == PROJECT_STATUS_EXPIRED:
+                    return True
+
+                if self.is_demo and self.demo_expires_at is not None:
+                    return self.demo_expires_at <= utcnow()
+
+                return False
+            except Exception:
+                return False
+
+        @property
         def is_active(self) -> bool:
             try:
                 return (
                     self.status == PROJECT_STATUS_ACTIVE
                     and self.deleted_at is None
                     and self.archived_at is None
+                    and not self.is_expired
                 )
             except Exception:
                 return False
@@ -753,6 +901,20 @@ def _define_project_model(*, extend_existing: bool = False):
                 )
             except Exception:
                 return False
+
+        @property
+        def is_unlisted(self) -> bool:
+            try:
+                return self.visibility == PROJECT_VISIBILITY_UNLISTED
+            except Exception:
+                return False
+
+        @property
+        def is_private(self) -> bool:
+            try:
+                return self.visibility == PROJECT_VISIBILITY_PRIVATE
+            except Exception:
+                return True
 
         @property
         def has_coordinates(self) -> bool:
@@ -826,6 +988,18 @@ def _define_project_model(*, extend_existing: bool = False):
                 return False
 
         @property
+        def demo_remaining_seconds(self) -> Optional[int]:
+            try:
+                if not self.is_demo or self.demo_expires_at is None:
+                    return None
+
+                remaining = int((self.demo_expires_at - utcnow()).total_seconds())
+                return max(0, remaining)
+
+            except Exception:
+                return None
+
+        @property
         def chunk_refs(self) -> Dict[str, Any]:
             return _chunk_refs_from_sources(
                 direct_project_id=self.chunk_project_id,
@@ -843,8 +1017,6 @@ def _define_project_model(*, extend_existing: bool = False):
         def sync_chunk_refs(self) -> None:
             """
             Synchronize direct chunk columns with service_refs["chunk"] and metadata["chunk"].
-
-            This keeps legacy consumers and new service-link consumers aligned.
             """
             try:
                 refs = self.chunk_refs
@@ -970,6 +1142,106 @@ def _define_project_model(*, extend_existing: bool = False):
             except Exception:
                 pass
 
+        def mark_demo(
+            self,
+            *,
+            demo_client_identity_id: Any = None,
+            demo_session_id: Any = None,
+            demo_expires_at: Any = None,
+            reason: str = "",
+        ) -> None:
+            try:
+                self.is_demo = True
+                self.project_scope = PROJECT_SCOPE_DEMO
+                self.owner_user_id = None
+                self.auth_owner_user_id = None
+                self.auth_account_id = None
+                self.owner_subject_type = "guest"
+
+                self.demo_client_identity_id = _clean_ref_id(demo_client_identity_id, 180)
+                self.demo_session_id = _clean_ref_id(demo_session_id, 180)
+
+                if demo_expires_at is not None:
+                    self.demo_expires_at = demo_expires_at
+
+                self.visibility = PROJECT_VISIBILITY_PRIVATE
+                self.is_public = False
+
+                metadata = safe_dict(self.metadata_json)
+                demo_meta = safe_dict(metadata.get("vectoplan_demo"))
+                demo_meta.update(
+                    {
+                        "enabled": True,
+                        "reason": safe_str(reason, "", 500) or None,
+                        "marked_at": isoformat(utcnow()),
+                        "expires_at": isoformat(self.demo_expires_at),
+                    }
+                )
+                metadata["vectoplan_demo"] = demo_meta
+                self.metadata_json = metadata
+
+                self.touch()
+                self.normalize_lifecycle()
+
+            except Exception:
+                pass
+
+        def expire_demo(self, reason: str = "expired") -> None:
+            try:
+                if not self.is_demo:
+                    return
+
+                self.status = PROJECT_STATUS_EXPIRED
+                self.demo_expires_at = self.demo_expires_at or utcnow()
+
+                metadata = safe_dict(self.metadata_json)
+                demo_meta = safe_dict(metadata.get("vectoplan_demo"))
+                demo_meta.update(
+                    {
+                        "expired": True,
+                        "expired_at": isoformat(utcnow()),
+                        "expired_reason": safe_str(reason, "", 500) or "expired",
+                    }
+                )
+                metadata["vectoplan_demo"] = demo_meta
+                self.metadata_json = metadata
+
+                self.touch()
+
+            except Exception:
+                pass
+
+        def set_auth_owner(
+            self,
+            *,
+            owner_user_id: Any = None,
+            auth_owner_user_id: Any = None,
+            auth_account_id: Any = None,
+            account_scoped: bool = False,
+        ) -> None:
+            try:
+                self.owner_user_id = _clean_user_id(owner_user_id)
+                self.auth_owner_user_id = _clean_ref_id(auth_owner_user_id)
+                self.auth_account_id = _clean_ref_id(auth_account_id)
+                self.owner_subject_type = "user" if self.auth_owner_user_id else None
+
+                self.is_demo = False
+                self.demo_client_identity_id = None
+                self.demo_session_id = None
+                self.demo_expires_at = None
+
+                self.project_scope = normalize_project_scope(
+                    PROJECT_SCOPE_ACCOUNT if account_scoped or self.auth_account_id else PROJECT_SCOPE_PERSONAL,
+                    is_demo=False,
+                    auth_account_id=self.auth_account_id,
+                )
+
+                self.touch()
+                self.normalize_lifecycle()
+
+            except Exception:
+                pass
+
         def normalize_lifecycle(self) -> "Project":
             try:
                 if not self.public_id:
@@ -978,7 +1250,34 @@ def _define_project_model(*, extend_existing: bool = False):
                 self.name = safe_str(self.name, "Neues Projekt", 255) or "Neues Projekt"
                 self.description = safe_str(self.description, "", 10000) or None
 
-                self.owner_user_id = safe_int(self.owner_user_id, 1, minimum=1)
+                self.is_demo = safe_bool(self.is_demo, False)
+
+                self.owner_user_id = _clean_user_id(self.owner_user_id)
+                self.auth_owner_user_id = _clean_ref_id(self.auth_owner_user_id)
+                self.auth_account_id = _clean_ref_id(self.auth_account_id)
+                self.owner_subject_type = safe_str(self.owner_subject_type, "", 40) or ("guest" if self.is_demo else "user")
+
+                self.demo_client_identity_id = _clean_ref_id(self.demo_client_identity_id, 180)
+                self.demo_session_id = _clean_ref_id(self.demo_session_id, 180)
+
+                self.project_scope = normalize_project_scope(
+                    self.project_scope,
+                    is_demo=self.is_demo,
+                    auth_account_id=self.auth_account_id,
+                )
+
+                if self.project_scope == PROJECT_SCOPE_DEMO:
+                    self.is_demo = True
+
+                if self.is_demo:
+                    self.project_scope = PROJECT_SCOPE_DEMO
+                    self.owner_user_id = None
+                    self.auth_owner_user_id = None
+                    self.auth_account_id = None
+                    self.owner_subject_type = "guest"
+                    self.visibility = PROJECT_VISIBILITY_PRIVATE
+                    self.is_public = False
+
                 self.client_id = safe_str(self.client_id, "", 80) or None
                 self.conversation_id = safe_str(self.conversation_id, "", 80) or None
 
@@ -1035,11 +1334,15 @@ def _define_project_model(*, extend_existing: bool = False):
                 self.plan2d_id = safe_str(self.plan2d_id, "", 160) or None
                 self.lv_id = safe_str(self.lv_id, "", 160) or None
 
-                self.visibility = normalize_visibility(self.visibility, PROJECT_VISIBILITY_PRIVATE)
+                self.visibility = normalize_project_visibility(self.visibility, PROJECT_VISIBILITY_PRIVATE)
                 self.is_public = self.visibility == PROJECT_VISIBILITY_PUBLIC or safe_bool(self.is_public, False)
 
                 if self.is_public:
                     self.visibility = PROJECT_VISIBILITY_PUBLIC
+
+                if self.is_demo:
+                    self.visibility = PROJECT_VISIBILITY_PRIVATE
+                    self.is_public = False
 
                 self.setup_status = normalize_project_setup_status(self.setup_status, PROJECT_SETUP_DRAFT)
 
@@ -1048,15 +1351,18 @@ def _define_project_model(*, extend_existing: bool = False):
 
                 self.status = normalize_project_status(self.status, PROJECT_STATUS_ACTIVE)
 
+                if self.is_expired and self.status != PROJECT_STATUS_DELETED:
+                    self.status = PROJECT_STATUS_EXPIRED
+
                 if self.deleted_at is not None:
                     self.status = PROJECT_STATUS_DELETED
 
                 if self.archived_at is not None and self.status != PROJECT_STATUS_DELETED:
                     self.status = PROJECT_STATUS_ARCHIVED
 
-                self.archived_by_user_id = safe_int(self.archived_by_user_id, 0) or None
+                self.archived_by_user_id = _clean_user_id(self.archived_by_user_id)
                 self.archive_reason = safe_str(self.archive_reason, "", 2000) or None
-                self.transferred_from_user_id = safe_int(self.transferred_from_user_id, 0) or None
+                self.transferred_from_user_id = _clean_user_id(self.transferred_from_user_id)
                 self.sort_index = safe_int(self.sort_index, 0)
 
                 return self
@@ -1079,7 +1385,14 @@ def _define_project_model(*, extend_existing: bool = False):
                 if "chunk" in data:
                     self.sync_chunk_refs()
 
+                if "vectoplan_demo" in data:
+                    demo_meta = safe_dict(data.get("vectoplan_demo"))
+                    if safe_bool(demo_meta.get("enabled"), False):
+                        self.is_demo = True
+                        self.project_scope = PROJECT_SCOPE_DEMO
+
                 self.touch()
+                self.normalize_lifecycle()
 
             except Exception:
                 pass
@@ -1237,9 +1550,24 @@ def _define_project_model(*, extend_existing: bool = False):
                     "setup_status",
                     "status",
                     "visibility",
+                    "auth_owner_user_id",
+                    "auth_account_id",
+                    "owner_subject_type",
+                    "project_scope",
+                    "demo_client_identity_id",
+                    "demo_session_id",
                 ):
                     if field in data:
                         setattr(self, field, data.get(field))
+
+                if "owner_user_id" in data:
+                    self.owner_user_id = _clean_user_id(data.get("owner_user_id"))
+
+                if "is_demo" in data or "demo" in data:
+                    self.is_demo = safe_bool(data.get("is_demo", data.get("demo")), False)
+
+                if "demo_expires_at" in data:
+                    self.demo_expires_at = data.get("demo_expires_at")
 
                 if "chunkProjectId" in data:
                     self.chunk_project_id = _clean_ref_id(data.get("chunkProjectId"))
@@ -1326,7 +1654,7 @@ def _define_project_model(*, extend_existing: bool = False):
             try:
                 self.status = PROJECT_STATUS_ARCHIVED
                 self.archived_at = utcnow()
-                self.archived_by_user_id = safe_int(user_id, 0) or None
+                self.archived_by_user_id = _clean_user_id(user_id)
                 self.archive_reason = safe_str(reason, "", 2000) or None
                 self.touch()
             except Exception:
@@ -1334,6 +1662,9 @@ def _define_project_model(*, extend_existing: bool = False):
 
         def restore_archive(self) -> None:
             try:
+                if self.is_demo and self.is_expired:
+                    return
+
                 self.status = PROJECT_STATUS_ACTIVE
                 self.archived_at = None
                 self.archived_by_user_id = None
@@ -1342,29 +1673,44 @@ def _define_project_model(*, extend_existing: bool = False):
             except Exception:
                 pass
 
-        def transfer_ownership(self, new_owner_user_id: Any) -> None:
+        def transfer_ownership(
+            self,
+            *,
+            new_owner_user_id: Any = None,
+            new_auth_owner_user_id: Any = None,
+            new_auth_account_id: Any = None,
+        ) -> None:
             try:
-                old_owner = safe_int(self.owner_user_id, 0) or None
-                new_owner = safe_int(new_owner_user_id, 0, minimum=1)
-
-                if not new_owner:
+                if self.is_demo:
                     return
+
+                old_owner = _clean_user_id(self.owner_user_id)
+                new_owner = _clean_user_id(new_owner_user_id)
 
                 self.transferred_from_user_id = old_owner
                 self.owner_user_id = new_owner
+                self.auth_owner_user_id = _clean_ref_id(new_auth_owner_user_id) or self.auth_owner_user_id
+                self.auth_account_id = _clean_ref_id(new_auth_account_id) or self.auth_account_id
                 self.transferred_at = utcnow()
                 self.touch()
+                self.normalize_lifecycle()
 
             except Exception:
                 pass
 
         def set_visibility(self, visibility: Any = None, *, is_public: Optional[bool] = None) -> None:
             try:
+                if self.is_demo:
+                    self.visibility = PROJECT_VISIBILITY_PRIVATE
+                    self.is_public = False
+                    self.touch()
+                    return
+
                 if is_public is not None:
                     self.is_public = bool(is_public)
                     self.visibility = PROJECT_VISIBILITY_PUBLIC if self.is_public else PROJECT_VISIBILITY_PRIVATE
                 else:
-                    self.visibility = normalize_visibility(visibility, PROJECT_VISIBILITY_PRIVATE)
+                    self.visibility = normalize_project_visibility(visibility, PROJECT_VISIBILITY_PRIVATE)
                     self.is_public = self.visibility == PROJECT_VISIBILITY_PUBLIC
 
                 self.touch()
@@ -1406,11 +1752,23 @@ def _define_project_model(*, extend_existing: bool = False):
                     "displayName": self.display_name,
                     "description": self.description or "",
                     "owner_user_id": self.owner_user_id,
+                    "auth_owner_user_id": self.auth_owner_user_id,
+                    "auth_account_id": self.auth_account_id,
+                    "owner_subject_type": self.owner_subject_type,
+                    "project_scope": self.project_scope,
+                    "projectScope": self.project_scope,
+                    "is_demo": bool(self.is_demo),
+                    "isDemo": bool(self.is_demo),
+                    "demo_expires_at": isoformat(self.demo_expires_at),
+                    "demoExpiresAt": isoformat(self.demo_expires_at),
+                    "demo_remaining_seconds": self.demo_remaining_seconds,
+                    "demoRemainingSeconds": self.demo_remaining_seconds,
                     "client_id": self.client_id,
                     "conversation_id": self.conversation_id,
                     "chat_id": self.conversation_id,
                     "visibility": self.visibility,
                     "is_public": bool(self.is_public),
+                    "is_unlisted": self.is_unlisted,
                     "setup_status": self.setup_status,
                     "setupStatus": self.setup_status,
                     "setup_completed_at": isoformat(self.setup_completed_at),
@@ -1419,6 +1777,7 @@ def _define_project_model(*, extend_existing: bool = False):
                     "status": self.status,
                     "is_active": self.is_active,
                     "is_archived": self.is_archived,
+                    "is_expired": self.is_expired,
                     "is_deleted": self.is_deleted,
                     "created_at": isoformat(self.created_at),
                     "updated_at": isoformat(self.updated_at),
@@ -1484,6 +1843,9 @@ def _define_project_model(*, extend_existing: bool = False):
                             "projectPublicUrl": payload["paths"].get("projectPublicUrl"),
                             "projectPagePath": payload["paths"].get("projectPagePath"),
                             "projectUrl": payload["paths"].get("projectUrl"),
+                            "editorPagePath": payload["paths"].get("editorPagePath"),
+                            "editor3dPagePath": payload["paths"].get("editor3dPagePath"),
+                            "mapPagePath": payload["paths"].get("mapPagePath"),
                         }
                     )
 
@@ -1512,6 +1874,8 @@ def _define_project_model(*, extend_existing: bool = False):
                             "delete_reason": self.delete_reason,
                             "transferred_at": isoformat(self.transferred_at),
                             "transferred_from_user_id": self.transferred_from_user_id,
+                            "demo_client_identity_id": self.demo_client_identity_id,
+                            "demo_session_id": self.demo_session_id,
                             "chunk_last_error": safe_dict(self.chunk_last_error),
                             "chunkLastError": safe_dict(self.chunk_last_error),
                             "chunk_provisioned_at": isoformat(self.chunk_provisioned_at),
@@ -1527,6 +1891,7 @@ def _define_project_model(*, extend_existing: bool = False):
                     "public_id": getattr(self, "public_id", None),
                     "name": getattr(self, "name", "Projekt"),
                     "is_configured": False,
+                    "is_demo": bool(getattr(self, "is_demo", False)),
                     "chunk_ready": False,
                     "chunkReady": False,
                 }
@@ -1544,9 +1909,13 @@ def _define_project_model(*, extend_existing: bool = False):
 
                 public_id = self.public_id or str(self.id or "")
                 subtitle = (
-                    self.address_text
-                    or self.city
-                    or ("Projekt aktiv" if self.is_configured else "Projekt definieren")
+                    "Demo-Projekt"
+                    if self.is_demo
+                    else (
+                        self.address_text
+                        or self.city
+                        or ("Projekt aktiv" if self.is_configured else "Projekt definieren")
+                    )
                 )
 
                 is_active = False
@@ -1582,6 +1951,12 @@ def _define_project_model(*, extend_existing: bool = False):
                     "setup_status": self.setup_status,
                     "visibility": self.visibility,
                     "is_public": bool(self.is_public),
+                    "projectScope": self.project_scope,
+                    "project_scope": self.project_scope,
+                    "isDemo": bool(self.is_demo),
+                    "is_demo": bool(self.is_demo),
+                    "demoExpiresAt": isoformat(self.demo_expires_at),
+                    "demoRemainingSeconds": self.demo_remaining_seconds,
                     "chunkReady": chunk_refs.get("ready"),
                     "chunk_ready": chunk_refs.get("ready"),
                     "chunkStatus": chunk_refs.get("status"),
@@ -1601,6 +1976,13 @@ def _define_project_model(*, extend_existing: bool = False):
                 if include_meta:
                     item["meta"] = {
                         "owner_user_id": self.owner_user_id,
+                        "auth_owner_user_id": self.auth_owner_user_id,
+                        "auth_account_id": self.auth_account_id,
+                        "project_scope": self.project_scope,
+                        "is_demo": bool(self.is_demo),
+                        "demo_client_identity_id": self.demo_client_identity_id,
+                        "demo_session_id": self.demo_session_id,
+                        "demo_expires_at": isoformat(self.demo_expires_at),
                         "chunk": chunk_refs,
                         "chunk_project_id": chunk_refs.get("chunk_project_id"),
                         "chunk_universe_id": chunk_refs.get("chunk_universe_id"),
@@ -1618,6 +2000,7 @@ def _define_project_model(*, extend_existing: bool = False):
                     "title": getattr(self, "name", "Projekt"),
                     "href": "/",
                     "source": "fallback",
+                    "isDemo": bool(getattr(self, "is_demo", False)),
                     "chunkReady": False,
                     "chunk_ready": False,
                 }
@@ -1668,6 +2051,72 @@ def get_project_by_conversation_id(conversation_id: Any) -> Optional[Project]:
         return None
 
 
+def get_projects_by_owner_user_id(owner_user_id: Any, *, include_demo: bool = False) -> List[Project]:
+    try:
+        resolved_owner_user_id = _clean_user_id(owner_user_id)
+        if not resolved_owner_user_id:
+            return []
+
+        query = Project.query.filter(Project.owner_user_id == resolved_owner_user_id)
+
+        if not include_demo and hasattr(Project, "is_demo"):
+            query = query.filter(Project.is_demo.is_(False))
+
+        return list(query.order_by(Project.updated_at.desc()).all())
+
+    except Exception:
+        return []
+
+
+def get_projects_by_auth_owner_user_id(auth_owner_user_id: Any, *, include_demo: bool = False) -> List[Project]:
+    try:
+        value = safe_str(auth_owner_user_id, "", 160)
+        if not value:
+            return []
+
+        query = Project.query.filter(Project.auth_owner_user_id == value)
+
+        if not include_demo and hasattr(Project, "is_demo"):
+            query = query.filter(Project.is_demo.is_(False))
+
+        return list(query.order_by(Project.updated_at.desc()).all())
+
+    except Exception:
+        return []
+
+
+def get_projects_by_auth_account_id(auth_account_id: Any, *, include_demo: bool = False) -> List[Project]:
+    try:
+        value = safe_str(auth_account_id, "", 160)
+        if not value:
+            return []
+
+        query = Project.query.filter(Project.auth_account_id == value)
+
+        if not include_demo and hasattr(Project, "is_demo"):
+            query = query.filter(Project.is_demo.is_(False))
+
+        return list(query.order_by(Project.updated_at.desc()).all())
+
+    except Exception:
+        return []
+
+
+def get_demo_project_by_session_id(demo_session_id: Any) -> Optional[Project]:
+    try:
+        value = safe_str(demo_session_id, "", 180)
+        if not value:
+            return None
+
+        return Project.query.filter_by(
+            demo_session_id=value,
+            is_demo=True,
+        ).one_or_none()
+
+    except Exception:
+        return None
+
+
 def resolve_project(project_ref: Any) -> Optional[Project]:
     try:
         value = safe_str(project_ref, "", 180)
@@ -1707,6 +2156,11 @@ def serialize_project(project: Any, **kwargs: Any) -> Dict[str, Any]:
             "public_id": getattr(project, "public_id", None),
             "name": getattr(project, "name", "Projekt"),
             "description": getattr(project, "description", ""),
+            "owner_user_id": getattr(project, "owner_user_id", None),
+            "auth_owner_user_id": getattr(project, "auth_owner_user_id", None),
+            "auth_account_id": getattr(project, "auth_account_id", None),
+            "project_scope": getattr(project, "project_scope", None),
+            "is_demo": bool(getattr(project, "is_demo", False)),
             "conversation_id": getattr(project, "conversation_id", None),
             "is_configured": bool(getattr(project, "is_configured", False)),
             "chunk_ready": bool(getattr(project, "chunk_ready", False)),
@@ -1735,8 +2189,9 @@ def serialize_project_sidebar_item(project: Any, **kwargs: Any) -> Dict[str, Any
             "projectId": public_id,
             "public_id": public_id,
             "title": payload.get("name") or "Projekt",
-            "subtitle": payload.get("address_text") or payload.get("setup_status") or "Projekt",
+            "subtitle": "Demo-Projekt" if payload.get("is_demo") else payload.get("address_text") or payload.get("setup_status") or "Projekt",
             "href": _public_project_url(public_id),
+            "isDemo": bool(payload.get("is_demo")),
             "chunkReady": bool(payload.get("chunk_ready")),
             "chunkProjectId": payload.get("chunk_project_id"),
             "chunkWorldId": payload.get("chunk_world_id"),
@@ -1749,7 +2204,14 @@ def serialize_project_sidebar_item(project: Any, **kwargs: Any) -> Dict[str, Any
 
 def build_project(
     *,
-    owner_user_id: int = 1,
+    owner_user_id: Optional[int] = None,
+    auth_owner_user_id: Any = None,
+    auth_account_id: Any = None,
+    project_scope: str = PROJECT_SCOPE_PERSONAL,
+    is_demo: bool = False,
+    demo_client_identity_id: Any = None,
+    demo_session_id: Any = None,
+    demo_expires_at: Any = None,
     name: str = "",
     description: str = "",
     address_text: str = "",
@@ -1761,12 +2223,29 @@ def build_project(
     project = Project()
 
     try:
-        project.owner_user_id = safe_int(owner_user_id, 1, minimum=1)
+        project.owner_user_id = _clean_user_id(owner_user_id)
+        project.auth_owner_user_id = _clean_ref_id(auth_owner_user_id)
+        project.auth_account_id = _clean_ref_id(auth_account_id)
+        project.owner_subject_type = "guest" if is_demo else ("user" if project.auth_owner_user_id else None)
+
+        project.is_demo = safe_bool(is_demo, False)
+        project.project_scope = normalize_project_scope(
+            project_scope,
+            is_demo=project.is_demo,
+            auth_account_id=project.auth_account_id,
+        )
+
+        project.demo_client_identity_id = _clean_ref_id(demo_client_identity_id, 180)
+        project.demo_session_id = _clean_ref_id(demo_session_id, 180)
+        project.demo_expires_at = demo_expires_at
+
         project.name = safe_str(name, "Neues Projekt", 255) or "Neues Projekt"
         project.description = safe_str(description, "", 10000) or None
         project.address_text = safe_str(address_text, "", 2000) or None
-        project.visibility = normalize_visibility(visibility, PROJECT_VISIBILITY_PRIVATE)
+
+        project.visibility = normalize_project_visibility(visibility, PROJECT_VISIBILITY_PRIVATE)
         project.is_public = project.visibility == PROJECT_VISIBILITY_PUBLIC
+
         project.conversation_id = safe_str(conversation_id, "", 80) or None
         project.client_id = safe_str(client_id, "", 80) or None
 
@@ -1813,6 +2292,18 @@ def get_project_model_status() -> Dict[str, Any]:
             "chunk_provisioned_at",
         ]
 
+        required_auth_demo_columns = [
+            "owner_user_id",
+            "auth_owner_user_id",
+            "auth_account_id",
+            "owner_subject_type",
+            "project_scope",
+            "is_demo",
+            "demo_client_identity_id",
+            "demo_session_id",
+            "demo_expires_at",
+        ]
+
         return {
             "ok": True,
             "models": ["Project"],
@@ -1820,9 +2311,17 @@ def get_project_model_status() -> Dict[str, Any]:
             "count": count,
             "columns": columns,
             "chunkIntegrationReady": all(column in columns for column in required_chunk_columns),
+            "authDemoIntegrationReady": all(column in columns for column in required_auth_demo_columns),
+            "defaultOwnerRemoved": True,
+            "ownerUserIdNullable": True,
             "missingChunkColumns": [
                 column
                 for column in required_chunk_columns
+                if column not in columns
+            ],
+            "missingAuthDemoColumns": [
+                column
+                for column in required_auth_demo_columns
                 if column not in columns
             ],
         }
@@ -1833,6 +2332,7 @@ def get_project_model_status() -> Dict[str, Any]:
             "models": ["Project"],
             "tables": ["projects"],
             "error": str(exc),
+            "defaultOwnerRemoved": True,
         }
 
 
@@ -1843,9 +2343,16 @@ __all__ = [
     "PROJECT_STATUS_ACTIVE",
     "PROJECT_STATUS_ARCHIVED",
     "PROJECT_STATUS_DELETED",
+    "PROJECT_STATUS_EXPIRED",
     "PROJECT_VISIBILITY_PRIVATE",
+    "PROJECT_VISIBILITY_UNLISTED",
     "PROJECT_VISIBILITY_SHARED",
     "PROJECT_VISIBILITY_PUBLIC",
+    "PROJECT_SCOPE_PERSONAL",
+    "PROJECT_SCOPE_ACCOUNT",
+    "PROJECT_SCOPE_DEMO",
+    "VALID_PROJECT_SCOPES",
+    "VALID_PROJECT_VISIBILITIES",
     "CHUNK_STATUS_DISABLED",
     "CHUNK_STATUS_PENDING",
     "CHUNK_STATUS_READY",
@@ -1854,6 +2361,8 @@ __all__ = [
     "Project",
     "normalize_project_setup_status",
     "normalize_project_status",
+    "normalize_project_visibility",
+    "normalize_project_scope",
     "normalize_chunk_status",
     "is_configured_status",
     "build_chunk_refs",
@@ -1861,6 +2370,10 @@ __all__ = [
     "get_project_by_id",
     "get_project_by_public_id",
     "get_project_by_conversation_id",
+    "get_projects_by_owner_user_id",
+    "get_projects_by_auth_owner_user_id",
+    "get_projects_by_auth_account_id",
+    "get_demo_project_by_session_id",
     "resolve_project",
     "serialize_project",
     "serialize_project_sidebar_item",
