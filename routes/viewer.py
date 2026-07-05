@@ -9,7 +9,8 @@ Zweck:
 - Liefert context.json für Projekt-/Workspace-Shells.
 - Unterstützt neue Projektseite:
     templates/viewer/project.html
-- Unterstützt Demo-/Auth-Kontext.
+- Unterstützt vectoplan-auth-Kontext.
+- Unterstützt genau ein temporäres Demo-Projekt für Guests mit demo_project_access.
 - Schützt Admin-/Settings-Workspaces.
 - Prüft Public-/Unlisted-Workspace-Zugriff über project_publication_service.
 - Leitet externe Workspaces wie 3D und Map nach erfolgreicher Prüfung an
@@ -19,7 +20,10 @@ Zweck:
 Wichtig:
 - Diese Route speichert keine Projekt-/Chunk-/3D-/2D-/LV-Daten.
 - Diese Route erzeugt keine Benutzeraccounts.
-- Login/Registrierung/Abo liegen später im Auth-/Registrierungsdienst.
+- Diese Route erzeugt keinen Default-User.
+- Kein Fallback auf AppUser id=1.
+- Login, Registrierung, Account, Plan, Entitlements und Blocked/Banned liegen in vectoplan-auth.
+- Auth-Service-Ausfall ist 503 und kein echter User-Ban.
 - Browser-iframe/redirect nutzt PUBLIC_URL, niemals INTERNAL_URL.
 """
 
@@ -30,29 +34,47 @@ from flask import Blueprint, current_app, jsonify, make_response, redirect, rend
 from jinja2 import TemplateNotFound
 from werkzeug.wrappers import Response
 
+
+# ─────────────────────────────────────────────────────────────
+# Robust imports
+# ─────────────────────────────────────────────────────────────
+
 try:
     from services.current_user import (
-        ensure_default_user,
         get_current_user_context,
         get_current_user_id_optional,
         get_current_user_status,
+        get_platform_auth_context,
     )
 except Exception:  # pragma: no cover
-    ensure_default_user = None  # type: ignore
     get_current_user_status = None  # type: ignore
+    get_platform_auth_context = None  # type: ignore
 
     def get_current_user_id_optional() -> Optional[int]:  # type: ignore
-        return 1
+        return None
 
     def get_current_user_context(*args: Any, **kwargs: Any) -> Dict[str, Any]:  # type: ignore
         return {
-            "user_id": 1,
-            "id": 1,
-            "authenticated": True,
+            "user_id": None,
+            "id": None,
+            "authenticated": False,
             "demo_mode": False,
-            "persistent": True,
-            "source": "fallback",
+            "persistent": False,
+            "blocked": True,
+            "auth_unavailable": True,
+            "access_blocked": True,
+            "user_blocked": False,
+            "blocked_kind": "auth_unavailable",
+            "blocked_reason": "current_user_unavailable",
+            "denial_status_code": 503,
+            "source": "fallback_auth_unavailable",
         }
+
+
+try:
+    from services.auth_dependency_service import get_auth_dependency_status
+except Exception:  # pragma: no cover
+    get_auth_dependency_status = None  # type: ignore
 
 
 try:
@@ -95,20 +117,27 @@ except Exception:  # pragma: no cover
             code: str = "project_permission_denied",
             status_code: int = 403,
             permission: str = "",
+            project_id: Any = None,
+            user_id: Any = None,
         ) -> None:
             super().__init__(message)
             self.message = message
             self.code = code
             self.status_code = status_code
             self.permission = permission
+            self.project_id = project_id
+            self.user_id = user_id
 
         def to_dict(self) -> Dict[str, Any]:
             return {
                 "ok": False,
                 "error": self.message,
+                "message": self.message,
                 "code": self.code,
                 "status_code": self.status_code,
                 "permission": self.permission,
+                "project_id": self.project_id,
+                "user_id": self.user_id,
             }
 
 
@@ -152,6 +181,20 @@ except Exception:  # pragma: no cover
 
 
 try:
+    from services.demo_project_service import (
+        demo_project_public_payload,
+        ensure_demo_project_for_context,
+        get_current_demo_project,
+        is_demo_project as service_is_demo_project,
+    )
+except Exception:  # pragma: no cover
+    demo_project_public_payload = None  # type: ignore
+    ensure_demo_project_for_context = None  # type: ignore
+    get_current_demo_project = None  # type: ignore
+    service_is_demo_project = None  # type: ignore
+
+
+try:
     from services.workspace_embed_service import (
         build_editor3d_embed_result,
         build_map_embed_result,
@@ -166,7 +209,15 @@ except Exception:  # pragma: no cover
     get_workspace_embed_status = None  # type: ignore
 
     def is_external_workspace(value: Any) -> bool:  # type: ignore
-        return str(value or "").strip().lower().replace("-", "_") in {"3d", "editor", "editor3d", "editor_3d", "map", "karte", "openlayer"}
+        return str(value or "").strip().lower().replace("-", "_") in {
+            "3d",
+            "editor",
+            "editor3d",
+            "editor_3d",
+            "map",
+            "karte",
+            "openlayer",
+        }
 
 
 bp = Blueprint("viewer", __name__)
@@ -206,6 +257,14 @@ PUBLIC_WORKSPACES = {
     WORKSPACE_VERSIONS,
 }
 
+DEMO_WORKSPACES = {
+    WORKSPACE_PROJECT,
+    WORKSPACE_MAP,
+    WORKSPACE_EDITOR3D,
+    WORKSPACE_CAD2D,
+    WORKSPACE_LV,
+}
+
 EXTERNAL_REDIRECT_WORKSPACES = {
     WORKSPACE_EDITOR3D,
     WORKSPACE_MAP,
@@ -217,6 +276,7 @@ ADMIN_WORKSPACES = {
 
 WORKSPACE_TEMPLATE_MAP = {
     WORKSPACE_PROJECT: "viewer/project.html",
+    WORKSPACE_ADMIN: "viewer/project.html",
 }
 
 WORKSPACE_LABELS = {
@@ -227,6 +287,44 @@ WORKSPACE_LABELS = {
     WORKSPACE_LV: "LV",
     WORKSPACE_VERSIONS: "Versionen",
     WORKSPACE_ADMIN: "Admin",
+}
+
+AUTH_UNAVAILABLE_CODES = {
+    "auth_unavailable",
+    "auth_service_unavailable",
+    "service_unavailable",
+    "dependency_unavailable",
+    "upstream_unavailable",
+    "storage_unavailable",
+    "dns_failed",
+    "connection_refused",
+    "timeout",
+    "http_5xx",
+    "http_error",
+    "access_denied",
+    "invalid_payload",
+    "not_configured",
+    "request_failed",
+    "requests_unavailable",
+    "current_user_unavailable",
+    "viewer_current_user_unavailable",
+}
+
+USER_BLOCKED_CODES = {
+    "blocked",
+    "banned",
+    "user_blocked",
+    "user_banned",
+    "account_blocked",
+    "account_banned",
+    "subscription_blocked",
+    "plan_blocked",
+    "security_blocked",
+    "disabled",
+    "inactive",
+    "suspended",
+    "deleted",
+    "locked",
 }
 
 
@@ -254,7 +352,10 @@ def _safe_int(value: Any, default: int = 0) -> int:
     try:
         if value is None or isinstance(value, bool):
             return default
-        return int(str(value).strip())
+        text = str(value).strip()
+        if not text:
+            return default
+        return int(text)
     except Exception:
         return default
 
@@ -269,10 +370,10 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
 
         text = _safe_str(value, "", 40).lower()
 
-        if text in {"1", "true", "yes", "y", "on", "ja", "enabled"}:
+        if text in {"1", "true", "yes", "y", "on", "ja", "enabled", "enable", "active", "ok"}:
             return True
 
-        if text in {"0", "false", "no", "n", "off", "nein", "disabled"}:
+        if text in {"0", "false", "no", "n", "off", "nein", "disabled", "disable", "inactive", "error", "failed"}:
             return False
 
         return default
@@ -337,7 +438,9 @@ def _apply_no_cache_headers(response: Response) -> Response:
 
 
 def _json_response(payload: Mapping[str, Any], status: int = 200) -> Response:
-    response = jsonify(dict(payload))
+    body = dict(payload)
+    body.setdefault("status_code", int(status))
+    response = jsonify(body)
     response.status_code = int(status)
     return _apply_no_cache_headers(response)
 
@@ -390,11 +493,29 @@ def _wants_json() -> bool:
         if _safe_str(request.args.get("format"), "", 20).lower() == "json":
             return True
 
+        if request.headers.get("X-Requested-With", "").lower() in {"xmlhttprequest", "fetch", "service"}:
+            return True
+
         accept = _safe_str(request.headers.get("Accept"), "", 500).lower()
         return "application/json" in accept and "text/html" not in accept
 
     except Exception:
         return False
+
+
+def _error_title(status: int, code: str) -> str:
+    if status == 503 or code in AUTH_UNAVAILABLE_CODES:
+        return "Auth-Service nicht erreichbar"
+
+    return {
+        401: "Login erforderlich",
+        403: "Zugriff nicht erlaubt",
+        404: "Nicht gefunden",
+        409: "Projekt nicht bereit",
+        423: "Zugriff gesperrt",
+        502: "Workspace nicht erreichbar",
+        503: "Workspace deaktiviert",
+    }.get(status, "Fehler")
 
 
 def _error_response(
@@ -407,18 +528,18 @@ def _error_response(
     if _wants_json():
         return _json_error(message, status, code=code, extra=extra)
 
-    title = {
-        401: "Login erforderlich",
-        403: "Zugriff nicht erlaubt",
-        404: "Nicht gefunden",
-        409: "Projekt nicht bereit",
-        502: "Workspace nicht erreichbar",
-        503: "Workspace deaktiviert",
-    }.get(status, "Fehler")
+    title = _error_title(status, code)
 
     extra_dict = _safe_dict(extra)
     project = _safe_dict(extra_dict.get("project", {}))
     project_name = _safe_str(project.get("name"), "Projekt", 200)
+
+    auth_unavailable_note = ""
+    if status == 503 or code in AUTH_UNAVAILABLE_CODES:
+        auth_unavailable_note = (
+            "<p>Das ist kein Benutzer-Ban. Die App kann den zentralen Auth-Service "
+            "aktuell nicht erreichen und sperrt deshalb fail-closed.</p>"
+        )
 
     html = f"""<!doctype html>
 <html lang="de">
@@ -451,7 +572,7 @@ def _error_response(
       line-height: 1.15;
     }}
     p {{
-      margin: 0;
+      margin: 0 0 12px;
       color: #5b647a;
       line-height: 1.5;
     }}
@@ -470,7 +591,8 @@ def _error_response(
   <main>
     <h1>{escape(title)}</h1>
     <p>{escape(message)}</p>
-    <p class="meta">{escape(project_name)} · <code>{escape(code)}</code></p>
+    {auth_unavailable_note}
+    <p class="meta">{escape(project_name)} · Status {status} · <code>{escape(code)}</code></p>
   </main>
 </body>
 </html>"""
@@ -492,19 +614,116 @@ def _current_user_payload(*, ensure: bool = False) -> Dict[str, Any]:
         return _safe_dict(context)
 
     except Exception:
-        user_id = _current_user_id_optional()
         return {
-            "user_id": user_id,
-            "id": user_id,
-            "authenticated": bool(user_id),
+            "user_id": None,
+            "id": None,
+            "authenticated": False,
             "demo_mode": False,
-            "persistent": bool(user_id),
-            "source": "viewer_route_fallback",
+            "persistent": False,
+            "blocked": True,
+            "auth_unavailable": True,
+            "access_blocked": True,
+            "user_blocked": False,
+            "blocked_kind": "auth_unavailable",
+            "blocked_reason": "viewer_current_user_unavailable",
+            "denial_status_code": 503,
+            "source": "viewer_route_fallback_auth_unavailable",
         }
+
+
+def _platform_auth_context() -> Any:
+    try:
+        if callable(get_platform_auth_context):
+            try:
+                return get_platform_auth_context(force_refresh=False)
+            except TypeError:
+                return get_platform_auth_context()
+    except Exception:
+        return None
+
+    return None
+
+
+def _context_code(current_user: Optional[Mapping[str, Any]] = None) -> str:
+    data = _safe_dict(current_user) if current_user is not None else _current_user_payload(ensure=False)
+    return _safe_str(
+        data.get("blocked_reason")
+        or data.get("blockedReason")
+        or data.get("reason_code")
+        or data.get("reasonCode")
+        or data.get("auth_state")
+        or data.get("authState")
+        or data.get("code"),
+        "",
+        160,
+    ).lower()
+
+
+def _is_auth_unavailable_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
+    data = _safe_dict(current_user) if current_user is not None else _current_user_payload(ensure=False)
+    code = _context_code(data)
+    blocked_kind = _safe_str(data.get("blocked_kind") or data.get("blockedKind"), "", 80).lower()
+    status = _safe_int(data.get("denial_status_code") or data.get("denialStatusCode") or data.get("status_code"), 0)
+
+    return bool(
+        _safe_bool(data.get("auth_unavailable") or data.get("authUnavailable"), False)
+        or blocked_kind == "auth_unavailable"
+        or code in AUTH_UNAVAILABLE_CODES
+        or status == 503
+    )
+
+
+def _is_user_blocked_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
+    data = _safe_dict(current_user) if current_user is not None else _current_user_payload(ensure=False)
+    code = _context_code(data)
+    blocked_kind = _safe_str(data.get("blocked_kind") or data.get("blockedKind"), "", 80).lower()
+
+    return bool(
+        not _is_auth_unavailable_context(data)
+        and (
+            _safe_bool(data.get("user_blocked") or data.get("userBlocked"), False)
+            or blocked_kind == "user_blocked"
+            or code in USER_BLOCKED_CODES
+        )
+    )
+
+
+def _is_access_blocked_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
+    data = _safe_dict(current_user) if current_user is not None else _current_user_payload(ensure=False)
+    return bool(
+        _is_auth_unavailable_context(data)
+        or _is_user_blocked_context(data)
+        or _safe_bool(data.get("access_blocked") or data.get("accessBlocked"), False)
+        or _safe_bool(data.get("blocked"), False)
+    )
+
+
+def _context_status_code(current_user: Optional[Mapping[str, Any]] = None) -> int:
+    data = _safe_dict(current_user) if current_user is not None else _current_user_payload(ensure=False)
+
+    if _is_auth_unavailable_context(data):
+        return 503
+
+    status = _safe_int(data.get("denial_status_code") or data.get("denialStatusCode") or data.get("status_code"), 0)
+    if status > 0:
+        return status
+
+    if _is_user_blocked_context(data) or _is_access_blocked_context(data):
+        return 403
+
+    if not _safe_bool(data.get("authenticated") or data.get("is_authenticated") or data.get("isAuthenticated"), False):
+        return 401
+
+    return 403
 
 
 def _current_user_id_optional() -> Optional[int]:
     try:
+        current_user = _current_user_payload(ensure=False)
+
+        if not _is_persistent_context(current_user):
+            return None
+
         value = get_current_user_id_optional()
         parsed = _safe_int(value, 0)
         return parsed if parsed > 0 else None
@@ -512,35 +731,111 @@ def _current_user_id_optional() -> Optional[int]:
         return None
 
 
+def _is_blocked_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
+    return _is_access_blocked_context(current_user)
+
+
 def _is_demo_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
     data = _safe_dict(current_user) if current_user is not None else _current_user_payload(ensure=False)
-    return _safe_bool(data.get("demo_mode") or data.get("is_demo") or data.get("demo"), False)
+
+    if _is_access_blocked_context(data):
+        return False
+
+    return bool(
+        _safe_bool(data.get("demo_mode") or data.get("is_demo") or data.get("demo"), False)
+        and _safe_bool(data.get("can_demo") or data.get("canDemo"), True)
+    )
 
 
 def _is_persistent_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
     data = _safe_dict(current_user) if current_user is not None else _current_user_payload(ensure=False)
-    return _safe_bool(
-        data.get("persistent"),
-        default=bool(data.get("user_id") or data.get("id")) and not _is_demo_context(data),
+
+    if _is_access_blocked_context(data):
+        return False
+
+    if _is_demo_context(data):
+        return False
+
+    user_id = _safe_int(data.get("user_id") or data.get("userId") or data.get("id"), 0)
+
+    return bool(
+        user_id > 0
+        and _safe_bool(data.get("persistent"), False)
+        and _safe_bool(data.get("authenticated") or data.get("is_authenticated") or data.get("isAuthenticated"), False)
+    )
+
+
+def _auth_dependency_payload() -> Dict[str, Any]:
+    try:
+        if callable(get_auth_dependency_status):
+            return _safe_dict(get_auth_dependency_status(include_private=False))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "code": "auth_dependency_status_failed",
+            "error": str(exc),
+        }
+
+    return {
+        "ok": False,
+        "code": "auth_dependency_status_unavailable",
+    }
+
+
+def _auth_error_if_blocked(current_user: Mapping[str, Any]) -> Optional[Response]:
+    if not _is_access_blocked_context(current_user):
+        return None
+
+    if _is_auth_unavailable_context(current_user):
+        return _error_response(
+            "vectoplan-auth ist nicht erreichbar.",
+            503,
+            code=_context_code(current_user) or "auth_service_unavailable",
+            extra={
+                "auth": _safe_dict(current_user),
+                "auth_unavailable": True,
+                "blocked": True,
+                "blocked_kind": "auth_unavailable",
+                "auth_dependency": _auth_dependency_payload(),
+            },
+        )
+
+    if _is_user_blocked_context(current_user):
+        return _error_response(
+            "Dieser Zugang ist gesperrt.",
+            403,
+            code=_context_code(current_user) or "auth_blocked",
+            extra={
+                "auth": _safe_dict(current_user),
+                "blocked": True,
+                "blocked_kind": "user_blocked",
+            },
+        )
+
+    return _error_response(
+        "Der Zugriff ist gesperrt.",
+        _context_status_code(current_user),
+        code=_context_code(current_user) or "access_blocked",
+        extra={
+            "auth": _safe_dict(current_user),
+            "blocked": True,
+            "blocked_kind": _safe_str(current_user.get("blocked_kind"), "access_blocked", 80),
+        },
     )
 
 
 @bp.before_request
 def _viewer_before_request() -> None:
+    """
+    Preload current auth context only.
+
+    No default user creation.
+    No local placeholder identity.
+    """
     try:
-        current_user = _current_user_payload(ensure=False)
-
-        if _is_demo_context(current_user):
-            return
-
-        if not _is_persistent_context(current_user):
-            return
-
-        if ensure_default_user is not None:
-            ensure_default_user()
-
+        _current_user_payload(ensure=False)
     except Exception as exc:
-        _log_warning("viewer ensure_default_user failed: %s", exc.__class__.__name__)
+        _log_warning("viewer auth context preload failed: %s", exc.__class__.__name__)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -613,11 +908,47 @@ def _is_project_configured(project_payload: Mapping[str, Any]) -> bool:
         return False
 
 
+def _is_demo_project(project: Any = None, project_payload: Optional[Mapping[str, Any]] = None) -> bool:
+    try:
+        if project is not None:
+            if callable(service_is_demo_project):
+                try:
+                    if service_is_demo_project(project):
+                        return True
+                except Exception:
+                    pass
+
+            if _safe_bool(getattr(project, "is_demo", False), False):
+                return True
+
+            if _safe_str(getattr(project, "project_scope", ""), "", 80).lower() == "demo":
+                return True
+
+            metadata = _safe_dict(getattr(project, "metadata_json", None))
+            demo_meta = _safe_dict(metadata.get("vectoplan_demo"))
+            if _safe_bool(demo_meta.get("enabled"), False):
+                return True
+
+        payload = _safe_dict(project_payload)
+        return _safe_bool(
+            payload.get("is_demo")
+            or payload.get("isDemo")
+            or payload.get("demo_mode")
+            or payload.get("demoMode"),
+            False,
+        )
+
+    except Exception:
+        return False
+
+
 def _default_new_project_payload(current_user: Mapping[str, Any]) -> Dict[str, Any]:
     demo_mode = _is_demo_context(current_user)
     persistent = _is_persistent_context(current_user)
+    blocked = _is_access_blocked_context(current_user)
 
-    can_edit = bool(persistent and not demo_mode)
+    can_view = not blocked
+    can_edit = bool(persistent and not demo_mode and not blocked)
     can_manage = bool(can_edit)
 
     return {
@@ -646,11 +977,13 @@ def _default_new_project_payload(current_user: Mapping[str, Any]) -> Dict[str, A
         "isNew": True,
         "demo_mode": demo_mode,
         "demoMode": demo_mode,
+        "blocked": blocked,
+        "auth_unavailable": _is_auth_unavailable_context(current_user),
         "access": {
             "role": "owner" if can_manage else "viewer",
             "source": "new_project_context",
             "permissions": {
-                "view": True,
+                "view": can_view,
                 "edit": can_edit,
                 "manage": can_manage,
                 "delete": False,
@@ -662,7 +995,7 @@ def _default_new_project_payload(current_user: Mapping[str, Any]) -> Dict[str, A
                 "manage_team": can_manage,
                 "view_admin": can_manage,
             },
-            "can_view": True,
+            "can_view": can_view,
             "can_edit": can_edit,
             "can_manage": can_manage,
             "can_delete": False,
@@ -677,6 +1010,9 @@ def _default_new_project_payload(current_user: Mapping[str, Any]) -> Dict[str, A
         "publication": {
             "visibility": "private",
             "publication_enabled": False,
+            "published": False,
+            "public": False,
+            "is_public": False,
             "published_workspaces": {
                 "project": False,
                 "map": False,
@@ -693,7 +1029,7 @@ def _default_new_project_payload(current_user: Mapping[str, Any]) -> Dict[str, A
                 "lv": False,
                 "versions": False,
             },
-            "require_auth": True,
+            "require_auth": not demo_mode,
             "require_project_permission": True,
         },
         "members": [],
@@ -717,6 +1053,59 @@ def _resolve_project_object(project_id: Any) -> Optional[Any]:
         return resolve_project(project_id)
 
     except Exception:
+        return None
+
+
+def _platform_context_allows_demo(platform_context: Any) -> bool:
+    try:
+        if platform_context is None:
+            return False
+        if bool(getattr(platform_context, "auth_unavailable", False)):
+            return False
+        if bool(getattr(platform_context, "access_blocked", False)):
+            return False
+        return bool(getattr(platform_context, "can_demo", False))
+    except Exception:
+        return False
+
+
+def _load_demo_project() -> Optional[Any]:
+    try:
+        platform_context = _platform_auth_context()
+
+        if not _platform_context_allows_demo(platform_context):
+            return None
+
+        if callable(get_current_demo_project):
+            try:
+                result = get_current_demo_project(
+                    context=platform_context,
+                    create=True,
+                    commit=True,
+                )
+            except TypeError:
+                result = get_current_demo_project()
+
+            if getattr(result, "ok", False) and getattr(result, "project", None) is not None:
+                return result.project
+
+        if callable(ensure_demo_project_for_context):
+            try:
+                result = ensure_demo_project_for_context(
+                    context=platform_context,
+                    reset=False,
+                    commit=True,
+                )
+            except TypeError:
+                result = ensure_demo_project_for_context()
+
+            if getattr(result, "ok", False) and getattr(result, "project", None) is not None:
+                return result.project
+
+        return None
+
+    except Exception as exc:
+        _log_warning("load demo project failed: %s", exc.__class__.__name__)
         return None
 
 
@@ -750,6 +1139,9 @@ def _can_manage(project: Any, user_id: Optional[int]) -> bool:
         if project is None or not user_id:
             return False
 
+        if _is_demo_project(project):
+            return False
+
         if can_manage_project is not None:
             return bool(can_manage_project(project, user_id))
     except Exception:
@@ -760,12 +1152,122 @@ def _can_manage(project: Any, user_id: Optional[int]) -> bool:
     return _safe_bool(access.get("can_manage") or permissions.get("manage"), False)
 
 
+def _demo_publication_payload() -> Dict[str, Any]:
+    return {
+        "visibility": "private",
+        "publication_enabled": False,
+        "published": False,
+        "public": False,
+        "is_public": False,
+        "published_workspaces": {
+            "project": False,
+            "map": False,
+            "editor3d": False,
+            "cad2d": False,
+            "lv": False,
+            "versions": False,
+        },
+        "effective_published_workspaces": {
+            "project": False,
+            "map": False,
+            "editor3d": False,
+            "cad2d": False,
+            "lv": False,
+            "versions": False,
+        },
+        "require_auth": False,
+        "require_project_permission": True,
+        "reason": "demo_projects_are_not_publishable",
+    }
+
+
+def _attach_demo_project_payload(
+    *,
+    project: Any,
+    project_payload: Dict[str, Any],
+    current_user: Mapping[str, Any],
+) -> Dict[str, Any]:
+    try:
+        if not _is_demo_project(project, project_payload):
+            return project_payload
+
+        project_payload["is_demo"] = True
+        project_payload["isDemo"] = True
+        project_payload["demo_mode"] = True
+        project_payload["demoMode"] = True
+        project_payload["visibility"] = "private"
+        project_payload["is_public"] = False
+        project_payload["isPublic"] = False
+        project_payload["is_unlisted"] = False
+        project_payload["isUnlisted"] = False
+        project_payload["publication"] = _demo_publication_payload()
+
+        if callable(demo_project_public_payload):
+            try:
+                project_payload["demo"] = demo_project_public_payload(project, _platform_auth_context())
+            except Exception:
+                project_payload["demo"] = {
+                    "is_demo": True,
+                    "expires_at": _safe_str(getattr(project, "demo_expires_at", None), "", 120) or None,
+                }
+        else:
+            project_payload["demo"] = {
+                "is_demo": True,
+                "expires_at": _safe_str(getattr(project, "demo_expires_at", None), "", 120) or None,
+            }
+
+        access = _safe_dict(project_payload.get("access"))
+        permissions = _safe_dict(access.get("permissions"))
+        permissions.update(
+            {
+                "view": True,
+                "edit": True,
+                "manage": False,
+                "delete": False,
+                "transfer": False,
+                "embed": True,
+                "view_settings": False,
+                "manage_settings": False,
+                "view_team": False,
+                "manage_team": False,
+                "view_admin": False,
+            }
+        )
+        access.update(
+            {
+                "role": "editor",
+                "source": access.get("source") or "demo_project",
+                "permissions": permissions,
+                "can_view": True,
+                "can_edit": True,
+                "can_manage": False,
+                "can_delete": False,
+                "can_transfer": False,
+                "can_embed": True,
+                "can_view_settings": False,
+                "can_manage_settings": False,
+                "can_view_team": False,
+                "can_manage_team": False,
+                "can_view_admin": False,
+            }
+        )
+
+        project_payload["access"] = access
+
+        return project_payload
+
+    except Exception:
+        return project_payload
+
+
 def _serialize_project_payload_fallback(
     *,
     project: Any,
     user_id: Optional[int],
 ) -> Dict[str, Any]:
     try:
+        is_demo = _is_demo_project(project)
+
         if serialize_project is None:
             return {
                 "id": getattr(project, "id", None),
@@ -778,7 +1280,9 @@ def _serialize_project_payload_fallback(
                 "address_text": getattr(project, "address_text", None),
                 "addressText": getattr(project, "address_text", None),
                 "address": {"text": getattr(project, "address_text", None)},
-                "visibility": getattr(project, "visibility", "private"),
+                "visibility": "private" if is_demo else getattr(project, "visibility", "private"),
+                "is_demo": is_demo,
+                "isDemo": is_demo,
                 "setup_status": getattr(project, "setup_status", "draft"),
                 "setupStatus": getattr(project, "setup_status", "draft"),
                 "is_configured": getattr(project, "is_configured", False),
@@ -786,16 +1290,18 @@ def _serialize_project_payload_fallback(
                 "access": _serialize_access(project, user_id),
             }
 
+        include_private = bool(_can_manage(project, user_id) and not is_demo)
+
         try:
             return _safe_dict(
                 serialize_project(
                     project,
                     user_id=user_id,
                     include_permissions=True,
-                    include_members=_can_manage(project, user_id),
-                    include_service_links=_can_manage(project, user_id),
+                    include_members=include_private,
+                    include_service_links=include_private,
                     include_versions=True,
-                    include_embed_policy=_can_manage(project, user_id),
+                    include_embed_policy=include_private,
                     include_publication=True,
                 )
             )
@@ -806,10 +1312,10 @@ def _serialize_project_payload_fallback(
                         project,
                         user_id=user_id,
                         include_permissions=True,
-                        include_members=_can_manage(project, user_id),
-                        include_service_links=_can_manage(project, user_id),
+                        include_members=include_private,
+                        include_service_links=include_private,
                         include_versions=True,
-                        include_embed_policy=_can_manage(project, user_id),
+                        include_embed_policy=include_private,
                     )
                 )
             except TypeError:
@@ -826,8 +1332,19 @@ def _load_project_payload(
 ) -> Tuple[Optional[Any], Optional[Dict[str, Any]], Optional[Response]]:
     user_id = _current_user_id_optional()
 
+    blocked_response = _auth_error_if_blocked(current_user)
+    if blocked_response is not None:
+        return None, None, blocked_response
+
     if _is_new_identifier(project_id):
-        return None, _default_new_project_payload(current_user), None
+        if _is_demo_context(current_user):
+            demo_project = _load_demo_project()
+            if demo_project is not None:
+                project_id = getattr(demo_project, "public_id", None) or getattr(demo_project, "id", None)
+            else:
+                return None, _default_new_project_payload(current_user), None
+        else:
+            return None, _default_new_project_payload(current_user), None
 
     project = _resolve_project_object(project_id)
 
@@ -863,6 +1380,11 @@ def _load_project_payload(
                 project_payload["isNew"] = False
                 project_payload["demo_mode"] = _is_demo_context(current_user)
                 project_payload["demoMode"] = _is_demo_context(current_user)
+                project_payload = _attach_demo_project_payload(
+                    project=project,
+                    project_payload=project_payload,
+                    current_user=current_user,
+                )
                 return project, project_payload, None
     except Exception as exc:
         _log_warning("get_project_result failed; falling back to serialize_project: %s", exc.__class__.__name__)
@@ -884,6 +1406,12 @@ def _load_project_payload(
 
         if not project_payload.get("access"):
             project_payload["access"] = _serialize_access(project, user_id)
+
+        project_payload = _attach_demo_project_payload(
+            project=project,
+            project_payload=project_payload,
+            current_user=current_user,
+        )
 
         access = _safe_dict(project_payload.get("access"))
 
@@ -919,6 +1447,10 @@ def _apply_publication_payload(
     current_user: Mapping[str, Any],
 ) -> Dict[str, Any]:
     try:
+        if _is_demo_project(project, project_payload):
+            project_payload["publication"] = _demo_publication_payload()
+            return project_payload
+
         user_id = _current_user_id_optional()
         include_private = bool(project is not None and user_id and _can_manage(project, user_id))
 
@@ -952,6 +1484,39 @@ def _check_workspace_access(
     normalized_workspace = _normalize_workspace(workspace)
     user_id = _current_user_id_optional()
     access = _safe_dict(project_payload.get("access"))
+    is_demo_project = _is_demo_project(project, project_payload)
+
+    if _is_auth_unavailable_context(current_user):
+        return False, {
+            "ok": False,
+            "code": _context_code(current_user) or "auth_service_unavailable",
+            "workspace": normalized_workspace,
+            "status_code": 503,
+            "message": "vectoplan-auth ist nicht erreichbar.",
+            "access": access,
+            "auth_unavailable": True,
+        }
+
+    if _is_user_blocked_context(current_user):
+        return False, {
+            "ok": False,
+            "code": _context_code(current_user) or "auth_blocked",
+            "workspace": normalized_workspace,
+            "status_code": 403,
+            "message": "Dieser Zugang ist gesperrt.",
+            "access": access,
+            "user_blocked": True,
+        }
+
+    if _is_access_blocked_context(current_user):
+        return False, {
+            "ok": False,
+            "code": _context_code(current_user) or "access_blocked",
+            "workspace": normalized_workspace,
+            "status_code": _context_status_code(current_user),
+            "message": "Der Zugriff ist gesperrt.",
+            "access": access,
+        }
 
     if _is_new_identifier(project_payload.get("public_id") or project_payload.get("publicId")):
         return normalized_workspace == WORKSPACE_PROJECT, {
@@ -959,6 +1524,18 @@ def _check_workspace_access(
             "code": "new_project_workspace",
             "workspace": normalized_workspace,
             "status_code": 200 if normalized_workspace == WORKSPACE_PROJECT else 409,
+        }
+
+    if is_demo_project:
+        allowed = bool(_is_demo_context(current_user) and normalized_workspace in DEMO_WORKSPACES)
+        return allowed, {
+            "ok": allowed,
+            "code": "demo_workspace_allowed" if allowed else "demo_workspace_not_allowed",
+            "workspace": normalized_workspace,
+            "status_code": 200 if allowed else 403,
+            "message": "" if allowed else "Dieser Workspace ist im Demo-Modus nicht verfügbar.",
+            "access": access,
+            "demo": True,
         }
 
     if normalized_workspace not in {WORKSPACE_PROJECT, WORKSPACE_ADMIN} and not _is_project_configured(project_payload):
@@ -981,7 +1558,7 @@ def _check_workspace_access(
             "access": access,
         }
 
-    if _safe_bool(access.get("can_view"), False) and not _is_demo_context(current_user):
+    if _safe_bool(access.get("can_view"), False):
         return True, {
             "ok": True,
             "code": "project_permission",
@@ -1030,15 +1607,16 @@ def _routes_payload(project_payload: Mapping[str, Any], workspace: str) -> Dict[
     if not public_id:
         public_id = "new"
 
+    is_demo = _is_demo_project(project_payload=project_payload)
     base = f"/ui/project/{public_id}"
 
     return {
         "project": f"{base}/project",
         "context": f"{base}/context.json",
         "workspace": f"{base}/{_normalize_workspace(workspace)}",
-        "publication": f"/v1/projects/{public_id}/publication" if public_id != "new" else "",
-        "members": f"/v1/projects/{public_id}/members" if public_id != "new" else "",
-        "invitations": f"/v1/projects/{public_id}/invitations" if public_id != "new" else "",
+        "publication": "" if is_demo or public_id == "new" else f"/v1/projects/{public_id}/publication",
+        "members": "" if is_demo or public_id == "new" else f"/v1/projects/{public_id}/members",
+        "invitations": "" if is_demo or public_id == "new" else f"/v1/projects/{public_id}/invitations",
         "api": f"/v1/projects/{public_id}" if public_id != "new" else "/v1/projects",
         "public": f"/project={public_id}",
     }
@@ -1051,6 +1629,10 @@ def _build_template_context(
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Response]]:
     current_user = _current_user_payload(ensure=False)
     normalized_workspace = _normalize_workspace(workspace)
+
+    blocked_response = _auth_error_if_blocked(current_user)
+    if blocked_response is not None:
+        return None, blocked_response
 
     project, project_payload, error_response = _load_project_payload(
         project_id,
@@ -1091,6 +1673,7 @@ def _build_template_context(
             extra={
                 "workspace": normalized_workspace,
                 "workspace_access": workspace_access,
+                "auth": current_user,
                 "project": {
                     "id": project_payload.get("id"),
                     "public_id": project_payload.get("public_id") or project_payload.get("publicId"),
@@ -1116,6 +1699,7 @@ def _build_template_context(
         "auth": current_user,
         "auth_context": current_user,
         "is_new": _is_new_identifier(project_payload.get("public_id") or project_payload.get("publicId")),
+        "is_demo": _is_demo_project(project, project_payload),
         "workspace": normalized_workspace,
         "workspace_label": _workspace_label(normalized_workspace),
         "workspace_access": workspace_access,
@@ -1124,6 +1708,7 @@ def _build_template_context(
         "demo_mode": _is_demo_context(current_user),
         "demo_ttl_seconds": current_user.get("ttl_seconds") or current_user.get("ttlSeconds"),
         "demo_expires_at": current_user.get("expires_at") or current_user.get("expiresAt"),
+        "auth_unavailable": _is_auth_unavailable_context(current_user),
         "routes": project_payload["routes"],
         "_project_obj": project,
     }
@@ -1252,6 +1837,16 @@ def _build_external_workspace_result(context: Mapping[str, Any]) -> Any:
     project_obj = context.get("_project_obj")
     extra_params = _request_extra_embed_params()
 
+    if _is_auth_unavailable_context(current_user):
+        return {
+            "ok": False,
+            "workspace": workspace,
+            "code": "auth_service_unavailable",
+            "error": "auth_service_unavailable",
+            "message": "vectoplan-auth ist nicht erreichbar.",
+            "status_code": 503,
+        }
+
     try:
         if workspace == WORKSPACE_EDITOR3D and callable(build_editor3d_embed_result):
             return build_editor3d_embed_result(
@@ -1313,6 +1908,9 @@ def _build_external_workspace_result(context: Mapping[str, Any]) -> Any:
 
 def _external_workspace_status_code(embed_result: Mapping[str, Any]) -> int:
     code = _safe_str(embed_result.get("code"), "", 160)
+
+    if code in AUTH_UNAVAILABLE_CODES or code == "auth_service_unavailable":
+        return 503
 
     if code in {"project_public_id_missing", "project_not_configured"}:
         return 409
@@ -1455,6 +2053,9 @@ def viewer_status() -> Response:
         "ok": True,
         "service": "viewer",
         "blueprint": "viewer",
+        "phase": "vectoplan-auth-no-default-user-auth-unavailable-503",
+        "default_user_removed": True,
+        "auth_unavailable_returns_503": True,
         "routes": {
             "new_project": "/ui/project/new/project",
             "project_workspace": "/ui/project/<project_id>/project",
@@ -1463,8 +2064,23 @@ def viewer_status() -> Response:
         },
         "current_user": _current_user_payload(ensure=False),
         "workspaces": sorted(ALLOWED_WORKSPACES),
+        "demo_workspaces": sorted(DEMO_WORKSPACES),
         "external_workspaces": sorted(EXTERNAL_REDIRECT_WORKSPACES),
+        "rules": {
+            "auth_unavailable_demo_fallback": False,
+            "auth_unavailable_status": 503,
+            "user_blocked_status": 403,
+            "browser_uses_public_urls": True,
+            "internal_urls_not_exposed": True,
+            "default_user": False,
+        },
     }
+
+    try:
+        if callable(get_auth_dependency_status):
+            payload["auth_dependency"] = get_auth_dependency_status(include_private=False)
+    except Exception:
+        pass
 
     try:
         if get_current_user_status is not None:

@@ -6,13 +6,13 @@ VECTOPLAN project permission service.
 
 Zweck:
 - Zentrale Rechteprüfung für Projekte in vectoplan-app.
-- Verwaltet App-seitige Projektrollen und Projektberechtigungen.
-- Bleibt kompatibel mit dem aktuellen Entwicklungsuser id=1.
-- Unterstützt den vorbereiteten Auth-/Demo-Kontext aus current_user.py.
-- Verhindert, dass unberechtigte User Projektsettings, Teamverwaltung oder
-  technische Bereiche sehen.
-- Verhindert persistente Projektänderungen im Demo-Modus.
-- Erzeugt KEINE echten Benutzeraccounts.
+- Verwendet vectoplan-auth/current_user.py als Auth-Wahrheit.
+- Prüft lokale AppUser-Links nur als vectoplan-app Foreign-Key-Kontext.
+- Unterstützt echte Projektrollen/Mitgliedschaften.
+- Unterstützt Guest-Demo nur für das eigene temporäre Demo-Projekt.
+- Verhindert Team/Admin/Settings/Publication/Invitation im Demo-Modus.
+- Verhindert jede Rechtevergabe bei blocked/banned/auth-service-unavailable.
+- Enthält keinen Default-User, keinen Dev-Placeholder, keinen Fallback auf id=1.
 
 Rollen:
 - owner  : alles inklusive löschen, Rechte ändern, Besitz übertragen
@@ -21,15 +21,15 @@ Rollen:
 - viewer : nur ansehen
 
 Wichtige Architekturregel:
-- vectoplan-app verwaltet Rollen, Sichtbarkeit, Veröffentlichungen und
-  Projektfrontend.
-- Registrierung, Login, Abo-Status und Bigdata-Zugriff liegen später im
-  separaten Auth-/Registrierungsdienst.
-- Chunk-, Editor-, LV-, 2D- und Library-Fachdaten bleiben in ihren Microservices.
+- Auth/User/Plan/Blocked/Entitlements liegen in vectoplan-auth.
+- Project.owner_user_id ist nur ein lokaler FK auf app_users.
+- auth_owner_user_id/auth_account_id sind Referenzen auf vectoplan-auth.
+- Demo-Projekte sind temporär und niemals echte persistente User-Projekte.
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+
 
 try:
     from flask import current_app, has_app_context
@@ -114,33 +114,41 @@ try:
     from services.current_user import (
         current_user_can_persist,
         get_current_user_context,
-        get_current_user_id_from_g_or_default,
+        get_current_user_id_from_g_or_none,
         get_current_user_id_optional,
         is_current_user_demo,
     )
 except Exception:  # pragma: no cover
 
-    def get_current_user_id_from_g_or_default() -> int:  # type: ignore
-        return 1
+    def get_current_user_id_from_g_or_none() -> Optional[int]:  # type: ignore
+        return None
 
     def get_current_user_id_optional() -> Optional[int]:  # type: ignore
-        return 1
+        return None
 
     def get_current_user_context(*args: Any, **kwargs: Any) -> Any:  # type: ignore
         return {
-            "user_id": 1,
-            "id": 1,
-            "authenticated": True,
+            "user_id": None,
+            "id": None,
+            "authenticated": False,
             "demo_mode": False,
-            "persistent": True,
-            "source": "fallback",
+            "persistent": False,
+            "blocked": True,
+            "blocked_reason": "current_user_unavailable",
+            "source": "fallback_blocked",
         }
 
     def is_current_user_demo() -> bool:  # type: ignore
         return False
 
     def current_user_can_persist() -> bool:  # type: ignore
-        return True
+        return False
+
+
+try:
+    from services.demo_project_service import is_project_accessible_as_demo
+except Exception:  # pragma: no cover
+    is_project_accessible_as_demo = None  # type: ignore
 
 
 # ─────────────────────────────────────────────────────────────
@@ -159,8 +167,6 @@ PERMISSION_DELETE = "delete"
 PERMISSION_TRANSFER = "transfer"
 PERMISSION_EMBED = "embed"
 
-# UI-/Settings-spezifische Berechtigungen.
-# Diese sind bewusst abgeleitet und nicht zwingend DB-Spalten.
 PERMISSION_VIEW_SETTINGS = "view_settings"
 PERMISSION_MANAGE_SETTINGS = "manage_settings"
 PERMISSION_VIEW_TEAM = "view_team"
@@ -228,7 +234,7 @@ ROLE_PERMISSION_DEFAULTS: Dict[str, Dict[str, bool]] = {
         PERMISSION_MANAGE: False,
         PERMISSION_DELETE: False,
         PERMISSION_TRANSFER: False,
-        PERMISSION_EMBED: False,
+        PERMISSION_EMBED: True,
     },
     ROLE_VIEWER: {
         PERMISSION_VIEW: True,
@@ -238,6 +244,24 @@ ROLE_PERMISSION_DEFAULTS: Dict[str, Dict[str, bool]] = {
         PERMISSION_TRANSFER: False,
         PERMISSION_EMBED: False,
     },
+}
+
+DEMO_PROJECT_PERMISSIONS: Dict[str, bool] = {
+    PERMISSION_VIEW: True,
+    PERMISSION_EDIT: True,
+    PERMISSION_MANAGE: False,
+    PERMISSION_DELETE: False,
+    PERMISSION_TRANSFER: False,
+    PERMISSION_EMBED: True,
+}
+
+PUBLIC_VIEW_PERMISSIONS: Dict[str, bool] = {
+    PERMISSION_VIEW: True,
+    PERMISSION_EDIT: False,
+    PERMISSION_MANAGE: False,
+    PERMISSION_DELETE: False,
+    PERMISSION_TRANSFER: False,
+    PERMISSION_EMBED: False,
 }
 
 MEMBERSHIP_PERMISSION_ATTRS = {
@@ -278,6 +302,15 @@ INACTIVE_MEMBERSHIP_STATUSES = {
 MANAGER_ROLES = {
     ROLE_OWNER,
     ROLE_ADMIN,
+}
+
+NON_PUBLIC_WORKSPACES = {
+    "admin",
+    "team",
+    "settings",
+    "permissions",
+    "system",
+    "system_refs",
 }
 
 
@@ -331,7 +364,6 @@ class PermissionResult:
     can_transfer: bool
     can_embed: bool
 
-    # Settings/UI visibility.
     can_view_settings: bool = False
     can_manage_settings: bool = False
     can_view_team: bool = False
@@ -341,11 +373,13 @@ class PermissionResult:
     is_owner: bool = False
     is_public_viewer: bool = False
     is_unlisted_viewer: bool = False
+    is_demo_owner: bool = False
     is_member: bool = False
 
-    authenticated: bool = True
+    authenticated: bool = False
     demo_mode: bool = False
-    persistent: bool = True
+    persistent: bool = False
+    blocked: bool = False
 
     source: str = "unknown"
     reason: Optional[str] = None
@@ -415,10 +449,12 @@ class PermissionResult:
             "is_owner": self.is_owner,
             "is_public_viewer": self.is_public_viewer,
             "is_unlisted_viewer": self.is_unlisted_viewer,
+            "is_demo_owner": self.is_demo_owner,
             "is_member": self.is_member,
             "authenticated": self.authenticated,
             "demo_mode": self.demo_mode,
             "persistent": self.persistent,
+            "blocked": self.blocked,
             "source": self.source,
             "reason": self.reason,
             "extra": dict(self.extra or {}),
@@ -495,6 +531,44 @@ def _safe_dict(value: Any) -> Dict[str, Any]:
             return {}
 
 
+def _as_context_dict(context: Any) -> Dict[str, Any]:
+    try:
+        if context is None:
+            return {}
+        if isinstance(context, Mapping):
+            return dict(context)
+        if hasattr(context, "to_dict") and callable(context.to_dict):
+            return _safe_dict(context.to_dict())
+        return _safe_dict(context)
+    except Exception:
+        return {}
+
+
+def _tuple_text(value: Any) -> Tuple[str, ...]:
+    try:
+        if value is None:
+            return tuple()
+        if isinstance(value, str):
+            raw = [item.strip() for item in value.split(",") if item.strip()]
+        else:
+            raw = list(value)
+        result = []
+        for item in raw:
+            text = _safe_str(item, "", 160)
+            if text and text not in result:
+                result.append(text)
+        return tuple(result)
+    except Exception:
+        return tuple()
+
+
+def _tuple_lower(value: Any) -> Tuple[str, ...]:
+    try:
+        return tuple(dict.fromkeys(item.lower() for item in _tuple_text(value)))
+    except Exception:
+        return tuple()
+
+
 def _log_warning(message: str, *args: Any) -> None:
     try:
         if has_app_context() and current_app is not None:
@@ -548,8 +622,10 @@ def get_actor_context(user_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Liefert aktuellen Actor-Kontext als Dict.
 
-    Bei explizitem user_id wird bewusst ein persistenter Kontext angenommen.
-    Das hält bestehende Service-Aufrufe kompatibel.
+    Expliziter user_id:
+    - wird nur als lokaler AppUser-FK interpretiert.
+    - erzeugt keinen Default-User.
+    - wird nicht aus Requests gelesen.
     """
     if user_id is not None:
         parsed = _safe_int_optional(user_id)
@@ -559,38 +635,75 @@ def get_actor_context(user_id: Optional[int] = None) -> Dict[str, Any]:
             "authenticated": bool(parsed),
             "demo_mode": False,
             "persistent": bool(parsed),
+            "blocked": False,
             "source": "explicit_user_id",
         }
 
     try:
         context = get_current_user_context(ensure=False)
-        data = _safe_dict(context)
-        if not data and hasattr(context, "to_dict"):
-            data = _safe_dict(context.to_dict())
+        data = _as_context_dict(context)
         return data
     except Exception:
-        uid = _safe_int_optional(get_current_user_id_from_g_or_default())
         return {
-            "user_id": uid,
-            "id": uid,
-            "authenticated": bool(uid),
+            "user_id": None,
+            "id": None,
+            "authenticated": False,
             "demo_mode": False,
-            "persistent": bool(uid),
-            "source": "fallback",
+            "persistent": False,
+            "blocked": True,
+            "blocked_reason": "actor_context_unavailable",
+            "source": "fallback_blocked",
         }
 
 
 def actor_user_id(user_id: Optional[int] = None) -> Optional[int]:
     try:
         context = get_actor_context(user_id)
+        if _safe_bool(context.get("blocked"), False):
+            return None
+        if _safe_bool(context.get("demo_mode") or context.get("is_demo"), False):
+            return None
+        if not _safe_bool(context.get("persistent"), False):
+            return None
         return _safe_int_optional(context.get("user_id") or context.get("id"))
     except Exception:
         return None
 
 
+def actor_auth_user_id(user_id: Optional[int] = None) -> Optional[str]:
+    try:
+        context = get_actor_context(user_id)
+        if _safe_bool(context.get("blocked"), False):
+            return None
+        return _safe_str(context.get("auth_user_id") or context.get("authUserId"), "", 160) or None
+    except Exception:
+        return None
+
+
+def actor_account_id(user_id: Optional[int] = None) -> Optional[str]:
+    try:
+        context = get_actor_context(user_id)
+        if _safe_bool(context.get("blocked"), False):
+            return None
+        return _safe_str(context.get("account_id") or context.get("accountId"), "", 160) or None
+    except Exception:
+        return None
+
+
+def actor_is_blocked(user_id: Optional[int] = None) -> bool:
+    try:
+        context = get_actor_context(user_id)
+        return _safe_bool(context.get("blocked"), False)
+    except Exception:
+        return True
+
+
 def actor_is_authenticated(user_id: Optional[int] = None) -> bool:
     try:
         context = get_actor_context(user_id)
+        if _safe_bool(context.get("blocked"), False):
+            return False
+
         return _safe_bool(
             context.get("authenticated")
             or context.get("is_authenticated")
@@ -607,6 +720,9 @@ def actor_is_demo(user_id: Optional[int] = None) -> bool:
             return False
 
         context = get_actor_context(user_id)
+        if _safe_bool(context.get("blocked"), False):
+            return False
+
         return _safe_bool(
             context.get("demo_mode")
             or context.get("is_demo")
@@ -623,12 +739,16 @@ def actor_is_demo(user_id: Optional[int] = None) -> bool:
 def actor_can_persist(user_id: Optional[int] = None) -> bool:
     try:
         if user_id is not None:
-            return True
+            return bool(_safe_int_optional(user_id))
 
         context = get_actor_context(user_id)
-        return _safe_bool(
-            context.get("persistent"),
-            default=bool(_safe_int_optional(context.get("user_id") or context.get("id"))) and not actor_is_demo(),
+        if _safe_bool(context.get("blocked"), False):
+            return False
+
+        return bool(
+            _safe_bool(context.get("persistent"), False)
+            and _safe_int_optional(context.get("user_id") or context.get("id"))
+            and not actor_is_demo()
         )
     except Exception:
         try:
@@ -639,26 +759,24 @@ def actor_can_persist(user_id: Optional[int] = None) -> bool:
 
 def current_user_id(user_id: Optional[int] = None) -> int:
     """
-    Legacy-kompatibler Resolver.
+    Legacy-compatible resolver.
 
-    Achtung:
-    - Für Demo-/Auth-sensible Logik besser actor_user_id() verwenden.
-    - Diese Funktion gibt aus Kompatibilitätsgründen 1 zurück, wenn kein User
-      auflösbar ist.
+    No fallback user exists. Returns 0 when no persistent actor is available.
     """
     try:
-        parsed = _safe_int(user_id, 0)
-        if parsed > 0:
+        parsed = _safe_int_optional(user_id)
+        if parsed:
             return parsed
 
         optional = get_current_user_id_optional()
         if optional:
-            return _safe_int(optional, 1)
+            return _safe_int(optional, 0)
 
-        return _safe_int(get_current_user_id_from_g_or_default(), 1)
+        fallback = get_current_user_id_from_g_or_none()
+        return _safe_int(fallback, 0) if fallback else 0
 
     except Exception:
-        return 1
+        return 0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -715,49 +833,39 @@ def normalize_permission(permission: Any, default: str = PERMISSION_VIEW) -> str
             "viewer": PERMISSION_VIEW,
             "sehen": PERMISSION_VIEW,
             "anschauen": PERMISSION_VIEW,
-
             "write": PERMISSION_EDIT,
             "edit": PERMISSION_EDIT,
             "editor": PERMISSION_EDIT,
             "bearbeiten": PERMISSION_EDIT,
             "change": PERMISSION_EDIT,
             "modify": PERMISSION_EDIT,
-
             "manage": PERMISSION_MANAGE,
             "admin": PERMISSION_MANAGE,
             "verwalten": PERMISSION_MANAGE,
-
             "delete": PERMISSION_DELETE,
             "remove": PERMISSION_DELETE,
             "löschen": PERMISSION_DELETE,
             "loeschen": PERMISSION_DELETE,
-
             "transfer": PERMISSION_TRANSFER,
             "owner_transfer": PERMISSION_TRANSFER,
             "besitz_uebertragen": PERMISSION_TRANSFER,
             "besitz_übertragen": PERMISSION_TRANSFER,
-
             "embed": PERMISSION_EMBED,
             "iframe": PERMISSION_EMBED,
             "einbetten": PERMISSION_EMBED,
-
             "settings": PERMISSION_VIEW_SETTINGS,
             "view_settings": PERMISSION_VIEW_SETTINGS,
             "settings_view": PERMISSION_VIEW_SETTINGS,
             "einstellungen": PERMISSION_VIEW_SETTINGS,
-
             "manage_settings": PERMISSION_MANAGE_SETTINGS,
             "settings_manage": PERMISSION_MANAGE_SETTINGS,
             "edit_settings": PERMISSION_MANAGE_SETTINGS,
-
             "team": PERMISSION_VIEW_TEAM,
             "members": PERMISSION_VIEW_TEAM,
             "view_team": PERMISSION_VIEW_TEAM,
-
             "manage_team": PERMISSION_MANAGE_TEAM,
             "edit_team": PERMISSION_MANAGE_TEAM,
             "members_manage": PERMISSION_MANAGE_TEAM,
-
             "admin_view": PERMISSION_VIEW_ADMIN,
             "view_admin": PERMISSION_VIEW_ADMIN,
         }
@@ -785,14 +893,12 @@ def normalize_visibility(value: Any, default: str = PROJECT_VISIBILITY_PRIVATE) 
             "closed": PROJECT_VISIBILITY_PRIVATE,
             "shared": PROJECT_VISIBILITY_PRIVATE,
             "geteilt": PROJECT_VISIBILITY_PRIVATE,
-
             "unlisted": PROJECT_VISIBILITY_UNLISTED,
             "not_listed": PROJECT_VISIBILITY_UNLISTED,
             "nicht_gelistet": PROJECT_VISIBILITY_UNLISTED,
             "link": PROJECT_VISIBILITY_UNLISTED,
             "linkshare": PROJECT_VISIBILITY_UNLISTED,
             "link_shared": PROJECT_VISIBILITY_UNLISTED,
-
             "public": PROJECT_VISIBILITY_PUBLIC,
             "öffentlich": PROJECT_VISIBILITY_PUBLIC,
             "oeffentlich": PROJECT_VISIBILITY_PUBLIC,
@@ -802,14 +908,14 @@ def normalize_visibility(value: Any, default: str = PROJECT_VISIBILITY_PRIVATE) 
 
         normalized = aliases.get(text, text)
 
+        if normalized == PROJECT_VISIBILITY_SHARED:
+            return PROJECT_VISIBILITY_PRIVATE
+
         if normalized in {
             PROJECT_VISIBILITY_PRIVATE,
-            PROJECT_VISIBILITY_SHARED,
             PROJECT_VISIBILITY_UNLISTED,
             PROJECT_VISIBILITY_PUBLIC,
         }:
-            if normalized == PROJECT_VISIBILITY_SHARED:
-                return PROJECT_VISIBILITY_PRIVATE
             return normalized
 
         return default
@@ -849,14 +955,6 @@ def normalize_permission_overrides(overrides: Optional[Dict[str, Any]] = None) -
 
 
 def derive_settings_permissions(base_permissions: Mapping[str, Any], role: Any) -> Dict[str, bool]:
-    """
-    Settings/Admin/Team werden nur aus manage-Recht abgeleitet.
-
-    Konsequenz:
-    - viewer/editor sehen Projektsettings nicht.
-    - public/unlisted viewer sehen Projektsettings nicht.
-    - admin/owner sehen Team/Veröffentlichung/Admin.
-    """
     clean_role = normalize_role(role)
     can_manage = _safe_bool(base_permissions.get(PERMISSION_MANAGE), False)
 
@@ -911,9 +1009,54 @@ def is_project_deleted(project: Any) -> bool:
         return True
 
 
-def project_visibility(project: Any) -> str:
+def is_project_demo(project: Any) -> bool:
     try:
         if project is None:
+            return False
+
+        if _safe_bool(getattr(project, "is_demo", False), False):
+            return True
+
+        scope = _safe_str(getattr(project, "project_scope", ""), "", 40).lower()
+        if scope == "demo":
+            return True
+
+        metadata = _safe_dict(getattr(project, "metadata_json", None))
+        demo_meta = _safe_dict(metadata.get("vectoplan_demo"))
+        if _safe_bool(demo_meta.get("enabled"), False):
+            return True
+
+        return False
+    except Exception:
+        return False
+
+
+def is_project_expired(project: Any) -> bool:
+    try:
+        if project is None:
+            return True
+
+        if _safe_str(getattr(project, "status", ""), "", 40).lower() == "expired":
+            return True
+
+        if hasattr(project, "is_expired"):
+            return bool(getattr(project, "is_expired"))
+
+        expires_at = getattr(project, "demo_expires_at", None)
+        if expires_at is not None and is_project_demo(project):
+            try:
+                return expires_at <= utcnow()
+            except Exception:
+                return False
+
+        return False
+    except Exception:
+        return True
+
+
+def project_visibility(project: Any) -> str:
+    try:
+        if project is None or is_project_demo(project):
             return PROJECT_VISIBILITY_PRIVATE
 
         return normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
@@ -924,7 +1067,7 @@ def project_visibility(project: Any) -> str:
 
 def is_project_public(project: Any) -> bool:
     try:
-        if project is None or is_project_deleted(project):
+        if project is None or is_project_deleted(project) or is_project_demo(project):
             return False
 
         visibility = project_visibility(project)
@@ -938,7 +1081,7 @@ def is_project_public(project: Any) -> bool:
 
 def is_project_unlisted(project: Any) -> bool:
     try:
-        if project is None or is_project_deleted(project):
+        if project is None or is_project_deleted(project) or is_project_demo(project):
             return False
 
         return project_visibility(project) == PROJECT_VISIBILITY_UNLISTED
@@ -949,7 +1092,7 @@ def is_project_unlisted(project: Any) -> bool:
 
 def is_project_publicly_viewable(project: Any) -> bool:
     try:
-        if project is None or is_project_deleted(project):
+        if project is None or is_project_deleted(project) or is_project_demo(project):
             return False
 
         return is_project_public(project) or is_project_unlisted(project)
@@ -962,7 +1105,7 @@ def is_project_owner(project: Any, user_id: Optional[int] = None) -> bool:
     try:
         uid = actor_user_id(user_id)
 
-        if project is None or not uid:
+        if project is None or not uid or is_project_demo(project):
             return False
 
         owner_id = _safe_int(getattr(project, "owner_user_id", None), 0)
@@ -970,6 +1113,71 @@ def is_project_owner(project: Any, user_id: Optional[int] = None) -> bool:
 
     except Exception:
         return False
+
+
+def is_project_auth_owner(project: Any, auth_user_id: Optional[str] = None) -> bool:
+    try:
+        if project is None or is_project_demo(project):
+            return False
+
+        candidate = _safe_str(auth_user_id, "", 160) or actor_auth_user_id()
+        if not candidate:
+            return False
+
+        owner_auth_id = _safe_str(getattr(project, "auth_owner_user_id", None), "", 160)
+        return bool(owner_auth_id and owner_auth_id == candidate)
+
+    except Exception:
+        return False
+
+
+def is_project_account_scoped_for_actor(project: Any, user_id: Optional[int] = None) -> bool:
+    try:
+        if project is None or is_project_demo(project):
+            return False
+
+        project_account_id = _safe_str(getattr(project, "auth_account_id", None), "", 160)
+        actor_acc = actor_account_id(user_id)
+
+        return bool(project_account_id and actor_acc and project_account_id == actor_acc)
+
+    except Exception:
+        return False
+
+
+def is_project_accessible_as_current_demo(project: Any) -> Tuple[bool, str]:
+    try:
+        if project is None:
+            return False, "project_missing"
+
+        if not actor_is_demo():
+            return False, "not_demo_actor"
+
+        if is_project_deleted(project):
+            return False, "project_deleted"
+
+        if not is_project_demo(project):
+            return False, "not_demo_project"
+
+        if is_project_expired(project):
+            return False, "demo_project_expired"
+
+        if is_project_accessible_as_demo is not None:
+            try:
+                return is_project_accessible_as_demo(project)
+            except TypeError:
+                try:
+                    context = get_current_user_context(ensure=False)
+                    return is_project_accessible_as_demo(project, context=context)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        return True, "ok"
+
+    except Exception as exc:
+        return False, exc.__class__.__name__
 
 
 def membership_is_active(membership: Any) -> bool:
@@ -1010,7 +1218,7 @@ def get_project_membership(
     include_inactive: bool = False,
 ) -> Any:
     try:
-        if project is None or ProjectMembership is None:
+        if project is None or ProjectMembership is None or is_project_demo(project):
             return None
 
         uid = actor_user_id(user_id)
@@ -1066,14 +1274,7 @@ def membership_permissions(membership: Any) -> Dict[str, bool]:
 def project_public_view_permissions(project: Any) -> Dict[str, bool]:
     try:
         if is_project_publicly_viewable(project):
-            return {
-                PERMISSION_VIEW: True,
-                PERMISSION_EDIT: False,
-                PERMISSION_MANAGE: False,
-                PERMISSION_DELETE: False,
-                PERMISSION_TRANSFER: False,
-                PERMISSION_EMBED: False,
-            }
+            return dict(PUBLIC_VIEW_PERMISSIONS)
 
         return {permission: False for permission in BASE_PROJECT_PERMISSIONS}
 
@@ -1091,10 +1292,12 @@ def _permission_result_from_base(
     is_owner: bool = False,
     is_public_viewer: bool = False,
     is_unlisted_viewer: bool = False,
+    is_demo_owner: bool = False,
     is_member: bool = False,
-    authenticated: bool = True,
+    authenticated: bool = False,
     demo_mode: bool = False,
-    persistent: bool = True,
+    persistent: bool = False,
+    blocked: bool = False,
     source: str = "unknown",
     reason: Optional[str] = None,
     extra: Optional[Mapping[str, Any]] = None,
@@ -1102,24 +1305,32 @@ def _permission_result_from_base(
     clean_role = normalize_role(role)
     base = {permission: _safe_bool(base_permissions.get(permission), False) for permission in BASE_PROJECT_PERMISSIONS}
 
-    if demo_mode or not persistent:
-        # Demo und nicht verknüpfte Auth-User dürfen nur öffentlich sehen.
+    if blocked:
+        base = {permission: False for permission in BASE_PROJECT_PERMISSIONS}
+
+    if is_public_viewer or is_unlisted_viewer:
+        base = dict(PUBLIC_VIEW_PERMISSIONS)
+
+    if demo_mode:
+        if is_demo_owner:
+            base = {
+                PERMISSION_VIEW: _safe_bool(base.get(PERMISSION_VIEW), True),
+                PERMISSION_EDIT: _safe_bool(base.get(PERMISSION_EDIT), True),
+                PERMISSION_MANAGE: False,
+                PERMISSION_DELETE: False,
+                PERMISSION_TRANSFER: False,
+                PERMISSION_EMBED: _safe_bool(base.get(PERMISSION_EMBED), True),
+            }
+        else:
+            base = {permission: False for permission in BASE_PROJECT_PERMISSIONS}
+
+    if not persistent and not demo_mode:
         if not is_public_viewer and not is_unlisted_viewer:
             base = {permission: False for permission in BASE_PROJECT_PERMISSIONS}
-        else:
-            base[PERMISSION_EDIT] = False
-            base[PERMISSION_MANAGE] = False
-            base[PERMISSION_DELETE] = False
-            base[PERMISSION_TRANSFER] = False
-            base[PERMISSION_EMBED] = False
 
     settings = derive_settings_permissions(base, clean_role)
 
-    if is_public_viewer or is_unlisted_viewer:
-        # Öffentliche/ungelistete Betrachter sehen keine Einstellungen.
-        settings = {permission: False for permission in SETTINGS_PERMISSIONS}
-
-    if demo_mode or not persistent:
+    if is_public_viewer or is_unlisted_viewer or demo_mode or not persistent or blocked:
         settings = {permission: False for permission in SETTINGS_PERMISSIONS}
 
     return PermissionResult(
@@ -1141,10 +1352,12 @@ def _permission_result_from_base(
         is_owner=is_owner,
         is_public_viewer=is_public_viewer,
         is_unlisted_viewer=is_unlisted_viewer,
+        is_demo_owner=is_demo_owner,
         is_member=is_member,
         authenticated=authenticated,
         demo_mode=demo_mode,
         persistent=persistent,
+        blocked=blocked,
         source=source,
         reason=reason,
         extra=dict(extra or {}),
@@ -1164,7 +1377,7 @@ def get_project_permission_result(
     actor_context: Optional[Mapping[str, Any]] = None,
 ) -> PermissionResult:
     context = _safe_dict(actor_context) if actor_context is not None else get_actor_context(user_id)
-    uid = _safe_int_optional(context.get("user_id") or context.get("id"))
+    uid = actor_user_id(user_id)
     project_id, public_id = project_identity(project)
 
     authenticated = _safe_bool(
@@ -1173,18 +1386,38 @@ def get_project_permission_result(
         or context.get("logged_in"),
         default=bool(uid),
     )
+
     demo_mode = _safe_bool(
         context.get("demo_mode")
         or context.get("is_demo")
         or context.get("demo"),
         default=False,
     )
+
     persistent = _safe_bool(
         context.get("persistent"),
         default=bool(uid) and not demo_mode,
     )
 
+    blocked = _safe_bool(context.get("blocked"), False)
+
     try:
+        if blocked:
+            return _permission_result_from_base(
+                user_id=uid,
+                project_id=project_id,
+                project_public_id=public_id,
+                role=ROLE_VIEWER,
+                base_permissions={},
+                authenticated=False,
+                demo_mode=False,
+                persistent=False,
+                blocked=True,
+                source="blocked",
+                reason=_safe_str(context.get("blocked_reason"), "blocked", 160),
+                extra={"auth_state": context.get("auth_state")},
+            )
+
         if project is None or is_project_deleted(project):
             return _permission_result_from_base(
                 user_id=uid,
@@ -1199,6 +1432,38 @@ def get_project_permission_result(
                 reason="project_deleted_or_missing",
             )
 
+        if is_project_demo(project):
+            demo_allowed, demo_reason = is_project_accessible_as_current_demo(project)
+
+            if demo_allowed:
+                return _permission_result_from_base(
+                    user_id=None,
+                    project_id=project_id,
+                    project_public_id=public_id,
+                    role=ROLE_EDITOR,
+                    base_permissions=DEMO_PROJECT_PERMISSIONS,
+                    is_demo_owner=True,
+                    authenticated=False,
+                    demo_mode=True,
+                    persistent=False,
+                    source="demo_project",
+                    reason="demo_project_access",
+                    extra={"demo_reason": demo_reason},
+                )
+
+            return _permission_result_from_base(
+                user_id=None,
+                project_id=project_id,
+                project_public_id=public_id,
+                role=ROLE_VIEWER,
+                base_permissions={},
+                authenticated=False,
+                demo_mode=demo_mode,
+                persistent=False,
+                source="demo_project_denied",
+                reason=demo_reason,
+            )
+
         if uid and persistent and is_project_owner(project, uid):
             return _permission_result_from_base(
                 user_id=uid,
@@ -1209,9 +1474,24 @@ def get_project_permission_result(
                 is_owner=True,
                 is_member=True,
                 authenticated=authenticated,
-                demo_mode=demo_mode,
-                persistent=persistent,
+                demo_mode=False,
+                persistent=True,
                 source="owner",
+            )
+
+        if persistent and is_project_auth_owner(project, actor_auth_user_id(user_id)):
+            return _permission_result_from_base(
+                user_id=uid,
+                project_id=project_id,
+                project_public_id=public_id,
+                role=ROLE_OWNER,
+                base_permissions=role_permission_defaults(ROLE_OWNER),
+                is_owner=True,
+                is_member=True,
+                authenticated=authenticated,
+                demo_mode=False,
+                persistent=bool(uid),
+                source="auth_owner",
             )
 
         row = membership if membership is not None else get_project_membership(project, uid)
@@ -1229,8 +1509,8 @@ def get_project_permission_result(
                 is_owner=role == ROLE_OWNER,
                 is_member=True,
                 authenticated=authenticated,
-                demo_mode=demo_mode,
-                persistent=persistent,
+                demo_mode=False,
+                persistent=True,
                 source="membership",
                 extra={"membership_id": getattr(row, "id", None)},
             )
@@ -1370,25 +1650,33 @@ def require_project_permission(
     if result.allows(normalized_permission):
         return result
 
-    if result.demo_mode:
+    if result.blocked:
+        code = "auth_blocked"
+        default_message = "Der Zugriff ist gesperrt."
+        status_code = 403
+    elif result.demo_mode:
         code = "demo_mode_not_allowed"
         default_message = "Im Demo-Modus ist diese Projektaktion nicht erlaubt."
+        status_code = 403
     elif not result.authenticated:
         code = "authentication_required"
         default_message = "Für diese Projektaktion ist Login erforderlich."
+        status_code = 401
     elif not result.persistent:
         code = "persistent_user_required"
         default_message = "Für diese Projektaktion ist eine lokale AppUser-Verknüpfung erforderlich."
+        status_code = 403
     else:
         code = "project_permission_denied"
         default_message = f"missing project permission: {normalized_permission}"
+        status_code = 403
 
     raise PermissionDenied(
         message or default_message,
         permission=normalized_permission,
         project_id=public_id or project_id,
         user_id=uid,
-        status_code=401 if code == "authentication_required" else 403,
+        status_code=status_code,
         code=code,
     )
 
@@ -1540,7 +1828,7 @@ def build_membership_for_role(
 
 def active_manager_count(project: Any, *, exclude_user_id: Optional[int] = None) -> int:
     try:
-        if project is None or ProjectMembership is None:
+        if project is None or ProjectMembership is None or is_project_demo(project):
             return 0
 
         project_id, _ = project_identity(project)
@@ -1590,6 +1878,9 @@ def ensure_owner_membership(
 ) -> Any:
     try:
         if ProjectMembership is None or db is None:
+            return None
+
+        if project is not None and is_project_demo(project):
             return None
 
         resolved_project_id = _safe_int(project_id, 0)
@@ -1652,6 +1943,15 @@ def grant_project_role(
 
         if project is None:
             raise ValueError("project required")
+
+        if is_project_demo(project):
+            raise PermissionDenied(
+                "Demo-Projekte unterstützen keine Team-/Rollenverwaltung.",
+                permission=PERMISSION_MANAGE_TEAM,
+                project_id=getattr(project, "public_id", None) or getattr(project, "id", None),
+                user_id=actor_user_id,
+                code="demo_team_not_allowed",
+            )
 
         project_id, _ = project_identity(project)
         uid = _safe_int(user_id, 0)
@@ -1725,6 +2025,9 @@ def can_revoke_project_membership(
 
         if project is None or not project_id:
             return False, "project_required"
+
+        if is_project_demo(project):
+            return False, "demo_team_not_allowed"
 
         if uid <= 0:
             return False, "user_id_required"
@@ -1840,6 +2143,15 @@ def transfer_project_ownership(
         if project is None:
             raise ValueError("project required")
 
+        if is_project_demo(project):
+            raise PermissionDenied(
+                "Demo-Projekte können nicht übertragen werden.",
+                permission=PERMISSION_TRANSFER,
+                project_id=getattr(project, "public_id", None) or getattr(project, "id", None),
+                user_id=actor_user_id,
+                code="demo_transfer_not_allowed",
+            )
+
         new_uid = _safe_int(new_owner_user_id, 0)
         if new_uid <= 0:
             raise ValueError("new_owner_user_id required")
@@ -1847,7 +2159,10 @@ def transfer_project_ownership(
         old_owner_id = _safe_int(getattr(project, "owner_user_id", None), 0)
 
         if hasattr(project, "transfer_ownership"):
-            project.transfer_ownership(new_uid)
+            try:
+                project.transfer_ownership(new_owner_user_id=new_uid)
+            except TypeError:
+                project.transfer_ownership(new_uid)
         else:
             project.owner_user_id = new_uid
             if hasattr(project, "transferred_from_user_id"):
@@ -2004,7 +2319,7 @@ def serialize_membership(membership: Any, *, include_private: bool = False) -> D
 
 def list_project_memberships(project: Any, *, include_inactive: bool = False) -> List[Any]:
     try:
-        if project is None or ProjectMembership is None:
+        if project is None or ProjectMembership is None or is_project_demo(project):
             return []
 
         project_id, _ = project_identity(project)
@@ -2065,7 +2380,7 @@ def get_permission_service_status() -> Dict[str, Any]:
         return {
             "ok": True,
             "service": "project_permissions",
-            "phase": "auth-demo-aware-project-permissions",
+            "phase": "vectoplan-auth-project-permissions-no-default-user",
             "roles": sorted(VALID_PROJECT_ROLES),
             "permissions": sorted(VALID_PROJECT_PERMISSIONS),
             "base_permissions": sorted(BASE_PROJECT_PERMISSIONS),
@@ -2078,11 +2393,16 @@ def get_permission_service_status() -> Dict[str, Any]:
             "counts": counts,
             "current_user_id": actor_user_id(),
             "actor_context": actor_context,
+            "default_user_removed": True,
             "notes": {
+                "auth_truth": "vectoplan-auth",
                 "settings_visibility": "Projektsettings/Team/Admin sind nur für manage/admin/owner sichtbar.",
-                "demo_mode": "Demo-User dürfen keine persistenten Projektänderungen durchführen.",
+                "demo_mode": "Demo-Gäste dürfen nur ihr eigenes Demo-Projekt sehen/bearbeiten.",
+                "demo_restrictions": "Demo darf kein Team/Admin/Settings/Publication/Invitation.",
                 "public_view": "Public/unlisted erzeugt nur view-Recht, keine Settings-Rechte.",
+                "blocked": "Blocked/Banned/Auth unavailable gibt keine Rechte.",
                 "user_creation": "Dieser Service erzeugt keine AppUser.",
+                "default_user": "Kein Fallback auf id=1.",
             },
         }
 
@@ -2094,6 +2414,7 @@ def get_permission_service_status() -> Dict[str, Any]:
                 "type": exc.__class__.__name__,
                 "message": str(exc),
             },
+            "default_user_removed": True,
         }
 
 
@@ -2122,11 +2443,16 @@ __all__ = [
     "BASE_PROJECT_PERMISSIONS",
     "SETTINGS_PERMISSIONS",
     "ROLE_PERMISSION_DEFAULTS",
+    "DEMO_PROJECT_PERMISSIONS",
+    "PUBLIC_VIEW_PERMISSIONS",
     "PermissionDenied",
     "PermissionResult",
     "active_manager_count",
+    "actor_account_id",
+    "actor_auth_user_id",
     "actor_can_persist",
     "actor_is_authenticated",
+    "actor_is_blocked",
     "actor_is_demo",
     "actor_user_id",
     "apply_role_to_membership",
@@ -2154,7 +2480,12 @@ __all__ = [
     "get_project_permission_result",
     "grant_project_role",
     "has_project_permission",
+    "is_project_accessible_as_current_demo",
+    "is_project_account_scoped_for_actor",
+    "is_project_auth_owner",
     "is_project_deleted",
+    "is_project_demo",
+    "is_project_expired",
     "is_project_owner",
     "is_project_public",
     "is_project_publicly_viewable",

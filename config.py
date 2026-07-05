@@ -412,6 +412,18 @@ def _dedupe_texts(values: Iterable[str]) -> List[str]:
 
 _DEFAULT_APP_PUBLIC_URL = "http://localhost:5103"
 
+_DEFAULT_AUTH_PUBLIC_URL = "http://localhost:5000"
+_DEFAULT_AUTH_INTERNAL_URL = "http://vectoplan-auth:5000"
+_DEFAULT_AUTH_ROUTE = "/auth"
+_DEFAULT_AUTH_ME_PATH = "/auth/me"
+_DEFAULT_AUTH_CONTEXT_PATH = "/auth/context"
+_DEFAULT_AUTH_CONTEXT_MINIMAL_PATH = "/auth/context/minimal"
+_DEFAULT_AUTH_ACCOUNT_DASHBOARD_PATH = "/auth/account/dashboard"
+_DEFAULT_AUTH_ADMIN_DASHBOARD_PATH = "/auth/admin/dashboard"
+_DEFAULT_AUTH_LOGOUT_PATH = "/auth/logout"
+_DEFAULT_AUTH_HEALTH_READY_PATH = "/health/ready"
+_DEFAULT_AUTH_HEALTH_LIVE_PATH = "/health/live"
+
 _DEFAULT_EDITOR_PUBLIC_URL = "http://localhost:5100"
 _DEFAULT_EDITOR_INTERNAL_URL = "http://vectoplan-editor:5000"
 _DEFAULT_EDITOR_ROUTE = "/editor"
@@ -435,6 +447,8 @@ _DEFAULT_ALLOWED_FRAME_PARENTS = (
 
 _DEFAULT_APP_ALLOWED_FRAME_SRC = (
     "self",
+    "http://localhost:5000",
+    "http://127.0.0.1:5000",
     "http://localhost:5100",
     "http://127.0.0.1:5100",
     "http://localhost:5190",
@@ -443,6 +457,8 @@ _DEFAULT_APP_ALLOWED_FRAME_SRC = (
 
 _DEFAULT_APP_ALLOWED_CONNECT_SRC = (
     "self",
+    "http://localhost:5000",
+    "http://127.0.0.1:5000",
     "http://localhost:5100",
     "http://127.0.0.1:5100",
     "http://localhost:5101",
@@ -493,7 +509,7 @@ class Config:
         512 * 1024 * 1024,
     )
 
-    # Browser-facing app origin. This is the parent origin for Editor/OpenLayer iframes.
+    # Browser-facing app origin. This is the parent origin for Editor/OpenLayer/Auth iframes.
     VECTOPLAN_APP_PUBLIC_URL = _norm_url(
         _env_str_first(
             (
@@ -522,6 +538,399 @@ class Config:
     )
 
     VECTOPLAN_APP_INTERNAL_URL = WEB_INTERNAL_URL
+
+    # ───────── Auth service integration ─────────
+    # vectoplan-auth is the canonical source of truth for:
+    # - authenticated / guest / stale / blocked
+    # - user.id
+    # - roles
+    # - account
+    # - plan
+    # - entitlements
+    # - API-key context
+    #
+    # Browser/public URL is used for links and optional iframe/overlay login.
+    # Internal/base URL is used for server-to-server calls from vectoplan-app.
+    VECTOPLAN_AUTH_PUBLIC_URL = _norm_url(
+        _env_str_first(
+            (
+                "VECTOPLAN_AUTH_PUBLIC_URL",
+                "VECTOPLAN_AUTH_PUBLIC_BASE_URL",
+                "AUTH_PUBLIC_URL",
+                "AUTH_PUBLIC_BASE_URL",
+            ),
+            _DEFAULT_AUTH_PUBLIC_URL,
+        ),
+        _DEFAULT_AUTH_PUBLIC_URL,
+    )
+    VECTOPLAN_AUTH_PUBLIC_BASE_URL = VECTOPLAN_AUTH_PUBLIC_URL
+    AUTH_PUBLIC_URL = VECTOPLAN_AUTH_PUBLIC_URL
+    AUTH_PUBLIC_BASE_URL = VECTOPLAN_AUTH_PUBLIC_URL
+
+    VECTOPLAN_AUTH_BASE_URL = _norm_url(
+        _env_str_first(
+            (
+                "VECTOPLAN_AUTH_BASE_URL",
+                "VECTOPLAN_AUTH_INTERNAL_URL",
+                "VECTOPLAN_AUTH_INTERNAL_BASE_URL",
+                "AUTH_BASE_URL",
+                "AUTH_INTERNAL_URL",
+                "AUTH_INTERNAL_BASE_URL",
+            ),
+            _DEFAULT_AUTH_INTERNAL_URL,
+        ),
+        _DEFAULT_AUTH_INTERNAL_URL,
+    )
+    VECTOPLAN_AUTH_INTERNAL_URL = VECTOPLAN_AUTH_BASE_URL
+    VECTOPLAN_AUTH_INTERNAL_BASE_URL = VECTOPLAN_AUTH_BASE_URL
+    AUTH_INTERNAL_URL = VECTOPLAN_AUTH_BASE_URL
+    AUTH_INTERNAL_BASE_URL = VECTOPLAN_AUTH_BASE_URL
+
+    VECTOPLAN_AUTH_SERVICE_NAME = _env_str_first(
+        (
+            "VECTOPLAN_AUTH_SERVICE_NAME",
+            "AUTH_SERVICE_NAME",
+        ),
+        "vectoplan-app",
+    )
+
+    VECTOPLAN_AUTH_REQUEST_TIMEOUT_SECONDS = _clamp_float(
+        _as_float(
+            _env_first(
+                (
+                    "VECTOPLAN_AUTH_REQUEST_TIMEOUT_SECONDS",
+                    "VECTOPLAN_AUTH_TIMEOUT_SECONDS",
+                    "AUTH_REQUEST_TIMEOUT_SECONDS",
+                    "AUTH_TIMEOUT_SECONDS",
+                ),
+                None,
+            ),
+            3.0,
+        ),
+        0.2,
+        30.0,
+    )
+
+    VECTOPLAN_AUTH_VERIFY_TLS = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_AUTH_VERIFY_TLS",
+                "AUTH_VERIFY_TLS",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    # Request-local auth-context cache remains handled by services/auth_context.py.
+    # This value only enables optional very short process cache in auth_context_client.py.
+    # Default 0 means: no process-global auth-state cache.
+    VECTOPLAN_AUTH_CONTEXT_CACHE_SECONDS = _clamp_float(
+        _as_float(
+            _env_first(
+                (
+                    "VECTOPLAN_AUTH_CONTEXT_CACHE_SECONDS",
+                    "AUTH_CONTEXT_CACHE_SECONDS",
+                ),
+                None,
+            ),
+            0.0,
+        ),
+        0.0,
+        60.0,
+    )
+
+    VECTOPLAN_AUTH_API_KEY_VERIFY_CACHE_SECONDS = _clamp_float(
+        _as_float(
+            _env_first(
+                (
+                    "VECTOPLAN_AUTH_API_KEY_VERIFY_CACHE_SECONDS",
+                    "AUTH_API_KEY_VERIFY_CACHE_SECONDS",
+                ),
+                None,
+            ),
+            30.0,
+        ),
+        0.0,
+        60.0,
+    )
+
+    # Protected resources fail closed if auth is unavailable.
+    # Public/unlisted project routes may decide explicitly at route level.
+    VECTOPLAN_AUTH_FAIL_OPEN_FOR_PUBLIC_ROUTES = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_AUTH_FAIL_OPEN_FOR_PUBLIC_ROUTES",
+                "AUTH_FAIL_OPEN_FOR_PUBLIC_ROUTES",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    VECTOPLAN_AUTH_DEBUG_CLIENT_ERRORS = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_AUTH_DEBUG_CLIENT_ERRORS",
+                "AUTH_DEBUG_CLIENT_ERRORS",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    # Route paths used by auth_context_client.py and UI links.
+    VECTOPLAN_AUTH_ROUTE = _norm_path(
+        _env_str_first(("VECTOPLAN_AUTH_ROUTE", "AUTH_ROUTE"), _DEFAULT_AUTH_ROUTE),
+        _DEFAULT_AUTH_ROUTE,
+    )
+    VECTOPLAN_AUTH_ME_PATH = _norm_path(
+        _env_str_first(("VECTOPLAN_AUTH_ME_PATH", "AUTH_ME_PATH"), _DEFAULT_AUTH_ME_PATH),
+        _DEFAULT_AUTH_ME_PATH,
+    )
+    VECTOPLAN_AUTH_CONTEXT_PATH = _norm_path(
+        _env_str_first(("VECTOPLAN_AUTH_CONTEXT_PATH", "AUTH_CONTEXT_PATH"), _DEFAULT_AUTH_CONTEXT_PATH),
+        _DEFAULT_AUTH_CONTEXT_PATH,
+    )
+    VECTOPLAN_AUTH_CONTEXT_MINIMAL_PATH = _norm_path(
+        _env_str_first(
+            (
+                "VECTOPLAN_AUTH_CONTEXT_MINIMAL_PATH",
+                "AUTH_CONTEXT_MINIMAL_PATH",
+            ),
+            _DEFAULT_AUTH_CONTEXT_MINIMAL_PATH,
+        ),
+        _DEFAULT_AUTH_CONTEXT_MINIMAL_PATH,
+    )
+    VECTOPLAN_AUTH_ACCOUNT_DASHBOARD_PATH = _norm_path(
+        _env_str_first(
+            (
+                "VECTOPLAN_AUTH_ACCOUNT_DASHBOARD_PATH",
+                "AUTH_ACCOUNT_DASHBOARD_PATH",
+            ),
+            _DEFAULT_AUTH_ACCOUNT_DASHBOARD_PATH,
+        ),
+        _DEFAULT_AUTH_ACCOUNT_DASHBOARD_PATH,
+    )
+    VECTOPLAN_AUTH_ADMIN_DASHBOARD_PATH = _norm_path(
+        _env_str_first(
+            (
+                "VECTOPLAN_AUTH_ADMIN_DASHBOARD_PATH",
+                "AUTH_ADMIN_DASHBOARD_PATH",
+            ),
+            _DEFAULT_AUTH_ADMIN_DASHBOARD_PATH,
+        ),
+        _DEFAULT_AUTH_ADMIN_DASHBOARD_PATH,
+    )
+    VECTOPLAN_AUTH_LOGOUT_PATH = _norm_path(
+        _env_str_first(("VECTOPLAN_AUTH_LOGOUT_PATH", "AUTH_LOGOUT_PATH"), _DEFAULT_AUTH_LOGOUT_PATH),
+        _DEFAULT_AUTH_LOGOUT_PATH,
+    )
+    VECTOPLAN_AUTH_HEALTH_READY_PATH = _norm_path(
+        _env_str_first(
+            (
+                "VECTOPLAN_AUTH_HEALTH_READY_PATH",
+                "AUTH_HEALTH_READY_PATH",
+            ),
+            _DEFAULT_AUTH_HEALTH_READY_PATH,
+        ),
+        _DEFAULT_AUTH_HEALTH_READY_PATH,
+    )
+    VECTOPLAN_AUTH_HEALTH_LIVE_PATH = _norm_path(
+        _env_str_first(
+            (
+                "VECTOPLAN_AUTH_HEALTH_LIVE_PATH",
+                "AUTH_HEALTH_LIVE_PATH",
+            ),
+            _DEFAULT_AUTH_HEALTH_LIVE_PATH,
+        ),
+        _DEFAULT_AUTH_HEALTH_LIVE_PATH,
+    )
+
+    VECTOPLAN_AUTH_LOGIN_URL = _join_url(
+        VECTOPLAN_AUTH_PUBLIC_URL,
+        VECTOPLAN_AUTH_ROUTE,
+        f"{_DEFAULT_AUTH_PUBLIC_URL}{_DEFAULT_AUTH_ROUTE}",
+    )
+    VECTOPLAN_AUTH_REGISTER_URL = f"{VECTOPLAN_AUTH_LOGIN_URL}?mode=register"
+    VECTOPLAN_AUTH_LOGOUT_URL = _join_url(
+        VECTOPLAN_AUTH_PUBLIC_URL,
+        VECTOPLAN_AUTH_LOGOUT_PATH,
+        f"{_DEFAULT_AUTH_PUBLIC_URL}{_DEFAULT_AUTH_LOGOUT_PATH}",
+    )
+    VECTOPLAN_AUTH_ACCOUNT_DASHBOARD_URL = _join_url(
+        VECTOPLAN_AUTH_PUBLIC_URL,
+        VECTOPLAN_AUTH_ACCOUNT_DASHBOARD_PATH,
+        f"{_DEFAULT_AUTH_PUBLIC_URL}{_DEFAULT_AUTH_ACCOUNT_DASHBOARD_PATH}",
+    )
+    VECTOPLAN_AUTH_ADMIN_DASHBOARD_URL = _join_url(
+        VECTOPLAN_AUTH_PUBLIC_URL,
+        VECTOPLAN_AUTH_ADMIN_DASHBOARD_PATH,
+        f"{_DEFAULT_AUTH_PUBLIC_URL}{_DEFAULT_AUTH_ADMIN_DASHBOARD_PATH}",
+    )
+
+    AUTH_LOGIN_URL = VECTOPLAN_AUTH_LOGIN_URL
+    AUTH_REGISTER_URL = VECTOPLAN_AUTH_REGISTER_URL
+    AUTH_LOGOUT_URL = VECTOPLAN_AUTH_LOGOUT_URL
+    AUTH_ACCOUNT_DASHBOARD_URL = VECTOPLAN_AUTH_ACCOUNT_DASHBOARD_URL
+    AUTH_ADMIN_DASHBOARD_URL = VECTOPLAN_AUTH_ADMIN_DASHBOARD_URL
+
+    # Trusted header mode is intentionally off by default.
+    # If a future reverse proxy/gateway verifies auth centrally, public incoming
+    # X-VECTOPLAN-* headers must be stripped before trusting gateway-set headers.
+    VECTOPLAN_AUTH_TRUSTED_GATEWAY_HEADERS = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_AUTH_TRUSTED_GATEWAY_HEADERS",
+                "AUTH_TRUSTED_GATEWAY_HEADERS",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    VECTOPLAN_AUTH_STRIP_INCOMING_PLATFORM_HEADERS = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_AUTH_STRIP_INCOMING_PLATFORM_HEADERS",
+                "AUTH_STRIP_INCOMING_PLATFORM_HEADERS",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    # ───────── Guest/Demo project integration ─────────
+    # Guest-Demo is allowed only when vectoplan-auth returns:
+    # authenticated=false and demo_project_access entitlement.
+    VECTOPLAN_DEMO_PROJECTS_ENABLED = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_DEMO_PROJECTS_ENABLED",
+                "DEMO_PROJECTS_ENABLED",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    VECTOPLAN_DEMO_PROJECT_TTL_SECONDS = _clamp_int(
+        _as_int(
+            _env_first(
+                (
+                    "VECTOPLAN_DEMO_PROJECT_TTL_SECONDS",
+                    "DEMO_PROJECT_TTL_SECONDS",
+                    "VECTOPLAN_GUEST_DEMO_TTL_SECONDS",
+                    "GUEST_DEMO_TTL_SECONDS",
+                ),
+                None,
+            ),
+            3600,
+        ),
+        60,
+        24 * 60 * 60,
+    )
+
+    VECTOPLAN_DEMO_PROJECT_CLEANUP_ON_ENSURE = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_DEMO_PROJECT_CLEANUP_ON_ENSURE",
+                "DEMO_PROJECT_CLEANUP_ON_ENSURE",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    VECTOPLAN_DEMO_PROJECT_CHUNK_PROVISIONING = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_DEMO_PROJECT_CHUNK_PROVISIONING",
+                "DEMO_PROJECT_CHUNK_PROVISIONING",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    VECTOPLAN_DEMO_PROJECT_NAME = _env_str_first(
+        (
+            "VECTOPLAN_DEMO_PROJECT_NAME",
+            "DEMO_PROJECT_NAME",
+        ),
+        "Demo-Projekt",
+    )
+
+    VECTOPLAN_DEMO_PROJECT_DESCRIPTION = _env_str_first(
+        (
+            "VECTOPLAN_DEMO_PROJECT_DESCRIPTION",
+            "DEMO_PROJECT_DESCRIPTION",
+        ),
+        "Temporäres Demo-Projekt. Änderungen werden nicht dauerhaft gespeichert.",
+    )
+
+    VECTOPLAN_DEMO_PROJECT_ADDRESS_TEXT = _env_str_first(
+        (
+            "VECTOPLAN_DEMO_PROJECT_ADDRESS_TEXT",
+            "DEMO_PROJECT_ADDRESS_TEXT",
+        ),
+        "Demo-Adresse",
+    )
+
+    VECTOPLAN_DEMO_PROJECT_VISIBILITY = _env_str_first(
+        (
+            "VECTOPLAN_DEMO_PROJECT_VISIBILITY",
+            "DEMO_PROJECT_VISIBILITY",
+        ),
+        "private",
+    )
+
+    VECTOPLAN_DEMO_PROJECT_ALLOW_PUBLICATION = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_DEMO_PROJECT_ALLOW_PUBLICATION",
+                "DEMO_PROJECT_ALLOW_PUBLICATION",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    VECTOPLAN_DEMO_PROJECT_ALLOW_TEAM = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_DEMO_PROJECT_ALLOW_TEAM",
+                "DEMO_PROJECT_ALLOW_TEAM",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    VECTOPLAN_DEMO_PROJECT_ALLOW_INVITATIONS = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_DEMO_PROJECT_ALLOW_INVITATIONS",
+                "DEMO_PROJECT_ALLOW_INVITATIONS",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    VECTOPLAN_DEMO_PROJECT_ALLOW_ADMIN = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_DEMO_PROJECT_ALLOW_ADMIN",
+                "DEMO_PROJECT_ALLOW_ADMIN",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    DEMO_PROJECTS_ENABLED = VECTOPLAN_DEMO_PROJECTS_ENABLED
+    DEMO_PROJECT_TTL_SECONDS = VECTOPLAN_DEMO_PROJECT_TTL_SECONDS
 
     # ───────── Interne Services ─────────
     CHATAI_URL = _env_str("CHATAI_URL", "http://chatai:8001/chat")
@@ -940,6 +1349,17 @@ class Config:
         VECTOPLAN_ALLOWED_FRAME_PARENTS,
     )
 
+    # If vectoplan-auth embeds login/register as overlay/iframe inside vectoplan-app,
+    # auth's own CSP must allow VECTOPLAN_APP_PUBLIC_URL as frame ancestor.
+    # This value is exported for diagnostics/docs and compose alignment.
+    VECTOPLAN_AUTH_FRAME_ANCESTORS = _env_str_first(
+        (
+            "VECTOPLAN_AUTH_FRAME_ANCESTORS",
+            "AUTH_FRAME_ANCESTORS",
+        ),
+        VECTOPLAN_ALLOWED_FRAME_PARENTS,
+    )
+
     VECTOPLAN_APP_ALLOWED_FRAME_SRC_LIST = _cached_origin_list(
         _env_str_first(
             (
@@ -950,6 +1370,15 @@ class Config:
             _space_join(_DEFAULT_APP_ALLOWED_FRAME_SRC),
         ),
         _space_join(_DEFAULT_APP_ALLOWED_FRAME_SRC),
+    )
+
+    VECTOPLAN_APP_ALLOWED_FRAME_SRC_LIST = _dedupe_texts(
+        [
+            *VECTOPLAN_APP_ALLOWED_FRAME_SRC_LIST,
+            VECTOPLAN_AUTH_PUBLIC_URL,
+            VECTOPLAN_EDITOR_PUBLIC_URL,
+            OPENLAYER_PUBLIC_URL,
+        ]
     )
 
     VECTOPLAN_APP_ALLOWED_FRAME_SRC = _space_join(VECTOPLAN_APP_ALLOWED_FRAME_SRC_LIST)
@@ -981,6 +1410,7 @@ class Config:
         [
             *VECTOPLAN_APP_ALLOWED_CONNECT_SRC_LIST,
             VECTOPLAN_APP_PUBLIC_URL,
+            VECTOPLAN_AUTH_PUBLIC_URL,
             VECTOPLAN_EDITOR_PUBLIC_URL,
             OPENLAYER_PUBLIC_URL,
             VECTOPLAN_CHUNK_PUBLIC_URL,

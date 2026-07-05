@@ -8,11 +8,14 @@ Zweck:
 - Verwaltet Projekt-Stammdaten, einfache Adressbox, Sichtbarkeit, Soft Delete,
   Besitzübertragung, Service-Links, zentrale Version-Links und Chunk-Referenzen.
 - Verknüpft App-Projekte serverseitig mit vectoplan-chunk-Projekten.
-- Bleibt kompatibel mit dem aktuellen Dev-User id=1.
-- Unterstützt den vorbereiteten Auth-/Demo-Kontext.
-- Erzeugt KEINE echten Benutzeraccounts.
+- Nutzt vectoplan-auth als Wahrheit für Loginstatus, User-ID, Blocked/Banned,
+  Account, Plan und Entitlements.
+- Nutzt AppUser nur als lokalen Foreign-Key-Link innerhalb vectoplan-app.
+- Unterstützt ein temporäres Demo-Projekt für Guests mit demo_project_access.
+- Erzeugt keine echten Benutzeraccounts.
+- Enthält keinen Default-User, keinen Dev-Placeholder und keinen Fallback auf id=1.
 
-Aktueller Projektformular-Zielzustand:
+Projektformular-Zielzustand:
 - Sichtbar im UI:
     name
     description
@@ -35,6 +38,8 @@ Aktueller Projektformular-Zielzustand:
 Wichtig:
 - vectoplan-app verwaltet Projekt-Metadaten, Rechte, Sichtbarkeit,
   Veröffentlichungen und Workspace-Shell.
+- vectoplan-auth verwaltet Login, Account, Plan, Subscription, Blocked/Banned,
+  Rollen und Entitlements.
 - vectoplan-chunk verwaltet Chunk-Projekt, Universe, WorldInstance, Snapshots,
   Command Logs und Chunk Events.
 - Externe Microservices werden in vectoplan-app nur referenziert.
@@ -45,7 +50,8 @@ Wichtig:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set
+
 
 try:
     from flask import current_app, has_app_context
@@ -81,7 +87,6 @@ try:
         build_embed_policy as model_build_embed_policy,
         build_membership as model_build_membership,
         create_project_version as model_create_project_version,
-        ensure_owner_membership as model_ensure_owner_membership,
         get_project_membership as model_get_project_membership,
         normalize_resource_type as model_normalize_resource_type,
         normalize_service as model_normalize_service,
@@ -106,39 +111,35 @@ except Exception as exc:  # pragma: no cover
 
 try:
     from services.current_user import (
-        ensure_default_user,
+        get_current_user,
         get_current_user_context,
-        get_current_user_id_from_g_or_default,
         get_current_user_id_optional,
-        get_default_user_id,
+        get_platform_auth_context,
         require_persistent_current_user,
         serialize_current_user,
     )
 except Exception:  # pragma: no cover
-    ensure_default_user = None  # type: ignore
+    get_current_user = None  # type: ignore
     serialize_current_user = None  # type: ignore
-
-    def get_current_user_id_from_g_or_default() -> int:  # type: ignore
-        return 1
+    get_platform_auth_context = None  # type: ignore
 
     def get_current_user_id_optional() -> Optional[int]:  # type: ignore
-        return 1
-
-    def get_default_user_id() -> int:  # type: ignore
-        return 1
+        return None
 
     def get_current_user_context(*args: Any, **kwargs: Any) -> Any:  # type: ignore
         return {
-            "user_id": 1,
-            "id": 1,
-            "authenticated": True,
+            "user_id": None,
+            "id": None,
+            "authenticated": False,
             "demo_mode": False,
-            "persistent": True,
-            "source": "fallback",
+            "persistent": False,
+            "blocked": True,
+            "blocked_reason": "current_user_unavailable",
+            "source": "fallback_blocked",
         }
 
     def require_persistent_current_user() -> Any:  # type: ignore
-        return get_current_user_context()
+        raise RuntimeError("persistent user required")
 
 
 try:
@@ -220,14 +221,12 @@ try:
         get_project_publication,
         normalize_publication_visibility,
         set_project_visibility as publication_set_project_visibility,
-        update_project_publication,
     )
 except Exception:  # pragma: no cover
     PUB_VISIBILITY_PRIVATE = "private"
     PUB_VISIBILITY_PUBLIC = "public"
     PUB_VISIBILITY_UNLISTED = "unlisted"
     get_project_publication = None  # type: ignore
-    update_project_publication = None  # type: ignore
     publication_set_project_visibility = None  # type: ignore
 
     def normalize_publication_visibility(value: Any, default: str = "private") -> str:  # type: ignore
@@ -239,6 +238,22 @@ except Exception:  # pragma: no cover
         if text in {"public", "öffentlich", "oeffentlich", "open"}:
             return "public"
         return default
+
+
+try:
+    from services.demo_project_service import (
+        cleanup_expired_demo_projects,
+        demo_project_public_payload,
+        ensure_demo_project_for_context,
+        get_current_demo_project,
+        is_demo_project as service_is_demo_project,
+    )
+except Exception:  # pragma: no cover
+    cleanup_expired_demo_projects = None  # type: ignore
+    demo_project_public_payload = None  # type: ignore
+    ensure_demo_project_for_context = None  # type: ignore
+    get_current_demo_project = None  # type: ignore
+    service_is_demo_project = None  # type: ignore
 
 
 try:
@@ -254,7 +269,7 @@ try:
         is_chunk_provisioning_required,
         preview_chunk_project_for_app_project_id,
     )
-except Exception:  # pragma: no cover - project service must still import without chunk client.
+except Exception:  # pragma: no cover
     ChunkClientError = Exception  # type: ignore
     apply_chunk_refs_to_project = None  # type: ignore
     build_chunk_project_payload = None  # type: ignore
@@ -274,6 +289,7 @@ except Exception:  # pragma: no cover - project service must still import withou
 PROJECT_STATUS_ACTIVE = "active"
 PROJECT_STATUS_DELETED = "deleted"
 PROJECT_STATUS_ARCHIVED = "archived"
+PROJECT_STATUS_EXPIRED = "expired"
 
 PROJECT_SETUP_DRAFT = "draft"
 PROJECT_SETUP_DEFINED = "defined"
@@ -283,6 +299,10 @@ PROJECT_VISIBILITY_PRIVATE = "private"
 PROJECT_VISIBILITY_PUBLIC = "public"
 PROJECT_VISIBILITY_UNLISTED = "unlisted"
 PROJECT_VISIBILITY_SHARED = "shared"
+
+PROJECT_SCOPE_PERSONAL = "personal"
+PROJECT_SCOPE_ACCOUNT = "account"
+PROJECT_SCOPE_DEMO = "demo"
 
 DEFAULT_PROJECT_NAME = "Neues Projekt"
 DEFAULT_ADDRESS_COUNTRY = "DE"
@@ -603,6 +623,7 @@ def _normalize_status(value: Any, default: str = PROJECT_STATUS_ACTIVE) -> str:
             PROJECT_STATUS_ACTIVE,
             PROJECT_STATUS_DELETED,
             PROJECT_STATUS_ARCHIVED,
+            PROJECT_STATUS_EXPIRED,
             CHUNK_STATUS_DISABLED,
             CHUNK_STATUS_PENDING,
             CHUNK_STATUS_READY,
@@ -711,17 +732,40 @@ def _payload_has(source: Mapping[str, Any], *keys: str) -> bool:
         return False
 
 
+def _project_is_demo(project: Any) -> bool:
+    try:
+        if project is None:
+            return False
+
+        if callable(service_is_demo_project):
+            try:
+                return bool(service_is_demo_project(project))
+            except Exception:
+                pass
+
+        if _safe_bool(getattr(project, "is_demo", False), False):
+            return True
+
+        if _safe_str(getattr(project, "project_scope", ""), "", 40).lower() == PROJECT_SCOPE_DEMO:
+            return True
+
+        metadata = _get_project_metadata(project)
+        demo_meta = _safe_dict(metadata.get("vectoplan_demo"))
+        return _safe_bool(demo_meta.get("enabled"), False)
+
+    except Exception:
+        return False
+
+
 # ─────────────────────────────────────────────────────────────
 # Auth / current user helpers
 # ─────────────────────────────────────────────────────────────
 
 def get_current_user_id(user_id: Optional[int] = None) -> int:
     """
-    Legacy-kompatibler Resolver.
+    Legacy-compatible resolver.
 
-    Für neue Demo-/Auth-sensible Logik besser:
-    - get_actor_user_id_optional()
-    - require_persistent_actor()
+    No default user exists. Returns 0 when no persistent local AppUser exists.
     """
     try:
         parsed = _safe_int(user_id, 0)
@@ -730,12 +774,12 @@ def get_current_user_id(user_id: Optional[int] = None) -> int:
 
         optional = get_current_user_id_optional()
         if optional:
-            return _safe_int(optional, get_default_user_id())
+            return _safe_int(optional, 0)
 
-        return _safe_int(get_current_user_id_from_g_or_default(), get_default_user_id())
+        return 0
 
     except Exception:
-        return 1
+        return 0
 
 
 def get_actor_context(user_id: Optional[int] = None) -> Dict[str, Any]:
@@ -747,6 +791,7 @@ def get_actor_context(user_id: Optional[int] = None) -> Dict[str, Any]:
             "authenticated": bool(uid),
             "demo_mode": False,
             "persistent": bool(uid),
+            "blocked": False,
             "source": "explicit_user_id",
         }
 
@@ -757,14 +802,15 @@ def get_actor_context(user_id: Optional[int] = None) -> Dict[str, Any]:
             data = _safe_dict(context.to_dict())
         return data
     except Exception:
-        uid = get_current_user_id()
         return {
-            "user_id": uid,
-            "id": uid,
-            "authenticated": bool(uid),
+            "user_id": None,
+            "id": None,
+            "authenticated": False,
             "demo_mode": False,
-            "persistent": bool(uid),
-            "source": "fallback",
+            "persistent": False,
+            "blocked": True,
+            "blocked_reason": "actor_context_unavailable",
+            "source": "fallback_blocked",
         }
 
 
@@ -775,10 +821,47 @@ def get_actor_user_id_optional(user_id: Optional[int] = None) -> Optional[int]:
             return parsed if parsed > 0 else None
 
         context = get_actor_context()
+
+        if _safe_bool(context.get("blocked"), False):
+            return None
+
+        if _safe_bool(context.get("demo_mode") or context.get("is_demo"), False):
+            return None
+
+        if not _safe_bool(context.get("persistent"), False):
+            return None
+
         parsed = _safe_int(context.get("user_id") or context.get("id"), 0)
         return parsed if parsed > 0 else None
     except Exception:
         return None
+
+
+def get_actor_auth_user_id(user_id: Optional[int] = None) -> Optional[str]:
+    try:
+        context = get_actor_context(user_id)
+        if _safe_bool(context.get("blocked"), False):
+            return None
+        return _safe_str(context.get("auth_user_id") or context.get("authUserId"), "", 160) or None
+    except Exception:
+        return None
+
+
+def get_actor_account_id(user_id: Optional[int] = None) -> Optional[str]:
+    try:
+        context = get_actor_context(user_id)
+        if _safe_bool(context.get("blocked"), False):
+            return None
+        return _safe_str(context.get("account_id") or context.get("accountId"), "", 160) or None
+    except Exception:
+        return None
+
+
+def actor_is_blocked(user_id: Optional[int] = None) -> bool:
+    try:
+        return _safe_bool(get_actor_context(user_id).get("blocked"), False)
+    except Exception:
+        return True
 
 
 def actor_is_demo(user_id: Optional[int] = None) -> bool:
@@ -786,6 +869,8 @@ def actor_is_demo(user_id: Optional[int] = None) -> bool:
         if user_id is not None:
             return False
         context = get_actor_context()
+        if _safe_bool(context.get("blocked"), False):
+            return False
         return _safe_bool(context.get("demo_mode") or context.get("is_demo"), False)
     except Exception:
         return False
@@ -794,11 +879,17 @@ def actor_is_demo(user_id: Optional[int] = None) -> bool:
 def actor_can_persist(user_id: Optional[int] = None) -> bool:
     try:
         if user_id is not None:
-            return True
+            return bool(_safe_int(user_id, 0) > 0)
+
         context = get_actor_context()
-        return _safe_bool(
-            context.get("persistent"),
-            default=bool(get_actor_user_id_optional()) and not actor_is_demo(),
+
+        if _safe_bool(context.get("blocked"), False):
+            return False
+
+        return bool(
+            _safe_bool(context.get("persistent"), False)
+            and get_actor_user_id_optional()
+            and not actor_is_demo()
         )
     except Exception:
         return False
@@ -814,16 +905,34 @@ def require_persistent_actor(user_id: Optional[int] = None) -> int:
     Externer Auth-User ohne lokalen AppUser-Link:
       abgelehnt.
 
-    Aktueller Dev-Modus:
-      user_id=1 bleibt erlaubt.
+    Blocked/Banned/Auth unavailable:
+      abgelehnt.
+
+    Kein Fallback auf Default-User.
     """
     try:
         if user_id is not None:
             parsed = _safe_int(user_id, 0)
             if parsed > 0:
+                context = get_actor_context()
+                if _safe_bool(context.get("blocked"), False):
+                    raise PermissionDenied(
+                        "Der Zugriff ist gesperrt.",
+                        code="auth_blocked",
+                        status_code=403,
+                        permission=PERMISSION_EDIT,
+                    )
                 return parsed
 
         context = get_actor_context()
+
+        if _safe_bool(context.get("blocked"), False):
+            raise PermissionDenied(
+                "Der Zugriff ist gesperrt.",
+                code=_safe_str(context.get("blocked_reason"), "auth_blocked", 120),
+                status_code=403,
+                permission=PERMISSION_EDIT,
+            )
 
         if _safe_bool(context.get("demo_mode") or context.get("is_demo"), False):
             raise PermissionDenied(
@@ -833,7 +942,7 @@ def require_persistent_actor(user_id: Optional[int] = None) -> int:
                 permission=PERMISSION_EDIT,
             )
 
-        if not _safe_bool(context.get("authenticated") or context.get("is_authenticated"), bool(context.get("user_id"))):
+        if not _safe_bool(context.get("authenticated") or context.get("is_authenticated"), False):
             raise PermissionDenied(
                 "Für diese Projektaktion ist Login erforderlich.",
                 code="authentication_required",
@@ -841,7 +950,7 @@ def require_persistent_actor(user_id: Optional[int] = None) -> int:
                 permission=PERMISSION_EDIT,
             )
 
-        if not _safe_bool(context.get("persistent"), bool(context.get("user_id"))):
+        if not _safe_bool(context.get("persistent"), False):
             raise PermissionDenied(
                 "Für diese Projektaktion ist eine lokale AppUser-Verknüpfung erforderlich.",
                 code="persistent_user_required",
@@ -873,10 +982,9 @@ def require_persistent_actor(user_id: Optional[int] = None) -> int:
 
 def ensure_project_user() -> Any:
     """
-    Stellt den aktuellen Dev-Placeholder-User sicher.
+    Liefert den aktuellen lokalen AppUser-Link, falls persistent vorhanden.
 
-    Keine echte Userregistrierung.
-    Im Demo-Modus wird kein User erzeugt.
+    Erzeugt keinen Default-User.
     """
     if actor_is_demo():
         return None
@@ -885,8 +993,8 @@ def ensure_project_user() -> Any:
         return None
 
     try:
-        if ensure_default_user is not None:
-            return ensure_default_user()
+        if callable(get_current_user):
+            return get_current_user(ensure=True)
     except Exception:
         return None
 
@@ -935,49 +1043,6 @@ def _normalize_permission(value: Any, default: str = PERMISSION_VIEW) -> str:
     } else default
 
 
-def _role_permissions(role: str) -> Dict[str, bool]:
-    clean = normalize_role(role)
-
-    if clean == ROLE_OWNER:
-        return {
-            PERMISSION_VIEW: True,
-            PERMISSION_EDIT: True,
-            PERMISSION_MANAGE: True,
-            PERMISSION_DELETE: True,
-            PERMISSION_TRANSFER: True,
-            PERMISSION_EMBED: True,
-        }
-
-    if clean == ROLE_ADMIN:
-        return {
-            PERMISSION_VIEW: True,
-            PERMISSION_EDIT: True,
-            PERMISSION_MANAGE: True,
-            PERMISSION_DELETE: False,
-            PERMISSION_TRANSFER: False,
-            PERMISSION_EMBED: True,
-        }
-
-    if clean == ROLE_EDITOR:
-        return {
-            PERMISSION_VIEW: True,
-            PERMISSION_EDIT: True,
-            PERMISSION_MANAGE: False,
-            PERMISSION_DELETE: False,
-            PERMISSION_TRANSFER: False,
-            PERMISSION_EMBED: False,
-        }
-
-    return {
-        PERMISSION_VIEW: True,
-        PERMISSION_EDIT: False,
-        PERMISSION_MANAGE: False,
-        PERMISSION_DELETE: False,
-        PERMISSION_TRANSFER: False,
-        PERMISSION_EMBED: False,
-    }
-
-
 def get_project_permission_result(
     project: Any,
     *,
@@ -1012,73 +1077,7 @@ def get_project_permission_result(
     except Exception:
         pass
 
-    try:
-        if project is None:
-            return ProjectPermissionResult()
-
-        uid = get_current_user_id(user_id)
-        owner_user_id = _safe_int(getattr(project, "owner_user_id", None), 0)
-
-        if owner_user_id and uid == owner_user_id:
-            permissions = _role_permissions(ROLE_OWNER)
-            return ProjectPermissionResult(
-                can_view=permissions[PERMISSION_VIEW],
-                can_edit=permissions[PERMISSION_EDIT],
-                can_manage=permissions[PERMISSION_MANAGE],
-                can_delete=permissions[PERMISSION_DELETE],
-                can_transfer=permissions[PERMISSION_TRANSFER],
-                can_embed=permissions[PERMISSION_EMBED],
-                can_view_settings=True,
-                can_manage_settings=True,
-                can_view_team=True,
-                can_manage_team=True,
-                can_view_admin=True,
-                role=ROLE_OWNER,
-                source="owner_fallback",
-            )
-
-        membership = _get_membership(project, uid)
-
-        if membership is not None:
-            try:
-                is_active = bool(getattr(membership, "is_active", True))
-            except Exception:
-                is_active = True
-
-            if is_active:
-                role = normalize_role(getattr(membership, "role", ROLE_VIEWER))
-                can_manage = bool(getattr(membership, "can_manage", False)) or role in {ROLE_OWNER, ROLE_ADMIN}
-                return ProjectPermissionResult(
-                    can_view=bool(getattr(membership, "can_view", False)),
-                    can_edit=bool(getattr(membership, "can_edit", False)),
-                    can_manage=can_manage,
-                    can_delete=bool(getattr(membership, "can_delete", False)),
-                    can_transfer=bool(getattr(membership, "can_transfer", False)),
-                    can_embed=bool(getattr(membership, "can_embed", False)),
-                    can_view_settings=can_manage,
-                    can_manage_settings=can_manage,
-                    can_view_team=can_manage,
-                    can_manage_team=can_manage,
-                    can_view_admin=can_manage,
-                    role=role,
-                    source="membership_fallback",
-                )
-
-        visibility = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
-        is_public = bool(getattr(project, "is_public", False)) or visibility == PROJECT_VISIBILITY_PUBLIC
-        is_unlisted = visibility == PROJECT_VISIBILITY_UNLISTED
-
-        if allow_public_view and (is_public or is_unlisted):
-            return ProjectPermissionResult(
-                can_view=True,
-                role=ROLE_VIEWER,
-                source="public_fallback" if is_public else "unlisted_fallback",
-            )
-
-        return ProjectPermissionResult()
-
-    except Exception:
-        return ProjectPermissionResult()
+    return ProjectPermissionResult()
 
 
 def serialize_project_permissions(project: Any, *, user_id: Optional[int] = None) -> Dict[str, Any]:
@@ -1176,17 +1175,17 @@ def project_workspace_path(project: Any) -> str:
 def project_editor_path(project: Any) -> str:
     try:
         public_id = _safe_str(getattr(project, "public_id", None), "", 120)
-        return f"/ui/project/{public_id}/editor3d" if public_id else "/ui/editor3d"
+        return f"/ui/project/{public_id}/editor3d" if public_id else "/ui/project/new"
     except Exception:
-        return "/ui/editor3d"
+        return "/ui/project/new"
 
 
 def project_map_path(project: Any) -> str:
     try:
         public_id = _safe_str(getattr(project, "public_id", None), "", 120)
-        return f"/ui/project/{public_id}/map" if public_id else "/ui/map"
+        return f"/ui/project/{public_id}/map" if public_id else "/ui/project/new"
     except Exception:
-        return "/ui/map"
+        return "/ui/project/new"
 
 
 def project_cad2d_path(project: Any) -> str:
@@ -1207,10 +1206,12 @@ def project_lv_path(project: Any) -> str:
 
 def project_admin_path(project: Any) -> str:
     try:
+        if _project_is_demo(project):
+            return ""
         public_id = _safe_str(getattr(project, "public_id", None), "", 120)
         return f"/ui/project/{public_id}/admin" if public_id else "/ui/project/new"
     except Exception:
-        return "/ui/project/new"
+        return ""
 
 
 def build_project_paths(project: Any) -> Dict[str, str]:
@@ -1220,6 +1221,7 @@ def build_project_paths(project: Any) -> Dict[str, str]:
             "projectUrl": project_workspace_path(project),
             "projectPublicUrl": project_public_url(project),
             "editorPagePath": project_editor_path(project),
+            "editor3dPagePath": project_editor_path(project),
             "initialEditorUrl": project_editor_path(project),
             "mapPagePath": project_map_path(project),
             "cad2dPagePath": project_cad2d_path(project),
@@ -1279,15 +1281,6 @@ def get_project_address_text(project: Any, *, allow_structured_fallback: bool = 
 
 
 def _project_has_minimum_definition(project: Any) -> bool:
-    """
-    Neues fachliches Minimum:
-    - Projektname
-    - eine nutzbare Adressbox/address_text
-
-    Legacy-Fallback:
-    - bestehende Projekte mit alten strukturierten Adressfeldern gelten weiterhin
-      als definiert, damit alte Daten nicht unbeabsichtigt zurückfallen.
-    """
     try:
         has_name = bool(_safe_str(getattr(project, "name", None), "", 255))
         has_address_text = bool(_safe_str(getattr(project, "address_text", None), "", 2000))
@@ -1352,13 +1345,6 @@ def _mark_geocode_pending_or_stale(
 
 
 def _structured_address_payload_from_geocoder(source: Mapping[str, Any]) -> Dict[str, Any]:
-    """
-    Extrahiert strukturierte Adress-/Koordinatenfelder nur aus expliziten
-    Geocoder-/Backend-Payloads.
-
-    Dadurch werden die Felder nicht mehr aus dem normalen Projektformular
-    erwartet, bleiben aber für spätere Geocoder-Anbindung nutzbar.
-    """
     payload: Dict[str, Any] = {}
     data = _safe_dict(source)
 
@@ -1373,7 +1359,6 @@ def _structured_address_payload_from_geocoder(source: Mapping[str, Any]) -> Dict
     address = _safe_dict(data.get("address"))
     coordinates = _safe_dict(data.get("coordinates") or data.get("location") or geocoder.get("coordinates"))
 
-    # Explizite Geocoder-Daten bevorzugen.
     candidates = {
         "street": geocoder.get("street") or geocoder.get("road") or geocoder.get("address_street"),
         "house_number": geocoder.get("house_number") or geocoder.get("houseNumber") or geocoder.get("address_house_number"),
@@ -1383,9 +1368,6 @@ def _structured_address_payload_from_geocoder(source: Mapping[str, Any]) -> Dict
         "country": geocoder.get("country") or geocoder.get("country_code") or geocoder.get("address_country"),
     }
 
-    # Backward-compatible: wenn ein explizites address-Objekt mit Feldern kommt,
-    # darf es ebenfalls übernommen werden. Das normale UI sendet künftig nur
-    # address_text.
     if isinstance(data.get("address"), Mapping):
         candidates.update(
             {
@@ -1414,6 +1396,7 @@ def _structured_address_payload_from_geocoder(source: Mapping[str, Any]) -> Dict
         if coordinates.get("latitude") is not None
         else coordinates.get("lat")
     )
+
     lon_value = (
         geocoder.get("longitude")
         if geocoder.get("longitude") is not None
@@ -1439,6 +1422,7 @@ def _structured_address_payload_from_geocoder(source: Mapping[str, Any]) -> Dict
         or coordinates.get("srid")
         or coordinates.get("coordinate_srid")
     )
+
     if srid is not None:
         payload["coordinate_srid"] = _safe_str(srid, DEFAULT_COORDINATE_SRID, 40) or DEFAULT_COORDINATE_SRID
 
@@ -1499,6 +1483,7 @@ def _project_chunk_refs(project: Any) -> Dict[str, Any]:
         status = (
             _safe_str(chunk_refs.get("status"), "", 40)
             or _safe_str(chunk_metadata.get("status"), "", 40)
+            or _safe_str(getattr(project, "chunk_status", None), "", 40)
         )
 
         if not status:
@@ -1548,6 +1533,12 @@ def _set_project_chunk_refs(
 
         if hasattr(project, "chunk_world_id"):
             project.chunk_world_id = clean_chunk_world_id
+
+        if hasattr(project, "chunk_status"):
+            project.chunk_status = clean_status
+
+        if hasattr(project, "chunk_ready"):
+            project.chunk_ready = bool(clean_chunk_project_id and clean_chunk_world_id and clean_status == CHUNK_STATUS_READY)
 
         service_refs = _safe_dict(getattr(project, "service_refs", {}))
         service_refs[SERVICE_CHUNK] = {
@@ -1687,6 +1678,8 @@ def _upsert_chunk_service_links_from_refs(
 
     chunk_public_url = _config_str("VECTOPLAN_CHUNK_PUBLIC_URL", "", 4000)
 
+    actor_id = get_current_user_id(user_id) or None
+
     if chunk_project_id:
         rows.append(
             _internal_upsert_project_service_link(
@@ -1705,7 +1698,8 @@ def _upsert_chunk_service_links_from_refs(
                     "chunk_universe_id": chunk_universe_id,
                     "chunk_world_id": chunk_world_id,
                     "route_hints": route_hints,
-                    "user_id": get_current_user_id(user_id),
+                    "user_id": actor_id,
+                    "is_demo": _project_is_demo(project),
                 },
             )
         )
@@ -1729,7 +1723,8 @@ def _upsert_chunk_service_links_from_refs(
                     "chunk_universe_id": chunk_universe_id,
                     "chunk_world_id": chunk_world_id,
                     "route_hints": route_hints,
-                    "user_id": get_current_user_id(user_id),
+                    "user_id": actor_id,
+                    "is_demo": _project_is_demo(project),
                 },
             )
         )
@@ -1771,6 +1766,9 @@ def _should_attempt_chunk_provision(project: Any, *, force: bool = False) -> boo
     if bool(getattr(project, "is_deleted", False)):
         return False
 
+    if _safe_str(getattr(project, "status", ""), "", 40) in {PROJECT_STATUS_DELETED, PROJECT_STATUS_EXPIRED}:
+        return False
+
     if force:
         return True
 
@@ -1794,7 +1792,21 @@ def ensure_project_chunk_link(
                 error="project required",
             )
 
-        uid = require_persistent_actor(user_id)
+        if _project_is_demo(project):
+            permissions = get_project_permission_result(project, user_id=user_id, allow_public_view=False)
+            if not permissions.can_view and not permissions.can_edit:
+                raise PermissionDenied(
+                    "Demo-Projekt ist für diesen Guest nicht zugänglich.",
+                    code="demo_project_permission_denied",
+                    status_code=403,
+                    permission=PERMISSION_VIEW,
+                    project_id=_project_public_id(project),
+                    user_id=None,
+                )
+            uid = None
+        else:
+            uid = require_persistent_actor(user_id)
+            require_project_permission(project, PERMISSION_MANAGE, uid, allow_public_view=False)
 
         if not _chunk_provisioning_enabled():
             _set_project_chunk_status(project, status=CHUNK_STATUS_DISABLED)
@@ -1808,6 +1820,7 @@ def ensure_project_chunk_link(
                 payload={
                     "service": SERVICE_CHUNK,
                     "reason": "disabled_by_config",
+                    "is_demo": _project_is_demo(project),
                 },
                 commit=False,
             )
@@ -1869,6 +1882,7 @@ def ensure_project_chunk_link(
                 payload={
                     "service": SERVICE_CHUNK,
                     "error": error,
+                    "is_demo": _project_is_demo(project),
                 },
                 commit=False,
             )
@@ -1931,6 +1945,7 @@ def ensure_project_chunk_link(
                 after=_project_chunk_refs(project),
                 payload={
                     "service": SERVICE_CHUNK,
+                    "is_demo": _project_is_demo(project),
                     "chunk_result": result.to_dict(include_raw=False, include_request_body=False)
                     if hasattr(result, "to_dict")
                     else {},
@@ -1971,6 +1986,7 @@ def ensure_project_chunk_link(
             after=_project_chunk_refs(project),
             payload={
                 "service": SERVICE_CHUNK,
+                "is_demo": _project_is_demo(project),
                 "error": error,
                 "chunk_result": result.to_dict(include_raw=False, include_request_body=False)
                 if hasattr(result, "to_dict")
@@ -2214,13 +2230,12 @@ def serialize_project(
         address_text = get_project_address_text(project, allow_structured_fallback=True)
         visibility = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
         chunk_refs = _project_chunk_refs(project)
+        is_demo = _project_is_demo(project)
 
         payload["address_text"] = address_text
         payload["addressText"] = address_text
         payload["address"] = {
             "text": address_text,
-            # Diese Felder bleiben für Geocoder/Legacy lesbar, sind aber nicht
-            # mehr als normale UI-Eingaben gedacht.
             "street": getattr(project, "street", None),
             "house_number": getattr(project, "house_number", None),
             "postal_code": getattr(project, "postal_code", None),
@@ -2236,11 +2251,25 @@ def serialize_project(
         }
         payload["geocode"] = _safe_dict(_get_project_metadata(project).get("geocode"))
         payload["geocode_status"] = _geocode_status_from_project(project)
-        payload["visibility"] = visibility
-        payload["is_public"] = visibility == PROJECT_VISIBILITY_PUBLIC
-        payload["isPublic"] = visibility == PROJECT_VISIBILITY_PUBLIC
-        payload["is_unlisted"] = visibility == PROJECT_VISIBILITY_UNLISTED
-        payload["isUnlisted"] = visibility == PROJECT_VISIBILITY_UNLISTED
+        payload["visibility"] = PROJECT_VISIBILITY_PRIVATE if is_demo else visibility
+        payload["is_public"] = False if is_demo else visibility == PROJECT_VISIBILITY_PUBLIC
+        payload["isPublic"] = False if is_demo else visibility == PROJECT_VISIBILITY_PUBLIC
+        payload["is_unlisted"] = False if is_demo else visibility == PROJECT_VISIBILITY_UNLISTED
+        payload["isUnlisted"] = False if is_demo else visibility == PROJECT_VISIBILITY_UNLISTED
+
+        payload["is_demo"] = is_demo
+        payload["isDemo"] = is_demo
+        payload["project_scope"] = getattr(project, "project_scope", PROJECT_SCOPE_DEMO if is_demo else PROJECT_SCOPE_PERSONAL)
+        payload["projectScope"] = payload["project_scope"]
+
+        if is_demo and callable(demo_project_public_payload):
+            try:
+                payload["demo"] = demo_project_public_payload(project, get_current_user_context(ensure=False))
+            except Exception:
+                payload["demo"] = {
+                    "is_demo": True,
+                    "expires_at": _iso(getattr(project, "demo_expires_at", None)),
+                }
 
         payload["url"] = project_public_url(project)
         payload["href"] = project_public_url(project)
@@ -2261,7 +2290,7 @@ def serialize_project(
         if include_permissions:
             payload["access"] = serialize_project_permissions(project, user_id=user_id)
 
-        if include_members:
+        if include_members and not is_demo:
             payload["members"] = list_project_memberships(project)
 
         if include_service_links:
@@ -2270,7 +2299,7 @@ def serialize_project(
         if include_versions:
             payload["versions"] = list_project_versions(project)
 
-        if include_embed_policy:
+        if include_embed_policy and not is_demo:
             policy = get_or_create_embed_policy(project, user_id=user_id, commit=False)
             payload["embed_policy"] = (
                 model_serialize_embed_policy(policy)
@@ -2278,7 +2307,7 @@ def serialize_project(
                 else {}
             )
 
-        if include_publication and callable(get_project_publication):
+        if include_publication and callable(get_project_publication) and not is_demo:
             try:
                 publication_result = get_project_publication(
                     project,
@@ -2293,6 +2322,13 @@ def serialize_project(
                 payload["publication"] = _safe_dict(publication_result.get("publication"))
             except Exception:
                 payload["publication"] = {}
+        elif is_demo:
+            payload["publication"] = {
+                "visibility": PROJECT_VISIBILITY_PRIVATE,
+                "published_workspaces": [],
+                "public": False,
+                "reason": "demo_not_public",
+            }
 
         return payload
 
@@ -2326,14 +2362,18 @@ def serialize_project_sidebar_item(project: Any, *, user_id: Optional[int] = Non
 
         chunk_refs = _project_chunk_refs(project)
         access = serialize_project_permissions(project, user_id=user_id)
+        is_demo = _project_is_demo(project)
 
         item["permissions"] = access.get("permissions", {})
         item["access"] = access
         item["isConfigured"] = bool(getattr(project, "is_configured", False))
         item["is_configured"] = bool(getattr(project, "is_configured", False))
+        item["isDemo"] = is_demo
+        item["is_demo"] = is_demo
+        item["demoExpiresAt"] = _iso(getattr(project, "demo_expires_at", None))
         item["conversationId"] = getattr(project, "conversation_id", None)
         item["conversation_id"] = getattr(project, "conversation_id", None)
-        item["visibility"] = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
+        item["visibility"] = PROJECT_VISIBILITY_PRIVATE if is_demo else _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
 
         item["chunkReady"] = bool(chunk_refs.get("ready"))
         item["chunk_ready"] = bool(chunk_refs.get("ready"))
@@ -2388,41 +2428,56 @@ def serialize_project_list(
 def list_projects_for_user(
     user_id: Optional[int] = None,
     *,
-    include_public: bool = True,
+    include_public: bool = False,
     include_unlisted: bool = False,
     include_deleted: bool = False,
+    include_demo: bool = False,
     search: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
 ) -> List[Any]:
     try:
-        uid = get_actor_user_id_optional(user_id)
+        context = get_actor_context(user_id)
 
-        # Demo ohne persistente AppUser-Verknüpfung bekommt keine echten Projekte
-        # aus der DB-Sidebar. Das spätere Demo-Projekt wird separat angebunden.
-        if not uid and actor_is_demo(user_id):
+        if _safe_bool(context.get("blocked"), False):
             return []
 
-        if not uid:
-            uid = get_current_user_id(user_id)
+        if _safe_bool(context.get("demo_mode"), False):
+            return []
+
+        uid = get_actor_user_id_optional(user_id)
+        auth_user_id = _safe_str(context.get("auth_user_id") or context.get("authUserId"), "", 160)
+        account_id = _safe_str(context.get("account_id") or context.get("accountId"), "", 160)
+
+        if not uid and not auth_user_id and not include_public:
+            return []
 
         limit_value = _query_limit(limit, 100, 500)
         offset_value = max(_safe_int(offset, 0), 0)
 
         membership_project_ids: List[int] = []
 
-        try:
-            memberships = ProjectMembership.query.filter_by(user_id=uid, status="active").all()
-            for membership in memberships:
-                project_id = _safe_int(getattr(membership, "project_id", None), 0)
-                if project_id and project_id not in membership_project_ids:
-                    membership_project_ids.append(project_id)
-        except Exception:
-            membership_project_ids = []
+        if uid:
+            try:
+                memberships = ProjectMembership.query.filter_by(user_id=uid, status="active").all()
+                for membership in memberships:
+                    project_id = _safe_int(getattr(membership, "project_id", None), 0)
+                    if project_id and project_id not in membership_project_ids:
+                        membership_project_ids.append(project_id)
+            except Exception:
+                membership_project_ids = []
 
         query = Project.query
+        conditions = []
 
-        conditions = [Project.owner_user_id == uid]
+        if uid:
+            conditions.append(Project.owner_user_id == uid)
+
+        if auth_user_id and hasattr(Project, "auth_owner_user_id"):
+            conditions.append(Project.auth_owner_user_id == auth_user_id)
+
+        if account_id and hasattr(Project, "auth_account_id"):
+            conditions.append(Project.auth_account_id == account_id)
 
         if membership_project_ids:
             conditions.append(Project.id.in_(membership_project_ids))
@@ -2431,18 +2486,23 @@ def list_projects_for_user(
             conditions.append(Project.is_public.is_(True))
             conditions.append(Project.visibility == PROJECT_VISIBILITY_PUBLIC)
 
-        # Unlisted soll nicht standardmäßig in Listen auftauchen.
-        # Direkter Link funktioniert über get_project_result.
         if include_unlisted:
             conditions.append(Project.visibility == PROJECT_VISIBILITY_UNLISTED)
 
-        if or_ is not None:
-            query = query.filter(or_(*conditions))
+        if conditions:
+            if or_ is not None:
+                query = query.filter(or_(*conditions))
+            elif uid:
+                query = query.filter(Project.owner_user_id == uid)
         else:
-            query = query.filter(Project.owner_user_id == uid)
+            return []
+
+        if not include_demo and hasattr(Project, "is_demo"):
+            query = query.filter(Project.is_demo.is_(False))
 
         if not include_deleted:
             query = query.filter(Project.status != PROJECT_STATUS_DELETED)
+            query = query.filter(Project.status != PROJECT_STATUS_EXPIRED)
 
         if search:
             needle = f"%{_safe_str(search, '', 120)}%"
@@ -2479,7 +2539,7 @@ def list_projects_for_user(
 def list_project_sidebar_items(
     user_id: Optional[int] = None,
     *,
-    include_public: bool = True,
+    include_public: bool = False,
     limit: int = 100,
 ) -> List[Dict[str, Any]]:
     try:
@@ -2488,6 +2548,7 @@ def list_project_sidebar_items(
             include_public=include_public,
             include_unlisted=False,
             include_deleted=False,
+            include_demo=False,
             limit=limit,
         )
 
@@ -2510,18 +2571,6 @@ def _normalize_project_payload(
     for_update: bool = False,
     existing_project: Any = None,
 ) -> Dict[str, Any]:
-    """
-    Normalisiert Payload aus dem Projektformular.
-
-    Neue UI-Regel:
-    - Das Projektformular sendet nur name, description, address_text, visibility.
-    - is_public wird aus visibility abgeleitet.
-    - Strukturierte Adresse/Koordinaten werden nur noch aus expliziten
-      Geocoder-/Backend-Payloads übernommen.
-
-    Rückgabe enthält:
-    - __present: Set[str] der Felder, die tatsächlich gesetzt werden sollen.
-    """
     source = _safe_dict(data)
     present: Set[str] = set()
 
@@ -2534,7 +2583,6 @@ def _normalize_project_payload(
             "artifact_refs": {},
         }
 
-        # Name
         if not for_update or _payload_has(source, "name", "title", "project_name"):
             name = (
                 source.get("name")
@@ -2545,13 +2593,11 @@ def _normalize_project_payload(
             payload["name"] = _safe_str(name, DEFAULT_PROJECT_NAME, 255) or DEFAULT_PROJECT_NAME
             present.add("name")
 
-        # Beschreibung. Bei update darf leerer String bewusst löschen.
         if not for_update or _payload_has(source, "description"):
             description = _safe_str(source.get("description"), "", 10000)
             payload["description"] = description or None
             present.add("description")
 
-        # Eine einzige sichtbare Adressbox.
         raw_address = source.get("address")
         address = _safe_dict(raw_address)
         address_text_value = source.get("address_text")
@@ -2569,11 +2615,9 @@ def _normalize_project_payload(
             payload["address_text"] = _safe_str(address_text_value, "", 2000) or None
             present.add("address_text")
 
-        # Sichtbarkeit. Kein eigenes UI-is_public mehr.
         if not for_update or _payload_has(source, "visibility", "is_public", "public"):
             visibility_input = source.get("visibility")
 
-            # Backward compatibility: alte Checkbox nur nutzen, wenn visibility fehlt.
             if visibility_input is None and _safe_bool(source.get("is_public", source.get("public")), False):
                 visibility_input = PROJECT_VISIBILITY_PUBLIC
 
@@ -2583,19 +2627,12 @@ def _normalize_project_payload(
             present.add("visibility")
             present.add("is_public")
 
-        # Strukturierte Daten nur aus Geocoder-/Backend-Payloads.
         structured = _structured_address_payload_from_geocoder(source)
         if structured:
             for key, value in structured.items():
-                if key in {"geocode_payload", "geocode_status"}:
-                    payload[key] = value
-                    present.add(key)
-                    continue
-
                 payload[key] = value
                 present.add(key)
 
-        # Backward-compatible Systemrefs nur wenn explizit erlaubt.
         allow_system_refs = _safe_bool(
             source.get("allow_system_refs")
             if "allow_system_refs" in source
@@ -2623,7 +2660,6 @@ def _normalize_project_payload(
                     payload[key] = _safe_str(value, "", 160) or None
                 present.add(key)
 
-        # Create defaults.
         if not for_update:
             payload.setdefault("name", DEFAULT_PROJECT_NAME)
             payload.setdefault("description", None)
@@ -2634,8 +2670,6 @@ def _normalize_project_payload(
             payload.setdefault("coordinate_srid", DEFAULT_COORDINATE_SRID)
             present.update({"name", "description", "address_text", "visibility", "is_public"})
 
-        # Setup-Status wird aus dem fachlichen Minimum abgeleitet, nicht blind
-        # aus dem UI übernommen.
         projected_name = payload.get("name")
         if for_update and projected_name is None and existing_project is not None:
             projected_name = getattr(existing_project, "name", None)
@@ -2674,15 +2708,21 @@ def _apply_project_payload(project: Any, payload: Dict[str, Any]) -> Any:
     try:
         present = set(payload.get("__present") or [])
         before_address_text = get_project_address_text(project, allow_structured_fallback=False)
+        is_demo = _project_is_demo(project)
 
-        # Normale Projektformular-Felder.
-        for key in ["name", "description", "address_text", "visibility", "is_public", "settings"]:
+        for key in ["name", "description", "address_text", "settings"]:
             if key not in present:
                 continue
             if hasattr(project, key):
                 setattr(project, key, payload.get(key))
 
-        # Strukturierte Felder nur wenn Geocoder/Backend sie explizit geliefert hat.
+        if not is_demo:
+            for key in ["visibility", "is_public"]:
+                if key not in present:
+                    continue
+                if hasattr(project, key):
+                    setattr(project, key, payload.get(key))
+
         structured_fields = [
             "street",
             "house_number",
@@ -2700,10 +2740,10 @@ def _apply_project_payload(project: Any, payload: Dict[str, Any]) -> Any:
                 setattr(project, key, payload.get(key))
 
         if "visibility" in present:
-            visibility = _normalize_visibility(payload.get("visibility"), PROJECT_VISIBILITY_PRIVATE)
+            visibility = PROJECT_VISIBILITY_PRIVATE if is_demo else _normalize_visibility(payload.get("visibility"), PROJECT_VISIBILITY_PRIVATE)
             project.visibility = visibility
             if hasattr(project, "is_public"):
-                project.is_public = visibility == PROJECT_VISIBILITY_PUBLIC
+                project.is_public = False if is_demo else visibility == PROJECT_VISIBILITY_PUBLIC
 
         if "setup_status" in present:
             project.setup_status = payload.get("setup_status") or PROJECT_SETUP_DRAFT
@@ -2812,7 +2852,7 @@ def get_or_create_project_conversation(project: Any, *, commit: bool = False) ->
 
 def get_or_create_embed_policy(project: Any, *, user_id: Optional[int] = None, commit: bool = False) -> Any:
     try:
-        if project is None:
+        if project is None or _project_is_demo(project):
             return None
 
         policy = ProjectEmbedPolicy.query.filter_by(project_id=project.id).one_or_none()
@@ -2820,7 +2860,7 @@ def get_or_create_embed_policy(project: Any, *, user_id: Optional[int] = None, c
         if policy is None:
             policy = model_build_embed_policy(
                 project_id=project.id,
-                created_by_user_id=get_current_user_id(user_id),
+                created_by_user_id=get_current_user_id(user_id) or None,
             )
             db.session.add(policy)
             _db_flush_or_commit(commit)
@@ -2865,6 +2905,101 @@ def _record_project_event(
 
 
 # ─────────────────────────────────────────────────────────────
+# Demo project helpers
+# ─────────────────────────────────────────────────────────────
+
+def _ensure_or_update_demo_project(
+    data: Optional[Dict[str, Any]] = None,
+    *,
+    commit: bool = True,
+    provision_chunk: Optional[bool] = None,
+) -> Any:
+    context = get_current_user_context(ensure=False)
+
+    if _safe_bool(_safe_dict(context).get("blocked"), False):
+        raise PermissionDenied(
+            "Der Zugriff ist gesperrt.",
+            code="auth_blocked",
+            status_code=403,
+            permission=PERMISSION_EDIT,
+        )
+
+    context_dict = _safe_dict(context)
+    if not context_dict and hasattr(context, "to_dict"):
+        context_dict = _safe_dict(context.to_dict())
+
+    if not _safe_bool(context_dict.get("demo_mode") or context_dict.get("is_demo"), False):
+        raise PermissionDenied(
+            "Demo-Projekt kann nur im Demo-Modus genutzt werden.",
+            code="demo_context_required",
+            status_code=403,
+            permission=PERMISSION_EDIT,
+        )
+
+    if ensure_demo_project_for_context is None:
+        raise PermissionDenied(
+            "Demo-Projekt-Service ist nicht verfügbar.",
+            code="demo_project_service_unavailable",
+            status_code=503,
+            permission=PERMISSION_EDIT,
+        )
+
+    result = ensure_demo_project_for_context(
+        context=context,
+        reset=False,
+        commit=commit,
+        provision_chunk=provision_chunk,
+    )
+
+    if not getattr(result, "ok", False) or getattr(result, "project", None) is None:
+        raise PermissionDenied(
+            getattr(result, "error", None) or getattr(result, "reason", "demo_project_unavailable"),
+            code=getattr(result, "reason", "demo_project_unavailable"),
+            status_code=403,
+            permission=PERMISSION_EDIT,
+        )
+
+    project = result.project
+
+    if data:
+        payload = _normalize_project_payload(data, for_update=True, existing_project=project)
+        _apply_project_payload(project, payload)
+
+        if hasattr(project, "mark_demo"):
+            try:
+                project.mark_demo(
+                    demo_client_identity_id=getattr(getattr(result, "demo_identity", None), "raw_identity", None),
+                    demo_session_id=getattr(getattr(result, "demo_identity", None), "demo_session_id", None),
+                    demo_expires_at=getattr(result, "expires_at", None),
+                    reason="demo_update",
+                )
+            except Exception:
+                pass
+
+        get_or_create_project_conversation(project, commit=False)
+        db.session.add(project)
+
+        _record_project_event(
+            project,
+            action="demo_updated",
+            category="project",
+            actor_user_id=None,
+            before={},
+            after=serialize_project(project, user_id=None, include_permissions=False),
+            payload={
+                "source": "project_service._ensure_or_update_demo_project",
+                "demo": True,
+                "payload_fields": sorted(list(payload.get("__present") or [])),
+            },
+            commit=False,
+        )
+
+        _db_flush_or_commit(commit)
+
+    return project
+
+
+# ─────────────────────────────────────────────────────────────
 # Project creation / update
 # ─────────────────────────────────────────────────────────────
 
@@ -2876,25 +3011,27 @@ def create_project(
     provision_chunk: Optional[bool] = None,
 ) -> Any:
     """
-    Create an app project.
+    Create a persistent app project.
 
-    Transaction strategy:
-    1. Create and commit the app project graph first.
-    2. Then call vectoplan-chunk through INTERNAL_URL.
-    3. Store returned chunk refs in a second app DB update.
-
-    This avoids pretending that app DB and chunk DB share a distributed
-    transaction.
+    Demo users are handled by create_project_result(), not here.
     """
     try:
         uid = require_persistent_actor(user_id)
-        user = ensure_project_user()
-        payload = _normalize_project_payload(data, for_update=False)
+        context = get_actor_context(uid)
+        auth_user_id = _safe_str(context.get("auth_user_id") or context.get("authUserId"), "", 160) or None
+        auth_account_id = _safe_str(context.get("account_id") or context.get("accountId"), "", 160) or None
 
+        payload = _normalize_project_payload(data, for_update=False)
         visibility = _normalize_visibility(payload.get("visibility"), PROJECT_VISIBILITY_PRIVATE)
+        project_scope = PROJECT_SCOPE_ACCOUNT if auth_account_id else PROJECT_SCOPE_PERSONAL
 
         project = Project(
             owner_user_id=uid,
+            auth_owner_user_id=auth_user_id,
+            auth_account_id=auth_account_id,
+            owner_subject_type="user",
+            project_scope=project_scope,
+            is_demo=False,
             name=payload.get("name") or DEFAULT_PROJECT_NAME,
             description=payload.get("description"),
             address_text=payload.get("address_text"),
@@ -2916,9 +3053,12 @@ def create_project(
             settings=_safe_dict(payload.get("settings")),
             metadata_json={
                 "created_via": "project_service.create_project",
-                "project_form_version": 2,
+                "project_form_version": 3,
                 "address_input_mode": "single_box",
                 "system_refs_hidden_in_project_form": True,
+                "auth_owner_user_id": auth_user_id,
+                "auth_account_id": auth_account_id,
+                "project_scope": project_scope,
                 **_safe_dict(payload.get("metadata")),
             },
         )
@@ -2955,16 +3095,29 @@ def create_project(
 
         conv = _create_conversation_for_project(project, title=project.name)
 
-        model_ensure_owner_membership(
-            project_id=project.id,
-            owner_user_id=uid,
-            commit=False,
-        )
+        try:
+            if callable(permissions_grant_project_role):
+                permissions_grant_project_role(
+                    project,
+                    user_id=uid,
+                    role=ROLE_OWNER,
+                    actor_user_id=uid,
+                    commit=False,
+                    allow_owner=True,
+                )
+            else:
+                membership = model_build_membership(
+                    project_id=project.id,
+                    user_id=uid,
+                    role=ROLE_OWNER,
+                    permissions={},
+                )
+                db.session.add(membership)
+        except Exception:
+            pass
 
         get_or_create_embed_policy(project, user_id=uid, commit=False)
 
-        # Publication-Service wird später über eigene API steuerbar. Bei Projekt-
-        # Erstellung setzen wir nur Sichtbarkeit konsistent.
         if callable(publication_set_project_visibility):
             try:
                 publication_set_project_visibility(project, visibility, actor_user_id=uid, commit=False)
@@ -2980,9 +3133,11 @@ def create_project(
             after=serialize_project(project, user_id=uid, include_permissions=False),
             payload={
                 "conversation_id": getattr(conv, "id", None),
-                "placeholder_user_id": getattr(user, "id", uid) if user is not None else uid,
                 "address_input_mode": "single_box",
                 "visibility": visibility,
+                "auth_owner_user_id": auth_user_id,
+                "auth_account_id": auth_account_id,
+                "project_scope": project_scope,
             },
             commit=False,
         )
@@ -3024,8 +3179,21 @@ def update_project(
         if project is None:
             raise ValueError("project required")
 
-        uid = require_persistent_actor(user_id)
-        require_project_permission(project, PERMISSION_EDIT, uid, allow_public_view=False)
+        if _project_is_demo(project):
+            result = get_project_permission_result(project, user_id=user_id, allow_public_view=False)
+            if not result.can_edit:
+                raise PermissionDenied(
+                    "Demo-Projekt ist für diesen Guest nicht bearbeitbar.",
+                    permission=PERMISSION_EDIT,
+                    project_id=_project_public_id(project),
+                    user_id=None,
+                    status_code=403,
+                    code="demo_project_permission_denied",
+                )
+            uid = None
+        else:
+            uid = require_persistent_actor(user_id)
+            require_project_permission(project, PERMISSION_EDIT, uid, allow_public_view=False)
 
         before = serialize_project(project, user_id=uid, include_permissions=False)
         payload = _normalize_project_payload(data, for_update=True, existing_project=project)
@@ -3045,7 +3213,7 @@ def update_project(
             except Exception:
                 pass
 
-        if old_visibility != new_visibility and callable(publication_set_project_visibility):
+        if not _project_is_demo(project) and old_visibility != new_visibility and callable(publication_set_project_visibility):
             try:
                 publication_set_project_visibility(project, new_visibility, actor_user_id=uid, commit=False)
             except Exception:
@@ -3055,7 +3223,7 @@ def update_project(
 
         _record_project_event(
             project,
-            action="updated",
+            action="demo_updated" if _project_is_demo(project) else "updated",
             category="project",
             actor_user_id=uid,
             before=before,
@@ -3065,6 +3233,7 @@ def update_project(
                 "address_input_mode": "single_box",
                 "visibility": new_visibility,
                 "payload_fields": sorted(list(payload.get("__present") or [])),
+                "is_demo": _project_is_demo(project),
             },
             commit=False,
         )
@@ -3100,6 +3269,10 @@ def create_or_update_project(
     commit: bool = True,
 ) -> Any:
     try:
+        context = get_actor_context(user_id)
+        if _safe_bool(context.get("demo_mode"), False):
+            return _ensure_or_update_demo_project(data, commit=commit)
+
         project = resolve_project(project_identifier) if project_identifier else None
 
         if project is None:
@@ -3127,6 +3300,16 @@ def delete_project(
     try:
         if project is None:
             return False
+
+        if _project_is_demo(project):
+            raise PermissionDenied(
+                "Demo-Projekte werden automatisch bereinigt und können nicht als persistente Projekte gelöscht werden.",
+                permission=PERMISSION_DELETE,
+                project_id=_project_public_id(project),
+                user_id=None,
+                status_code=403,
+                code="demo_delete_not_allowed",
+            )
 
         uid = require_persistent_actor(user_id)
         require_project_permission(project, PERMISSION_DELETE, uid, allow_public_view=False)
@@ -3192,6 +3375,16 @@ def archive_project(
         if project is None:
             raise ValueError("project required")
 
+        if _project_is_demo(project):
+            raise PermissionDenied(
+                "Demo-Projekte können nicht archiviert werden.",
+                permission=PERMISSION_MANAGE,
+                project_id=_project_public_id(project),
+                user_id=None,
+                status_code=403,
+                code="demo_archive_not_allowed",
+            )
+
         uid = require_persistent_actor(user_id)
         require_project_permission(project, PERMISSION_MANAGE, uid, allow_public_view=False)
 
@@ -3237,6 +3430,16 @@ def transfer_project_owner(
         if project is None:
             raise ValueError("project required")
 
+        if _project_is_demo(project):
+            raise PermissionDenied(
+                "Demo-Projekte können nicht übertragen werden.",
+                permission=PERMISSION_TRANSFER,
+                project_id=_project_public_id(project),
+                user_id=None,
+                status_code=403,
+                code="demo_transfer_not_allowed",
+            )
+
         actor_id = require_persistent_actor(actor_user_id)
         new_owner_id = _safe_int(new_owner_user_id, 0)
 
@@ -3256,7 +3459,10 @@ def transfer_project_owner(
                 commit=False,
             )
         elif hasattr(project, "transfer_ownership"):
-            project.transfer_ownership(new_owner_id)
+            try:
+                project.transfer_ownership(new_owner_user_id=new_owner_id)
+            except TypeError:
+                project.transfer_ownership(new_owner_id)
         else:
             project.owner_user_id = new_owner_id
             project.transferred_from_user_id = old_owner_user_id or None
@@ -3294,7 +3500,7 @@ def transfer_project_owner(
 
 def list_project_memberships(project: Any, *, include_inactive: bool = False) -> List[Dict[str, Any]]:
     try:
-        if project is None:
+        if project is None or _project_is_demo(project):
             return []
 
         project_id = _safe_int(getattr(project, "id", None), 0)
@@ -3334,6 +3540,16 @@ def set_project_member_role(
     try:
         if project is None:
             raise ValueError("project required")
+
+        if _project_is_demo(project):
+            raise PermissionDenied(
+                "Demo-Projekte unterstützen keine Teamverwaltung.",
+                permission=PERMISSION_MANAGE,
+                project_id=_project_public_id(project),
+                user_id=None,
+                status_code=403,
+                code="demo_team_not_allowed",
+            )
 
         actor_id = require_persistent_actor(actor_user_id)
         target_uid = _safe_int(target_user_id, 0)
@@ -3417,6 +3633,16 @@ def revoke_project_member(
     try:
         if project is None:
             raise ValueError("project required")
+
+        if _project_is_demo(project):
+            raise PermissionDenied(
+                "Demo-Projekte unterstützen keine Teamverwaltung.",
+                permission=PERMISSION_MANAGE,
+                project_id=_project_public_id(project),
+                user_id=None,
+                status_code=403,
+                code="demo_team_not_allowed",
+            )
 
         actor_id = require_persistent_actor(actor_user_id)
         require_project_permission(project, PERMISSION_MANAGE, actor_id, allow_public_view=False)
@@ -3503,6 +3729,16 @@ def upsert_project_service_link(
     try:
         if project is None:
             raise ValueError("project required")
+
+        if _project_is_demo(project):
+            raise PermissionDenied(
+                "Demo-Projekte unterstützen keine manuelle Service-Link-Verwaltung.",
+                permission=PERMISSION_MANAGE,
+                project_id=_project_public_id(project),
+                user_id=None,
+                status_code=403,
+                code="demo_service_link_not_allowed",
+            )
 
         uid = require_persistent_actor(user_id)
         require_project_permission(project, PERMISSION_MANAGE, uid, allow_public_view=False)
@@ -3627,6 +3863,16 @@ def create_project_version_link(
         if project is None:
             raise ValueError("project required")
 
+        if _project_is_demo(project):
+            raise PermissionDenied(
+                "Demo-Projekte unterstützen keine dauerhaften Versionslinks.",
+                permission=PERMISSION_EDIT,
+                project_id=_project_public_id(project),
+                user_id=None,
+                status_code=403,
+                code="demo_versions_not_allowed",
+            )
+
         uid = require_persistent_actor(user_id)
         require_project_permission(project, PERMISSION_EDIT, uid, allow_public_view=False)
 
@@ -3690,6 +3936,16 @@ def update_project_embed_policy(
     try:
         if project is None:
             raise ValueError("project required")
+
+        if _project_is_demo(project):
+            raise PermissionDenied(
+                "Demo-Projekte unterstützen keine Embed-Policy-Verwaltung.",
+                permission=PERMISSION_EMBED,
+                project_id=_project_public_id(project),
+                user_id=None,
+                status_code=403,
+                code="demo_embed_policy_not_allowed",
+            )
 
         uid = require_persistent_actor(user_id)
         require_project_permission(project, PERMISSION_EMBED, uid, allow_public_view=False)
@@ -3777,6 +4033,42 @@ def _permission_denied_result(exc: PermissionDenied) -> ProjectOperationResult:
 
 def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[int] = None) -> ProjectOperationResult:
     try:
+        context = get_actor_context(user_id)
+
+        if _safe_bool(context.get("blocked"), False):
+            raise PermissionDenied(
+                "Der Zugriff ist gesperrt.",
+                code=_safe_str(context.get("blocked_reason"), "auth_blocked", 120),
+                status_code=403,
+                permission=PERMISSION_EDIT,
+            )
+
+        if _safe_bool(context.get("demo_mode"), False):
+            project = _ensure_or_update_demo_project(data, commit=True)
+
+            return ProjectOperationResult(
+                ok=True,
+                project=project,
+                payload={
+                    "ok": True,
+                    "demo_mode": True,
+                    "auth": context,
+                    "project": serialize_project(
+                        project,
+                        user_id=None,
+                        include_permissions=True,
+                        include_embed_policy=False,
+                        include_service_links=True,
+                        include_publication=True,
+                    ),
+                    "sidebar_item": serialize_project_sidebar_item(project, user_id=None),
+                    "redirect_url": project_public_url(project),
+                    "chunk": _project_chunk_refs(project),
+                },
+                status_code=201,
+                code="demo_project_ready",
+            )
+
         project = create_project(data, user_id=user_id, commit=True)
 
         return ProjectOperationResult(
@@ -3843,7 +4135,7 @@ def update_project_result(
                     project,
                     user_id=user_id,
                     include_permissions=True,
-                    include_embed_policy=True,
+                    include_embed_policy=not _project_is_demo(project),
                     include_service_links=True,
                     include_publication=True,
                 ),
@@ -3886,8 +4178,11 @@ def ensure_project_chunk_link_result(
                 error="project not found",
             )
 
-        uid = require_persistent_actor(user_id)
-        require_project_permission(project, PERMISSION_MANAGE, uid, allow_public_view=False)
+        if not _project_is_demo(project):
+            uid = require_persistent_actor(user_id)
+            require_project_permission(project, PERMISSION_MANAGE, uid, allow_public_view=False)
+        else:
+            uid = None
 
         result = ensure_project_chunk_link(
             project,
@@ -3906,7 +4201,7 @@ def ensure_project_chunk_link_result(
                     user_id=uid,
                     include_permissions=True,
                     include_service_links=True,
-                    include_embed_policy=True,
+                    include_embed_policy=not _project_is_demo(project),
                     include_publication=True,
                 ),
                 "sidebar_item": serialize_project_sidebar_item(project, user_id=uid),
@@ -3971,10 +4266,10 @@ def get_project_result(
                     project,
                     user_id=user_id,
                     include_permissions=True,
-                    include_members=include_manage_data,
-                    include_service_links=include_manage_data,
+                    include_members=include_manage_data and not _project_is_demo(project),
+                    include_service_links=include_manage_data or _project_is_demo(project),
                     include_versions=True,
-                    include_embed_policy=include_manage_data or permissions.can_embed,
+                    include_embed_policy=(include_manage_data or permissions.can_embed) and not _project_is_demo(project),
                     include_publication=True,
                 ),
                 "sidebar_item": serialize_project_sidebar_item(project, user_id=user_id),
@@ -4004,9 +4299,50 @@ def list_projects_result(
 ) -> ProjectOperationResult:
     try:
         context = get_actor_context(user_id)
-        uid = get_actor_user_id_optional(user_id)
 
-        if not uid and _safe_bool(context.get("demo_mode"), False):
+        if _safe_bool(context.get("blocked"), False):
+            return ProjectOperationResult(
+                ok=False,
+                payload={
+                    "ok": False,
+                    "auth": context,
+                    "items": [],
+                    "projects": [],
+                    "sidebar_items": [],
+                    "total": 0,
+                    "message": "Der Zugriff ist gesperrt.",
+                },
+                status_code=403,
+                code=_safe_str(context.get("blocked_reason"), "auth_blocked", 120),
+                error="Der Zugriff ist gesperrt.",
+            )
+
+        if _safe_bool(context.get("demo_mode"), False):
+            project = None
+
+            if callable(get_current_demo_project):
+                try:
+                    demo_result = get_current_demo_project(context=get_current_user_context(ensure=False), create=True, commit=True)
+                    if getattr(demo_result, "ok", False):
+                        project = getattr(demo_result, "project", None)
+                except Exception:
+                    project = None
+
+            if project is None and callable(ensure_demo_project_for_context):
+                try:
+                    demo_result = ensure_demo_project_for_context(context=get_current_user_context(ensure=False), commit=True)
+                    if getattr(demo_result, "ok", False):
+                        project = getattr(demo_result, "project", None)
+                except Exception:
+                    project = None
+
+            items = []
+            sidebar_items = []
+
+            if project is not None:
+                items = [serialize_project(project, user_id=None, include_permissions=True)]
+                sidebar_items = [serialize_project_sidebar_item(project, user_id=None)]
+
             return ProjectOperationResult(
                 ok=True,
                 payload={
@@ -4014,25 +4350,26 @@ def list_projects_result(
                     "user_id": None,
                     "auth": context,
                     "demo_mode": True,
-                    "items": [],
-                    "projects": [],
-                    "sidebar_items": [],
-                    "total": 0,
+                    "items": items,
+                    "projects": items,
+                    "sidebar_items": sidebar_items,
+                    "total": len(items),
                     "limit": _query_limit(limit, 100, 500),
                     "offset": max(_safe_int(offset, 0), 0),
-                    "message": "Demo-Modus: Es werden keine persistenten Projekte geladen.",
+                    "message": "Demo-Modus: Es wird genau ein temporäres Demo-Projekt geladen.",
                 },
                 status_code=200,
                 code="projects_loaded_demo_mode",
             )
 
-        uid = uid or get_current_user_id(user_id)
+        uid = get_actor_user_id_optional(user_id)
 
         projects = list_projects_for_user(
             user_id=uid,
-            include_public=True,
+            include_public=False,
             include_unlisted=False,
             include_deleted=False,
+            include_demo=False,
             search=search,
             limit=limit,
             offset=offset,
@@ -4164,6 +4501,11 @@ def get_project_service_status() -> Dict[str, Any]:
         except Exception:
             counts["chunk_linked_projects"] = None
 
+        try:
+            counts["demo_projects"] = Project.query.filter(Project.is_demo.is_(True)).count()
+        except Exception:
+            counts["demo_projects"] = None
+
         chunk_health_payload: Dict[str, Any] = {
             "checked": False,
             "available": callable(get_chunk_health),
@@ -4189,9 +4531,10 @@ def get_project_service_status() -> Dict[str, Any]:
         return {
             "ok": True,
             "service": "project_service",
-            "phase": "single-address-auth-demo-aware-project-management",
+            "phase": "vectoplan-auth-project-management-no-default-user",
             "current_user_id": get_actor_user_id_optional(),
             "auth": context,
+            "default_user_removed": True,
             "counts": counts,
             "project_form": {
                 "address_input_mode": "single_box",
@@ -4199,6 +4542,12 @@ def get_project_service_status() -> Dict[str, Any]:
                 "system_refs_visible_in_project_form": False,
                 "structured_address_reserved_for_geocoder": True,
                 "coordinates_reserved_for_geocoder": True,
+            },
+            "demo": {
+                "enabled": _safe_bool(_config_value("VECTOPLAN_DEMO_PROJECTS_ENABLED", True), True),
+                "ttl_seconds": _safe_int(_config_value("VECTOPLAN_DEMO_PROJECT_TTL_SECONDS", 3600), 3600),
+                "serviceAvailable": callable(ensure_demo_project_for_context),
+                "cleanupAvailable": callable(cleanup_expired_demo_projects),
             },
             "chunk": {
                 "clientAvailable": _chunk_client_available(),
@@ -4224,6 +4573,7 @@ def get_project_service_status() -> Dict[str, Any]:
         return {
             "ok": False,
             "service": "project_service",
+            "default_user_removed": True,
             "error": {
                 "type": exc.__class__.__name__,
                 "message": str(exc),
@@ -4235,6 +4585,7 @@ __all__ = [
     "PROJECT_STATUS_ACTIVE",
     "PROJECT_STATUS_DELETED",
     "PROJECT_STATUS_ARCHIVED",
+    "PROJECT_STATUS_EXPIRED",
     "PROJECT_SETUP_DRAFT",
     "PROJECT_SETUP_DEFINED",
     "PROJECT_SETUP_CONFIGURED",
@@ -4242,6 +4593,9 @@ __all__ = [
     "PROJECT_VISIBILITY_PUBLIC",
     "PROJECT_VISIBILITY_UNLISTED",
     "PROJECT_VISIBILITY_SHARED",
+    "PROJECT_SCOPE_PERSONAL",
+    "PROJECT_SCOPE_ACCOUNT",
+    "PROJECT_SCOPE_DEMO",
     "GEOCODE_STATUS_NONE",
     "GEOCODE_STATUS_PENDING",
     "GEOCODE_STATUS_STALE",
@@ -4277,6 +4631,8 @@ __all__ = [
     "ensure_project_chunk_link",
     "ensure_project_chunk_link_result",
     "ensure_project_user",
+    "get_actor_account_id",
+    "get_actor_auth_user_id",
     "get_actor_context",
     "get_actor_user_id_optional",
     "get_current_user_id",

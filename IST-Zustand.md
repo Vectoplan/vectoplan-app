@@ -2,8 +2,8 @@
 
 # IST-Zustand – `vectoplan-app`
 
-Stand: 2026-06-25
-Status: Projektgeführte Portal-App mit Demo-/Auth-Kontext, Einladungslogik, Veröffentlichungssteuerung, zentralem Workspace-Gateway und repariertem 3D-Editor-Embed
+Stand: 2026-07-05
+Status: Projektgeführte Portal-App mit zentraler vectoplan-auth-Anbindung, entfernter Default-User-/Dev-User-Logik, fail-closed Auth-Dependency-Diagnose, Demo-/Auth-Kontext, Einladungslogik, Veröffentlichungssteuerung, zentralem Workspace-Gateway und repariertem 3D-Editor-Embed
 
 > Teil 1 von 3
 
@@ -56,7 +56,7 @@ vectoplan-app
   = Portal
   = Projektverwaltung
   = lokale Projekt-Mitgliedschaftsverwaltung
-  = lokale AppUser-Verknüpfungs-/Platzhalterverwaltung
+  = lokale AppUser-Verknüpfungsverwaltung für App-Foreign-Keys
   = Einladungs-Orchestrator
   = Projekt-Sichtbarkeitsverwaltung
   = Workspace-Veröffentlichungsverwaltung
@@ -66,6 +66,8 @@ vectoplan-app
   = zentrale Referenzverwaltung
   = App-seitiger Audit-/Version-/Service-Link-Host
   = App-seitiger Einstieg in Chunk-Provisioning
+  = Auth-Dependency-Gateway zu vectoplan-auth
+  = fail-closed Auth-Status-/Diagnose-Schicht
 ```
 
 Nicht ihre Rolle:
@@ -82,6 +84,9 @@ vectoplan-app
   ≠ Login-/Auth-Service
   ≠ Account-/Abo-Service
   ≠ Bigdata-Service
+  ≠ Quelle für echte Useridentitäten
+  ≠ lokaler Default-User-Erzeuger
+  ≠ Dev-User-Fallback
 ```
 
 Primäre Browser-Einstiege sind:
@@ -134,7 +139,7 @@ Aktuell erreicht:
 12. Admin/System/Team/Permissions/Settings sind nie öffentlich sichtbar.
 13. Team- und Einladungsbereiche sind nur für Projektverwalter sichtbar.
 14. Einladungen erzeugen keine echten Useraccounts.
-15. AppUser bleibt lokale Verknüpfung/Platzhalterstruktur, nicht Auth-Wahrheit.
+15. AppUser bleibt lokale FK-Verknüpfung für App-Tabellen, nicht Auth-Wahrheit und nicht Platzhalter-/Default-User-Quelle.
 16. Demo-Modus ist nicht persistent.
 17. Map, 3D, 2D und LV werden erst nach Projekt-Konfiguration freigeschaltet.
 18. 3D öffnet nun über /ui/project/<id>/editor3d.
@@ -148,6 +153,14 @@ Aktuell erreicht:
 26. routes/viewer.py ist der neue zentrale App-Gateway für /ui/project/...
 27. services/workspace_embed_service.py baut browserfähige Public-Embed-Ziele.
 28. static/js/chat/main.js ist weiterhin der Workspace-Orchestrator, obwohl der Pfad historisch noch chat enthält.
+29. vectoplan-auth ist jetzt die zentrale Auth-/Session-/Rollen-/Plan-/Entitlement-Wahrheit.
+30. vectoplan-app erzeugt keinen Default-User und nutzt keinen Dev-User id=1 mehr.
+31. Auth-Service-Ausfall wird fail-closed als 503 behandelt und nicht mehr als echter User-Ban beschrieben.
+32. Echte User-/Account-Sperren bleiben 403 und werden getrennt von DNS-/Timeout-/Servicefehlern behandelt.
+33. Neue Diagnose-Endpunkte unter /v1/auth/... zeigen Auth-Dependency, Client, Kontext und CurrentUser-Status.
+34. app.py registriert auth_status_api.py defensiv und führt keinen ensure_default_user()-Bootstrap mehr aus.
+35. models/__init__.py importiert keine DEFAULT_USER_ID-Exports mehr.
+36. Docker Desktop Setup nutzt für getrennte Stacks host.docker.internal als interne Auth-URL.
 ```
 
 Wichtigster aktueller Testbefund:
@@ -407,25 +420,104 @@ Workspaces müssen separat veröffentlicht werden.
 
 ---
 
-### 4.6 Demo-/Auth-Kontext wurde vorbereitet
+### 4.6 Demo-/Auth-Kontext wurde auf vectoplan-auth umgestellt
 
-Aktueller Stand:
+Vorher war der Auth-/Demo-Stand nur vorbereitet und enthielt noch lokale Dev-/Placeholder-Pfade.
+
+Aktueller Zielzustand:
+
+```text
+vectoplan-auth:
+  kanonische Wahrheit für Loginstatus
+  kanonische Wahrheit für session_valid
+  kanonische Wahrheit für user.id
+  kanonische Wahrheit für blocked/banned
+  kanonische Wahrheit für Rollen
+  kanonische Wahrheit für Account/Plan/Entitlements
+  kanonische Wahrheit für demo_project_access
+
+vectoplan-app:
+  fragt vectoplan-auth serverseitig ab
+  hält nur lokale AppUser-Links für eigene Foreign Keys
+  erzeugt keine echten Benutzeraccounts
+  erzeugt keinen Default-User
+  erzeugt keinen Dev-Placeholder-User
+  fällt bei Auth-Ausfall nicht auf Demo zurück
+```
+
+Nicht mehr gültig:
 
 ```text
 dev mode:
   lokaler Platzhalter-User id=1
 
-demo mode:
-  kein persistenter User
-  keine dauerhafte Speicherung
-  keine echten Einladungen
-  kein Bigdata-/Abo-Zugriff
-  Reset nach Refresh oder Ablauf der Demo-Sitzung möglich
+DEFAULT_USER_ID
+ensure_default_user() als Bootstrapping-Pfad
+current_user_id_placeholder() als echte Identität
+lokaler User-Fallback bei fehlender Auth
+Auth-Header-Override als normale Quelle
+Placeholder-Invitation-Dispatch
+```
 
-external auth mode:
-  vorbereitet über Trusted Headers / zukünftigen Auth-Service
-  lokale AppUser-Verknüpfung nur bei bekannter Identität
-  keine automatische echte User-Erstellung in vectoplan-app
+Aktueller Normalfluss:
+
+```text
+Browser
+  ↓
+vectoplan-app
+  ↓
+services/auth_context_client.py
+  ↓
+GET VECTOPLAN_AUTH_INTERNAL_URL + /auth/context/minimal
+  ↓
+vectoplan-auth
+  ↓
+normalisierter AuthContext
+  ↓
+services/current_user.py
+  ↓
+lokaler AppUser-Link nur bei echtem authenticated User
+```
+
+Auth-Service-Ausfall:
+
+```text
+DNS-Fehler
+Timeout
+Connection refused
+HTTP 5xx
+invalid payload
+not configured
+```
+
+führt zu:
+
+```text
+auth_unavailable = true
+access_blocked = true
+user_blocked = false
+HTTP 503
+kein Demo-Fallback
+kein Default-User-Fallback
+```
+
+Echter gesperrter User:
+
+```text
+user_blocked = true
+auth_unavailable = false
+HTTP 403
+kein Demo-Fallback
+```
+
+Demo:
+
+```text
+nur wenn vectoplan-auth demo_project_access liefert
+kein lokaler AppUser
+keine Projektpersistenz
+keine Team-/Invitation-/Publication-/Admin-Aktionen
+temporäres Demo-Projekt
 ```
 
 Wichtig:
@@ -434,6 +526,76 @@ Wichtig:
 vectoplan-app ist nicht der Auth-Service.
 vectoplan-app ist nicht der Registrierungsservice.
 vectoplan-app erzeugt keine echten Benutzeraccounts.
+vectoplan-app erzeugt keine Default-Identität.
+```
+
+### 4.7 Auth-Service-DNS-Problem wurde diagnostizierbar gemacht
+
+Beim lokalen Test trat folgender Zustand auf:
+
+```text
+Browser:
+  http://localhost:5000/auth/context
+  → authenticated=true
+
+vectoplan-app-Container:
+  http://vectoplan-auth:5000/auth/context/minimal
+  → DNS failed
+```
+
+Ursache:
+
+```text
+vectoplan-app und vectoplan-auth liefen im lokalen Docker Desktop Setup nicht im selben Docker-DNS-Kontext.
+Der Hostname vectoplan-auth war aus dem App-Container nicht auflösbar.
+```
+
+Neues Verhalten der App:
+
+```text
+Statusseite:
+  Auth-Service nicht erreichbar
+
+Code:
+  dns_failed
+
+HTTP:
+  503
+```
+
+Das ist der gewünschte Sicherheitszustand:
+
+```text
+kein Login-Fallback
+kein Demo-Fallback
+kein Default-User
+kein falscher "Benutzer gesperrt"-Text
+```
+
+Lokaler Docker-Desktop-Fix:
+
+```yaml
+VECTOPLAN_AUTH_INTERNAL_URL: "${VECTOPLAN_AUTH_INTERNAL_URL:-http://host.docker.internal:5000}"
+VECTOPLAN_AUTH_BASE_URL: "${VECTOPLAN_AUTH_BASE_URL:-http://host.docker.internal:5000}"
+AUTH_IDENTITY_INTERNAL_URL: "${AUTH_IDENTITY_INTERNAL_URL:-http://host.docker.internal:5000}"
+VECTOPLAN_AUTH_PUBLIC_URL: "${VECTOPLAN_AUTH_PUBLIC_URL:-http://localhost:5000}"
+```
+
+Wichtig bei Cookies:
+
+```text
+Wenn vectoplan-auth im Browser über localhost:5000 genutzt wird,
+soll auch vectoplan-app über localhost:5103 geöffnet werden.
+
+Nicht mischen:
+  localhost:5000
+  127.0.0.1:5103
+```
+
+Grund:
+
+```text
+Browser-Cookies für localhost werden nicht automatisch für 127.0.0.1 gesendet.
 ```
 
 ---
@@ -680,30 +842,49 @@ http://vectoplan-library:5000
 
 ---
 
-### 5.8 Zukünftiger Auth-/Registrierungsservice
+### 5.8 `vectoplan-auth`
 
 Rolle:
 
 ```text
 Login
 Registrierung
+Session
 Account-Identität
 E-Mail-Verifikation
-Registrierte User prüfen
+registrierte User prüfen
 Einladungszustellung
+Rollen
+Account
+Plan
+Entitlements
+Blocked/Banned
+API-Key-Validierung
+Demo-Berechtigung
 ```
 
 Aktuelle App-Anbindung:
 
 ```text
+services/auth_context_client.py
+services/auth_context.py
+services/auth_dependency_service.py
+services/auth_requirements.py
+services/current_user.py
 services/auth_identity_client.py
+routes/auth_status_api.py
 ```
 
-Die App fragt zukünftig dort ab:
+Die App fragt dort ab:
 
 ```text
-Ist diese E-Mail registriert?
-Darf an diese E-Mail eine Projekt-Einladung erstellt werden?
+Ist der Request authentifiziert?
+Gibt es einen echten user.id?
+Ist der User oder Account gesperrt?
+Ist der Auth-Service verfügbar?
+Darf ein Guest ein Demo-Projekt nutzen?
+Welche Rollen und Entitlements gelten?
+Ist eine E-Mail für eine Einladung registriert?
 Soll eine Einladung zugestellt werden?
 ```
 
@@ -711,7 +892,20 @@ Wichtig:
 
 ```text
 vectoplan-app erstellt keinen echten User.
-vectoplan-app erstellt nur lokale Projekt-Einladungen und lokale App-Bezüge.
+vectoplan-app erstellt keinen Default-User.
+vectoplan-app erstellt nur lokale AppUser-Links für eigene Foreign Keys.
+vectoplan-app erstellt lokale ProjectInvitations, aber keine Auth-Accounts.
+vectoplan-auth bleibt die Auth-Wahrheit.
+```
+
+Aktuelle lokale Docker-Desktop-Besonderheit:
+
+```text
+Wenn vectoplan-auth in einem anderen Compose-Projekt läuft,
+muss vectoplan-app intern host.docker.internal:5000 nutzen.
+
+Wenn beide Services im selben Docker-Netzwerk laufen,
+kann wieder http://vectoplan-auth:5000 genutzt werden.
 ```
 
 ---
@@ -731,6 +925,7 @@ Diese URLs dürfen im Browser, in iframes, Redirects und Links erscheinen:
 
 ```text
 VECTOPLAN_APP_PUBLIC_URL=http://localhost:5103
+VECTOPLAN_AUTH_PUBLIC_URL=http://localhost:5000
 VECTOPLAN_EDITOR_PUBLIC_URL=http://localhost:5100
 OPENLAYER_PUBLIC_URL=http://localhost:5190
 ```
@@ -740,6 +935,7 @@ OPENLAYER_PUBLIC_URL=http://localhost:5190
 Diese URLs sind nur für Server-zu-Server-Kommunikation innerhalb Docker gedacht:
 
 ```text
+VECTOPLAN_AUTH_INTERNAL_URL=http://vectoplan-auth:5000
 VECTOPLAN_EDITOR_INTERNAL_URL=http://vectoplan-editor:5000
 OPENLAYER_INTERNAL_URL=http://openlayer:8090
 VECTOPLAN_CHUNK_INTERNAL_URL=http://vectoplan-chunk:5000
@@ -749,6 +945,7 @@ VECTOPLAN_LIBRARY_INTERNAL_URL=http://vectoplan-library:5000
 Browser dürfen diese internen Hostnamen nicht sehen:
 
 ```text
+vectoplan-auth
 vectoplan-editor
 openlayer
 vectoplan-chunk
@@ -786,6 +983,66 @@ Nicht:
 
 ```text
 VECTOPLAN_EDITOR_INTERNAL_URL
+```
+
+
+### 6.5 Lokale Auth-URL-Regel für Docker Desktop
+
+Für den normalen Container-zu-Container-Betrieb gilt:
+
+```text
+VECTOPLAN_AUTH_INTERNAL_URL=http://vectoplan-auth:5000
+```
+
+Dieser Wert funktioniert nur, wenn `vectoplan-app` und `vectoplan-auth` im selben Docker-Netzwerk laufen oder der Service-Alias `vectoplan-auth` im App-Container auflösbar ist.
+
+Für das aktuell getestete lokale Docker-Desktop-Setup wurde stattdessen verwendet:
+
+```text
+VECTOPLAN_AUTH_INTERNAL_URL=http://host.docker.internal:5000
+VECTOPLAN_AUTH_BASE_URL=http://host.docker.internal:5000
+AUTH_IDENTITY_INTERNAL_URL=http://host.docker.internal:5000
+VECTOPLAN_AUTH_PUBLIC_URL=http://localhost:5000
+```
+
+Einordnung:
+
+```text
+host.docker.internal
+  = Adresse vom Container zurück zum Host-System
+
+localhost:5000
+  = Browser-Adresse zu vectoplan-auth
+
+localhost:5103
+  = Browser-Adresse zu vectoplan-app
+```
+
+Wichtig:
+
+```text
+Die App muss im Browser mit http://localhost:5103/ geöffnet werden,
+wenn der Login-Cookie von http://localhost:5000/ kommt.
+```
+
+Nicht empfohlen im gleichen Testlauf:
+
+```text
+Auth über localhost:5000
+App über 127.0.0.1:5103
+```
+
+Grund:
+
+```text
+localhost und 127.0.0.1 sind für Browser-Cookies unterschiedliche Hosts.
+```
+
+Langfristig besser:
+
+```text
+vectoplan-auth und vectoplan-app in ein gemeinsames Docker-Netzwerk legen
+und dann VECTOPLAN_AUTH_INTERNAL_URL=http://vectoplan-auth:5000 verwenden.
 ```
 
 ---
@@ -1277,7 +1534,7 @@ utcnow()
 Zweck:
 
 ```text
-App-lokaler User-Platzhalter und spätere Auth-Anbindung
+App-lokaler User-Link für Projekt-/Membership-/Audit-Foreign-Keys
 ```
 
 Zentrales Model:
@@ -1286,23 +1543,48 @@ Zentrales Model:
 AppUser
 ```
 
-Aktueller Dev-Standard-User:
+Aktueller Zustand:
 
 ```text
-id = 1
-public_id = u_demo_1 oder lokaler Placeholder
-handle = demo
-display_name = Demo User
-role = admin
-is_placeholder = true
-is_system = true
+AppUser ist nicht die Auth-Wahrheit.
+AppUser ist kein echter Login-Account.
+AppUser ist kein Registrierungsobjekt.
+AppUser wird nicht mehr als lokaler Default-User id=1 erzeugt.
+AppUser dient nur noch als lokale Verknüpfung zu einer kanonischen vectoplan-auth User-ID.
+```
+
+Nicht mehr gültig:
+
+```text
+DEFAULT_USER_ID = 1
+get_default_user_id()
+ensure_default_user() als echter Bootstrap
+current_user_id_placeholder() als echte Identität
+Dev-Standard-User
+Placeholder-Admin
+lokaler Fallback-User
+```
+
+Wichtige Felder bzw. Zielbezüge:
+
+```text
+id                  = lokale App-DB-ID
+public_id           = lokale stabile App-ID
+auth_user_id         = kanonische User-ID aus vectoplan-auth
+email               = Spiegel/Fallback für Anzeige und Suche
+display_name        = Spiegel/Fallback für Anzeige
+role                = app-lokale Rolle nur soweit nötig
+is_active           = app-lokaler Linkstatus
+metadata_json       = technische Link-/Diagnosedaten
 ```
 
 Wichtig:
 
 ```text
-AppUser ist nicht die Auth-Wahrheit.
-AppUser ist eine lokale App-Verknüpfung bzw. Platzhalterstruktur.
+AppUser darf nie entscheiden, ob jemand authentifiziert ist.
+AppUser darf nie eine Auth-Session ersetzen.
+AppUser darf nie einen geblockten Auth-User wieder aktivieren.
+Ohne vectoplan-auth authenticated=true + user.id gibt es keinen persistenten App-User-Kontext.
 ```
 
 ---
@@ -1742,12 +2024,17 @@ from models import Project, ProjectMembership, ProjectInvitation, ProjectVersion
 
 ```text
 services/vectoplan-app/services/
+  auth_context_client.py
+  auth_context.py
+  auth_dependency_service.py
+  auth_requirements.py
   current_user.py
+  app_user_link_service.py
+  auth_identity_client.py
   project_permissions.py
   project_service.py
   project_invitation_service.py
   project_publication_service.py
-  auth_identity_client.py
   chunk_client.py
   workspace_embed_service.py
 ```
@@ -1759,34 +2046,66 @@ services/vectoplan-app/services/
 Zweck:
 
 ```text
-zentraler Current-User-/Auth-/Demo-Kontext
+zentraler Current-User-/Auth-/Demo-Kontext für vectoplan-app
 ```
 
-Aktuelle Modi:
+Aktueller Modus:
 
 ```text
-dev
 external
-demo
 ```
 
-Wichtig:
+Bedeutung:
 
 ```text
-dev:
-  Platzhalter-User id=1 kann sichergestellt werden.
+vectoplan-auth ist die Quelle.
+current_user.py normalisiert den bereits von auth_context.py gelieferten Zustand für App-Services.
+```
 
-external:
-  spätere Auth-Header-/Auth-Service-Verknüpfung.
-  keine automatische User-Erstellung ohne bekannte lokale Verknüpfung.
+Nicht mehr vorhanden als echte Logik:
 
-demo:
+```text
+dev user id=1
+Default-User-Bootstrap
+ensure_default_user() mit DB-Erzeugung
+current_user_id_placeholder() als echter User
+fallback_to_default
+Header-Override als normaler Userpfad
+lokaler Demo-User als persistenter User
+```
+
+Aktuelle Zustände:
+
+```text
+authenticated persistent user:
+  authenticated = true
+  auth_user_id vorhanden
+  lokaler AppUser-Link vorhanden
+  user_id = lokale AppUser.id
+  persistent = true
+  demo_mode = false
+
+demo guest:
+  authenticated = false
   user_id = None
   persistent = false
-  ttl = 1800 Sekunden
-  keine echten Einladungen
-  keine dauerhafte Speicherung
-  kein Bigdata-/Abo-Zugriff
+  demo_mode = true
+  nur bei demo_project_access aus vectoplan-auth
+
+auth unavailable:
+  auth_unavailable = true
+  blocked = true
+  user_blocked = false
+  access_blocked = true
+  denial_status_code = 503
+  kein Demo-Fallback
+
+real blocked user:
+  auth_unavailable = false
+  user_blocked = true
+  access_blocked = true
+  denial_status_code = 403
+  kein Demo-Fallback
 ```
 
 Wichtige Funktionen:
@@ -1794,11 +2113,177 @@ Wichtige Funktionen:
 ```python
 get_current_user_context()
 get_current_user_id_optional()
+get_platform_auth_context()
 is_current_user_demo()
 is_current_user_authenticated()
 current_user_can_persist()
 require_persistent_current_user()
-ensure_default_user()
+serialize_current_user()
+get_current_user_status()
+```
+
+Kompatibilitätsstubs bleiben nur noch nicht-mutierend:
+
+```python
+ensure_default_user() -> None
+get_default_user_id() -> 0
+current_user_id_placeholder() -> 0
+```
+
+Wichtig:
+
+```text
+Diese Stubs existieren nur, damit alte Imports nicht sofort brechen.
+Sie erzeugen keine User und liefern keine echte Identität.
+```
+
+### 12.1a `services/auth_context_client.py`
+
+Zweck:
+
+```text
+HTTP-Client von vectoplan-app zu vectoplan-auth
+```
+
+Aufgaben:
+
+```text
+VECTOPLAN_AUTH_INTERNAL_URL lesen
+Browser-Cookies serverseitig weiterleiten
+/auth/context/minimal abfragen
+/auth/context abfragen
+/auth/me abfragen
+API-Key-Verify vorbereiten
+Login-/Register-/Logout-URLs aus VECTOPLAN_AUTH_PUBLIC_URL bauen
+Timeouts und Netzwerkfehler klassifizieren
+Secrets aus Logs fernhalten
+```
+
+Wichtige Fehlerklassifikation:
+
+```text
+dns_failed
+connection_refused
+timeout
+http_5xx
+http_error
+access_denied
+invalid_payload
+not_configured
+request_failed
+requests_unavailable
+```
+
+Wichtig:
+
+```text
+Ein Auth-Client-Fehler wird nicht als echter gebannter User interpretiert.
+Der Client liefert auth_available=false und auth_unavailable/service_unavailable.
+```
+
+### 12.1b `services/auth_context.py`
+
+Zweck:
+
+```text
+rohe vectoplan-auth Antworten in einen stabilen App-AuthContext normalisieren
+```
+
+Zentrale Trennung:
+
+```text
+auth_unavailable:
+  technischer Ausfall
+  HTTP 503
+  kein echter User-Ban
+
+user_blocked:
+  echte Sperre/Ban aus vectoplan-auth
+  HTTP 403
+
+access_blocked:
+  effektive Sperre für App-Guards
+  umfasst auth_unavailable oder user_blocked
+```
+
+Wichtige Ableitungen:
+
+```text
+authenticated
+is_guest
+can_demo
+can_persist
+can_use_cloud
+can_manage_account
+can_project_sharing
+dashboard_allowed
+requires_login
+```
+
+### 12.1c `services/auth_dependency_service.py`
+
+Zweck:
+
+```text
+technische Dependency-Prüfung für vectoplan-auth
+```
+
+Aufgaben:
+
+```text
+Auth-Service-Erreichbarkeit prüfen
+DNS-Fehler erkennen
+Timeouts erkennen
+Connection refused erkennen
+HTTP 5xx erkennen
+ungültige Payload erkennen
+kurzen Statuscache halten
+Diagnosedaten für /ready und /v1/auth/status liefern
+```
+
+Wichtig:
+
+```text
+Diese Datei ersetzt keine Auth-Wahrheit.
+Sie bewertet nur, ob die Dependency technisch verfügbar ist.
+```
+
+### 12.1d `services/auth_requirements.py`
+
+Zweck:
+
+```text
+zentrale Guard-Schicht für Routes, APIs und Services
+```
+
+Aktuelle Statuslogik:
+
+```text
+auth_unavailable → 503
+user_blocked     → 403
+login_required   → 401
+forbidden        → 403
+allowed          → 200
+```
+
+Aufgaben:
+
+```text
+require_authenticated()
+require_persistent_user()
+require_demo_or_authenticated()
+require_not_blocked()
+require_entitlement()
+require_admin()
+build_auth_unavailable_response()
+build_blocked_response()
+build_auth_required_response()
+```
+
+Wichtig:
+
+```text
+Demo ist nur erlaubt, wenn Auth verfügbar ist und vectoplan-auth demo_project_access geliefert hat.
 ```
 
 ---
@@ -1935,18 +2420,29 @@ vectoplan-app erstellt keinen echten Useraccount.
 Zweck:
 
 ```text
-Adapter zum zukünftigen Auth-/Registrierungsdienst
+strikter Adapter zu vectoplan-auth für Identity-Lookup und Einladungsdispatch
 ```
 
 Verantwortlich für:
 
 ```text
-E-Mail-Lookup
+E-Mail-Lookup gegen vectoplan-auth
 Registrierungsstatus prüfen
-Einladungsdispatch vorbereiten
-Dev-Mode-Placeholder
-TTL-Cache
+Blocked-Status einer Zielidentität berücksichtigen
+Einladungsdispatch an vectoplan-auth delegieren
+TTL-Cache für Lookup-Antworten
 Statusdiagnose
+```
+
+Nicht mehr erlaubt:
+
+```text
+Dev-Mode-Placeholder
+Accept-all-registered
+Placeholder-Invites
+lokaler Fake-Dispatch
+lokale Registrierung
+AppUser-Erzeugung als Einladungseffekt
 ```
 
 Wichtige ENV-/Config-Werte:
@@ -1956,10 +2452,22 @@ AUTH_IDENTITY_INTERNAL_URL
 AUTH_IDENTITY_LOOKUP_PATH
 AUTH_IDENTITY_INVITATION_DISPATCH_PATH
 AUTH_IDENTITY_API_TOKEN
-AUTH_IDENTITY_DEV_MODE
-AUTH_IDENTITY_DEV_REGISTERED_EMAILS
-AUTH_IDENTITY_DEV_ACCEPT_ALL_REGISTERED
-AUTH_IDENTITY_PLACEHOLDER_INVITES
+VECTOPLAN_AUTH_INTERNAL_URL
+```
+
+Kompatibilitätswerte können noch existieren, sind aber nicht mehr Zielzustand:
+
+```text
+AUTH_IDENTITY_DEV_MODE=false
+AUTH_IDENTITY_DEV_ACCEPT_ALL_REGISTERED=false
+AUTH_IDENTITY_PLACEHOLDER_INVITES=false
+```
+
+Wichtig:
+
+```text
+Wenn vectoplan-auth nicht erreichbar ist, wird die Einladung kontrolliert abgelehnt.
+Es wird keine lokale Einladung an eine nicht verifizierte echte Identität erzwungen.
 ```
 
 ---
@@ -2098,6 +2606,7 @@ http://localhost:5100/editor
 
 ```text
 services/vectoplan-app/routes/
+  auth_status_api.py
   projects_api.py
   viewer.py
   viewer_selection.py
@@ -3213,6 +3722,66 @@ chunk snapshot internals
 
 ---
 
+
+### 17.5 Auth-Status-/Diagnose-API
+
+```text
+GET  /v1/auth/status
+GET  /v1/auth/dependency
+GET  /v1/auth/client
+GET  /v1/auth/context
+GET  /v1/auth/current-user
+POST /v1/auth/cache/clear
+```
+
+Zentrale Datei:
+
+```text
+services/vectoplan-app/routes/auth_status_api.py
+```
+
+Zweck:
+
+```text
+Auth-Dependency zu vectoplan-auth prüfen
+Auth-Client-Konfiguration anzeigen
+normalisierten AuthContext anzeigen
+CurrentUserContext anzeigen
+lokale Auth-Caches leeren
+keine Secrets ausgeben
+keinen Login erzwingen
+```
+
+Erwartung bei funktionierendem lokalen Setup:
+
+```json
+{
+  "ok": true,
+  "auth_available": true,
+  "auth_state": "available"
+}
+```
+
+Erwartung bei Docker-DNS-Problem:
+
+```json
+{
+  "ok": false,
+  "auth_available": false,
+  "auth_state": "dns_failed",
+  "status_code": 503
+}
+```
+
+Wichtig:
+
+```text
+Diese Diagnose zeigt technische Erreichbarkeit.
+Sie ersetzt keine fachliche Login-/Permission-Prüfung.
+```
+
+---
+
 ## 18. Beispiel: Projekt erstellen
 
 Aktueller Request im vereinfachten Projektformular:
@@ -3550,13 +4119,15 @@ Ablauf:
 
 ```text
 1. User muss Projekt verwalten dürfen.
-2. Demo-Kontext wird abgelehnt.
-3. E-Mail wird normalisiert.
-4. Auth-/Registrierungsdienst wird gefragt.
-5. Wenn E-Mail nicht registriert ist: Ablehnung.
-6. Wenn E-Mail registriert ist: ProjectInvitation wird erstellt.
-7. Optional wird Einladungsdispatch vorbereitet.
-8. Audit-Event wird geschrieben.
+2. Auth-Service muss erreichbar sein.
+3. Demo-Kontext wird abgelehnt.
+4. E-Mail wird normalisiert.
+5. vectoplan-auth wird gefragt.
+6. Wenn E-Mail nicht registriert ist: kontrollierte Ablehnung.
+7. Wenn Zielidentität blockiert ist: kontrollierte Ablehnung.
+8. Wenn E-Mail registriert und zulässig ist: ProjectInvitation wird erstellt.
+9. Dispatch wird an vectoplan-auth delegiert.
+10. Audit-Event wird geschrieben.
 ```
 
 Erwartetes Ergebnis bei registrierter E-Mail:
@@ -3570,9 +4141,26 @@ Erwartetes Ergebnis bei registrierter E-Mail:
     "email": "person@example.com",
     "role": "editor",
     "status": "pending",
-    "dispatch_status": "placeholder"
+    "dispatch_status": "sent"
   }
 }
+```
+
+Mögliche Dispatch-Statuswerte:
+
+```text
+pending
+sent
+skipped
+failed
+```
+
+Nicht mehr Zielzustand:
+
+```text
+dispatch_status = placeholder
+mock dispatch
+dev accept-all
 ```
 
 Erwartetes Ergebnis bei nicht registrierter E-Mail:
@@ -3585,10 +4173,21 @@ Erwartetes Ergebnis bei nicht registrierter E-Mail:
 }
 ```
 
+Erwartetes Ergebnis bei Auth-Service-Ausfall:
+
+```json
+{
+  "ok": false,
+  "code": "auth_identity_unavailable",
+  "status_code": 503
+}
+```
+
 Wichtig:
 
 ```text
 vectoplan-app erzeugt keinen echten Useraccount.
+vectoplan-app erzeugt keinen lokalen Ziel-AppUser für Einladungen.
 Owner wird nicht per Einladung vergeben.
 ```
 
@@ -3776,6 +4375,9 @@ ConversationState has no attribute merge_patch
 ConversationState has no attribute get_or_create
 project_invitations table missing
 ProjectInvitation import missing
+DEFAULT_USER_ID import missing
+vectoplan-auth DNS failed
+VECTOPLAN_AUTH_INTERNAL_URL falsch für lokales Docker-Netz
 ```
 
 Aktueller Stand nach den letzten Reparaturen:
@@ -3791,6 +4393,9 @@ Projektformular nutzt address_text als einzige sichtbare Adressbox.
 Einladungsmodell und Invitation-Service sind vorbereitet.
 Publication-Service ist vorbereitet.
 Workspace-Embed-Service ist vorbereitet.
+Default-User-/Dev-User-Pfade sind entfernt.
+Auth-Service-Ausfall wird als 503 statt als echter User-Ban behandelt.
+/v1/auth/status und /v1/auth/dependency sind verfügbar.
 ```
 
 Noch möglich:
@@ -4044,32 +4649,43 @@ published_workspaces.project = true
 
 ---
 
-### 29.9 Einladungslogik ist vorbereitet, aber Auth-Service ist noch Platzhalter
+### 29.9 Einladungslogik ist an vectoplan-auth angebunden
 
-Aktuell vorbereitet:
+Aktuell vorbereitet bzw. umgesetzt:
 
 ```text id="j5j9w2"
 ProjectInvitation Model
 project_invitation_service.py
 auth_identity_client.py
+vectoplan-auth Identity-Lookup
 Invitation API-Routen
 Team-UI in project_team.html
 project_team.js
 ```
 
-Noch nicht final:
+Nicht mehr Zielzustand:
 
 ```text id="2dcgza"
-echter Auth-/Registrierungsdienst
-echter Einladungsversand
-echte Account-Erstellung
-echtes Login-/Abo-System
+Dev-Mode-Placeholder
+Accept-all-registered
+Placeholder-Invite-Dispatch
+lokale Account-Erstellung
+lokale AppUser-Erzeugung für Zielpersonen
+```
+
+Noch nicht final:
+
+```text id="f93gx9"
+produktiver Einladungsversand
+vollständiger Ende-zu-Ende-Test mit echten registrierten Zielpersonen
+UI-Feinschliff für 503/403/404/409 Einladungsergebnisse
 ```
 
 Wichtig:
 
 ```text id="qrg0oj"
 vectoplan-app erzeugt keine echten User.
+vectoplan-auth bleibt die Wahrheit, ob eine Ziel-E-Mail registriert und zulässig ist.
 ```
 
 ---
@@ -4122,7 +4738,12 @@ models/
   core.py
 
 services/
+  auth_context_client.py
+  auth_context.py
+  auth_dependency_service.py
+  auth_requirements.py
   current_user.py
+  app_user_link_service.py
   auth_identity_client.py
   project_permissions.py
   project_service.py
@@ -4132,6 +4753,7 @@ services/
   chunk_client.py
 
 routes/
+  auth_status_api.py
   projects_api.py
   viewer.py
   viewer_selection.py
@@ -4769,19 +5391,64 @@ Erwartet:
 
 ```text id="7bad7k"
 GET /v1/projects/<project_id>/invitations → 200
-POST /v1/projects/<project_id>/invitations → 200 oder kontrollierter 4xx
+POST /v1/projects/<project_id>/invitations → 200/201 oder kontrollierter 4xx/5xx
 DELETE /v1/projects/<project_id>/invitations/<id> → 200
 ```
 
 Kontrollierte Ablehnungen:
 
 ```text id="1uljin"
-Demo-Kontext
-fehlende manage/team-Berechtigung
-unregistrierte E-Mail
-bereits bestehendes Mitglied
-duplizierte Pending-Einladung
-Owner-Rolle per Einladung
+Auth-Service nicht erreichbar → 503
+Demo-Kontext → 403
+fehlende manage/team-Berechtigung → 403
+unregistrierte E-Mail → 404/409 je nach Auth-Antwort
+blockierte Zielidentität → 403
+bereits bestehendes Mitglied → 409
+duplizierte Pending-Einladung → 409
+Owner-Rolle per Einladung → 400/403
+```
+
+Nicht erwartet:
+
+```text
+Placeholder-Dispatch als Erfolg
+lokaler Ziel-User ohne vectoplan-auth
+Default-User als Einladender
+```
+
+### 42.10 Auth-Service-Smoke-Checks
+
+Erwartet bei funktionierender Auth-Verbindung:
+
+```text
+GET /v1/auth/dependency?refresh=1 → 200
+GET /v1/auth/status?refresh=1     → 200
+GET /v1/auth/context?refresh=1    → 200 oder kontrollierter Auth-Kontext
+GET /v1/projects/current-user     → 200
+GET /                            → 200, wenn Auth verfügbar und nicht blockiert
+```
+
+Erwartet bei Docker-DNS-Problem:
+
+```text
+GET /v1/auth/dependency?refresh=1 → 503 dns_failed
+GET /                            → 503 Auth-Service nicht erreichbar
+```
+
+Nicht erwartet:
+
+```text
+Demo-Fallback bei dns_failed
+Default-User id=1 bei dns_failed
+403 "Benutzer gesperrt" bei reinem DNS-/Timeout-Fehler
+```
+
+Lokaler Docker-Desktop-Fix:
+
+```text
+VECTOPLAN_AUTH_INTERNAL_URL=http://host.docker.internal:5000
+VECTOPLAN_AUTH_PUBLIC_URL=http://localhost:5000
+App im Browser öffnen über http://localhost:5103/
 ```
 
 ---
@@ -4809,6 +5476,28 @@ viewer_bp liefert danach /ui/project/... iframe-Workspaces.
 ```
 
 ---
+
+
+### 43.1a `app.py` aktueller Stand
+
+Umgesetzt:
+
+```text
+kein ensure_default_user() beim Boot
+kein DEFAULT_USER_ID-Bootstrap
+defensiver Model-Import über models.register_all_models()
+/ready enthält Modell-/Schema-/Default-User-Removed-Diagnose
+auth_status_api.py wird defensiv registriert
+state_api_bp bleibt nur Warnung, kein Auth-Blocker
+```
+
+Wichtig:
+
+```text
+app.py erzeugt keine Useridentität mehr.
+Wenn vectoplan-auth nicht erreichbar ist, starten App und Routen,
+aber Zugriffe werden fail-closed beantwortet.
+```
 
 ### 43.2 Route-Namen vereinheitlichen
 
@@ -4990,8 +5679,8 @@ alte Versionierungsrouten
 LV-Platzhalter
 2D-Gateway
 OpenLayer-Gateway
-AuthIdentityClient im Dev-/Placeholder-Modus
-Einladungsdispatch als Placeholder
+AuthIdentityClient strikt über vectoplan-auth
+Einladungsdispatch über vectoplan-auth, kein Placeholder-Zielzustand
 Publication-Ende-zu-Ende Public-Flow
 ```
 
@@ -5068,7 +5757,7 @@ Workspace-Gateway
 Nächster sinnvoller technischer Schritt:
 
 ```text id="tocjbi"
-app.py und verbleibende Legacy-Routen prüfen
+app.py ist auf no-default-user-Boot umgestellt; verbleibende Legacy-Routen weiter prüfen
 state_api_bp-Warnung bereinigen
 ```
 
@@ -5155,7 +5844,7 @@ vectoplan-app
        ├─ vectoplan-lv          → Leistungsverzeichnis
        ├─ vectoplan-chunk       → Chunk-Welt
        ├─ vectoplan-library     → Assets/Inventory
-       └─ zukünftiger Auth-Service → Login/Registrierung/Account
+       └─ vectoplan-auth       → Login/Registrierung/Account/Session
 ```
 
 ---
@@ -5422,7 +6111,9 @@ address_text ist das sichtbare Adressfeld.
 Projekt-Sichtbarkeit private/unlisted/public ist vorbereitet.
 Workspace-Veröffentlichung ist vorbereitet.
 Team-/Invitation-UI ist vorbereitet.
-Demo-/Auth-Kontext ist vorbereitet.
+vectoplan-auth-Kontext ist angebunden.
+Default-User-/Dev-User-Pfade sind entfernt.
+Auth-Ausfall wird fail-closed als 503 angezeigt.
 Chunk-Provisioning funktioniert.
 Editor lädt world_spawn aus Chunk.
 3D-Reiter öffnet über /ui/project/<id>/editor3d den echten Editor.
@@ -5437,8 +6128,8 @@ Legacy-Chat-Routen
 Speckle-/Altviewer-Routen
 alte Versionierungsreste
 Namensbereinigung chat_* → shell_*
-echter Auth-/Registrierungsdienst
-echter Einladungsversand
+produktiver Auth-/Registrierungsdienst ist angebunden, aber weitere Ende-zu-Ende-Tests fehlen
+produktiver Einladungsversand muss noch final getestet werden
 vollständiger Public/Unlisted-Ende-zu-Ende-Test
 produktive 2D-/LV-Serviceintegration
 ```
@@ -5446,7 +6137,7 @@ produktive 2D-/LV-Serviceintegration
 Empfohlener nächster Schritt:
 
 ```text id="o5809f"
-services/vectoplan-app/app.py prüfen
+verbleibende Auth-/Projekt-Pfade weiter testen
 ```
 
 Ziel:
@@ -5514,3 +6205,496 @@ Teil 3:
 ```
 
 Damit ist die Aktualisierung der `IST-Zustand-vectoplan-app.md` vollständig.
+---
+
+## 49. Nachtrag 2026-07-05 – vectoplan-auth-Integration und Entfernung lokaler Default-User
+
+Diese Aktualisierung ergänzt den Stand nach dem Umbau der Auth-Schicht.
+
+Der wichtigste fachliche Wechsel:
+
+```text
+Vorher:
+  vectoplan-app hatte noch vorbereitete Dev-/Placeholder-/Default-User-Pfade.
+
+Jetzt:
+  vectoplan-auth ist die zentrale Wahrheit.
+  vectoplan-app ist nur Portal, Projekt- und Workspace-Shell.
+  vectoplan-app hält nur lokale AppUser-Links für eigene Foreign Keys.
+```
+
+### 49.1 Neue und wesentlich geänderte Dateien
+
+Neu bzw. wesentlich erweitert:
+
+```text
+services/vectoplan-app/services/auth_dependency_service.py
+services/vectoplan-app/routes/auth_status_api.py
+```
+
+Wesentlich geändert:
+
+```text
+services/vectoplan-app/app.py
+services/vectoplan-app/models/__init__.py
+services/vectoplan-app/models/users.py
+services/vectoplan-app/models/projects.py
+services/vectoplan-app/models/project_invitations.py
+services/vectoplan-app/services/auth_context_client.py
+services/vectoplan-app/services/auth_context.py
+services/vectoplan-app/services/auth_requirements.py
+services/vectoplan-app/services/current_user.py
+services/vectoplan-app/services/app_user_link_service.py
+services/vectoplan-app/services/auth_identity_client.py
+services/vectoplan-app/services/project_permissions.py
+services/vectoplan-app/services/project_service.py
+services/vectoplan-app/services/demo_project_service.py
+services/vectoplan-app/services/project_invitation_service.py
+services/vectoplan-app/services/project_publication_service.py
+services/vectoplan-app/services/workspace_embed_service.py
+services/vectoplan-app/routes/projects_api.py
+services/vectoplan-app/routes/ui/projects.py
+services/vectoplan-app/routes/viewer.py
+services/vectoplan-server/docker-compose.all.yml
+```
+
+### 49.2 `app.py`
+
+Aktueller Zweck:
+
+```text
+App Factory
+Blueprint-Registrierung
+Model-Import-Diagnose
+Schema-Bootstrap für lokale Alpha-Entwicklung
+Security Headers
+Health-/Ready-Routen
+```
+
+Wichtigste Änderung:
+
+```text
+Default-User-Bootstrap entfernt.
+```
+
+Nicht mehr erlaubt:
+
+```text
+from models import DEFAULT_USER_ID
+from models import ensure_default_user
+ensure_default_user() beim Startup
+lokaler User id=1 als Boot-Voraussetzung
+```
+
+Neu bzw. relevant:
+
+```text
+models.register_all_models()
+models.get_model_import_status()
+vectoplan_default_user_status:
+  removed = true
+  skipped = true
+  user_id = None
+auth_status_api_bp wird defensiv geladen
+/ready zeigt Auth-/Model-/Schema-Diagnose
+```
+
+### 49.3 `models/__init__.py`
+
+Aktueller Zweck:
+
+```text
+zentraler Import-Hub für modulare Models
+robuste Importdiagnose
+kein Default-User-Export
+```
+
+Entfernt aus der echten Zielarchitektur:
+
+```text
+DEFAULT_USER_ID
+get_default_user_id()
+ensure_default_user() als mutierender Importpfad
+current_user_id_placeholder() als echte Identität
+```
+
+Kompatibilitätsstubs können noch existieren, aber nur nicht-mutierend:
+
+```text
+ensure_default_user() -> None
+current_user_id_placeholder() -> 0
+```
+
+Bedeutung:
+
+```text
+Alte Imports brechen nicht sofort.
+Es wird trotzdem kein User erzeugt.
+```
+
+### 49.4 `auth_context_client.py`
+
+Zweck:
+
+```text
+serverseitiger HTTP-Client zu vectoplan-auth
+```
+
+Aktuelle URL-Regel:
+
+```text
+VECTOPLAN_AUTH_INTERNAL_URL:
+  Container-zu-Auth-Service
+
+VECTOPLAN_AUTH_PUBLIC_URL:
+  Browser-/Redirect-/Login-Links
+```
+
+Klassifiziert:
+
+```text
+dns_failed
+connection_refused
+timeout
+http_5xx
+http_error
+access_denied
+invalid_payload
+not_configured
+request_failed
+```
+
+Wichtig:
+
+```text
+dns_failed ist kein gebannter User.
+dns_failed ist auth_unavailable und ergibt 503.
+```
+
+### 49.5 `auth_context.py`
+
+Zweck:
+
+```text
+normalisiert Rohantworten aus vectoplan-auth
+```
+
+Neue zentrale Trennung:
+
+```text
+auth_unavailable:
+  technischer Ausfall
+  503
+  user_blocked=false
+
+user_blocked:
+  echte Sperre aus vectoplan-auth
+  403
+
+access_blocked:
+  effektive Sperre für Guards
+```
+
+Wichtig:
+
+```text
+blocked bleibt als Legacy-/Guard-Alias erhalten,
+aber die Ursache wird jetzt über auth_unavailable/user_blocked/access_blocked getrennt.
+```
+
+### 49.6 `auth_dependency_service.py`
+
+Zweck:
+
+```text
+technische Betriebsfähigkeitsprüfung für vectoplan-auth
+```
+
+Liefert:
+
+```text
+ok
+available
+auth_state
+code
+status_code
+http_status
+endpoint
+elapsed_ms
+reason
+details
+```
+
+Nutzen:
+
+```text
+/ready
+/v1/auth/status
+/v1/auth/dependency
+UI-Fehlerseiten
+Smoke-Tests
+```
+
+### 49.7 `auth_requirements.py`
+
+Zweck:
+
+```text
+zentrale Auth-/Access-Guards
+```
+
+Wichtige Zuordnung:
+
+```text
+auth_unavailable → 503
+user_blocked     → 403
+access_blocked   → 403
+not authenticated → 401
+missing permission → 403
+```
+
+Diese Datei verhindert, dass jede Route eigene Auth-Entscheidungen trifft.
+
+### 49.8 `current_user.py`
+
+Zweck:
+
+```text
+App-kompatibler CurrentUserContext
+```
+
+Aktuelle Regeln:
+
+```text
+persistent=true nur bei echtem Auth-User und lokalem AppUser-Link
+demo_mode=true nur bei vectoplan-auth Demo-Berechtigung
+auth_unavailable=true nie Demo
+user_blocked=true nie Demo
+```
+
+Nicht mehr:
+
+```text
+DEFAULT_USER_ID
+fallback_to_default
+lokaler id=1 User
+Dev-Placeholder-Admin
+```
+
+### 49.9 `routes/auth_status_api.py`
+
+Neue Routen:
+
+```text
+GET  /v1/auth/status
+GET  /v1/auth/dependency
+GET  /v1/auth/client
+GET  /v1/auth/context
+GET  /v1/auth/current-user
+POST /v1/auth/cache/clear
+```
+
+Zweck:
+
+```text
+Auth-Dependency prüfen
+Auth-Client-Konfiguration prüfen
+normalisierten AuthContext prüfen
+CurrentUserContext prüfen
+lokale Caches leeren
+```
+
+Sicherheitsregel:
+
+```text
+keine Cookies ausgeben
+keine Authorization Header ausgeben
+keine API-Keys ausgeben
+keine Service Tokens ausgeben
+```
+
+### 49.10 `routes/projects_api.py`
+
+Neue Auth-Regeln:
+
+```text
+auth_unavailable → 503
+user_blocked → 403
+Demo nur bei gültigem Auth-Demo-Kontext
+persistente Mutationen nur bei persistentem AppUser-Link
+```
+
+Besonders geschützt:
+
+```text
+POST /v1/projects
+PATCH /v1/projects/<id>
+DELETE /v1/projects/<id>
+Team-Routen
+Invitation-Routen
+Publication-Update
+Embed-Policy
+Service-Links
+Versionen
+Chunk-Provisioning
+```
+
+### 49.11 `routes/ui/projects.py`
+
+Neue UI-Regel:
+
+```text
+Wenn vectoplan-auth nicht erreichbar ist:
+  keine Projekt-Shell
+  kein Demo-Projekt
+  keine New-Project-Shell
+  HTML-Fehlerseite 503
+```
+
+Echter gesperrter User:
+
+```text
+HTML/JSON 403
+kein Demo-Fallback
+```
+
+### 49.12 `routes/viewer.py`
+
+Neue Viewer-Regel:
+
+```text
+/ui/project/... prüft dieselbe Auth-Trennung wie API und Shell.
+```
+
+Für externe Workspaces:
+
+```text
+auth_unavailable:
+  kein Redirect zu Editor/Map
+  503
+
+user_blocked:
+  kein Redirect zu Editor/Map
+  403
+
+allowed:
+  Public-URL-Redirect über workspace_embed_service.py
+```
+
+### 49.13 Docker Compose / lokale Auth-URLs
+
+Die App-Umgebung in `services/vectoplan-server/docker-compose.all.yml` enthält bzw. benötigt im aktuellen lokalen Setup:
+
+```yaml
+VECTOPLAN_AUTH_INTERNAL_URL: "${VECTOPLAN_AUTH_INTERNAL_URL:-http://host.docker.internal:5000}"
+VECTOPLAN_AUTH_BASE_URL: "${VECTOPLAN_AUTH_BASE_URL:-http://host.docker.internal:5000}"
+AUTH_IDENTITY_INTERNAL_URL: "${AUTH_IDENTITY_INTERNAL_URL:-http://host.docker.internal:5000}"
+VECTOPLAN_AUTH_PUBLIC_URL: "${VECTOPLAN_AUTH_PUBLIC_URL:-http://localhost:5000}"
+```
+
+Einordnung:
+
+```text
+host.docker.internal:
+  vom Container zum Host
+
+localhost:5000:
+  Browser zu vectoplan-auth
+
+localhost:5103:
+  Browser zu vectoplan-app
+```
+
+Wenn später alles in einem gemeinsamen Docker-Netzwerk läuft:
+
+```text
+VECTOPLAN_AUTH_INTERNAL_URL=http://vectoplan-auth:5000
+```
+
+ist wieder der bevorzugte interne Service-Name.
+
+### 49.14 Erfolgreich getesteter Fix
+
+Vorher:
+
+```text
+GET http://localhost:5000/auth/context
+  authenticated=true
+
+GET http://127.0.0.1:5103/
+  503 dns_failed
+```
+
+Ursache:
+
+```text
+App-Container konnte vectoplan-auth nicht per Docker-DNS auflösen.
+```
+
+Nach Änderung:
+
+```text
+VECTOPLAN_AUTH_INTERNAL_URL=http://host.docker.internal:5000
+App über http://localhost:5103/ öffnen
+```
+
+Erwartet:
+
+```text
+/v1/auth/dependency?refresh=1 → ok=true
+/                         → App-Shell statt 503
+```
+
+### 49.15 Aktuelle Smoke-Check-Reihenfolge
+
+```text
+1. Browser: http://localhost:5000/auth/context
+   Erwartung: authenticated=true
+
+2. Browser: http://localhost:5103/v1/auth/dependency?refresh=1
+   Erwartung: ok=true, available=true
+
+3. Browser: http://localhost:5103/v1/auth/context?refresh=1
+   Erwartung: authenticated=true oder sauberer Auth-Kontext
+
+4. Browser: http://localhost:5103/v1/projects/current-user
+   Erwartung: CurrentUserContext ohne Default-User
+
+5. Browser: http://localhost:5103/
+   Erwartung: Projekt-Shell
+```
+
+Nicht mehr erwartete Fehler:
+
+```text
+ImportError DEFAULT_USER_ID
+ensure_default_user Startup-Fehler
+403 "Gesperrter Benutzer" bei DNS-Ausfall
+Demo-Fallback bei Auth-Service-Ausfall
+Default-User id=1
+```
+
+### 49.16 Neuer Auth-Zielzustand als Kurzform
+
+```text
+vectoplan-auth:
+  echte Identität
+  echte Session
+  echte Rollen
+  echter Blocked/Banned-Status
+  echter Account/Plan/Entitlement-Kontext
+  echte Demo-Berechtigung
+
+vectoplan-app:
+  Portal
+  Projekt-Shell
+  Projektrollen
+  lokale AppUser-FK-Links
+  Projekt-Metadaten
+  Workspace-Gateway
+  Publication
+  Invitations
+  Referenzen auf Chunk/Editor/Map/2D/LV
+```
+
+Damit ist der IST-Zustand nach der Auth-Umstellung dokumentiert.

@@ -2,13 +2,144 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+import importlib
+import threading
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from flask import Blueprint, Flask, current_app, jsonify, request
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import Config
 from extensions import db, init_logging
+
+
+# ─────────────────────────────────────────────────────────────
+# Import/cache state
+# ─────────────────────────────────────────────────────────────
+
+_BLUEPRINT_IMPORT_LOCK = threading.RLock()
+_BLUEPRINT_IMPORT_CACHE: Dict[str, Optional[Blueprint]] = {}
+_BLUEPRINT_IMPORT_ERRORS: Dict[str, Dict[str, str]] = {}
+
+
+# ─────────────────────────────────────────────────────────────
+# Safe helpers
+# ─────────────────────────────────────────────────────────────
+
+def _safe_str(value: Any, default: str = "", max_len: int = 4000) -> str:
+    try:
+        text = str(value if value is not None else default).strip()
+
+        if not text:
+            text = default
+
+        if max_len > 0 and len(text) > max_len:
+            return text[:max_len]
+
+        return text
+    except Exception:
+        return default
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    try:
+        if isinstance(value, bool):
+            return value
+
+        if value is None:
+            return default
+
+        if isinstance(value, (int, float)):
+            return bool(value)
+
+        text = str(value).strip().lower()
+
+        if text in {"1", "true", "yes", "y", "on", "ja", "enabled", "enable"}:
+            return True
+
+        if text in {"0", "false", "no", "n", "off", "nein", "disabled", "disable"}:
+            return False
+
+        return default
+    except Exception:
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or isinstance(value, bool):
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or isinstance(value, bool):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _safe_dict(value: Any) -> Dict[str, Any]:
+    try:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, Mapping):
+            return dict(value)
+        if hasattr(value, "to_dict") and callable(value.to_dict):
+            return dict(value.to_dict())
+        return {}
+    except Exception:
+        return {}
+
+
+def _error_payload(exc: BaseException) -> Dict[str, str]:
+    try:
+        return {
+            "type": exc.__class__.__name__,
+            "message": str(exc),
+        }
+    except Exception:
+        return {
+            "type": "Exception",
+            "message": "unknown error",
+        }
+
+
+def _config_bool(app: Flask, key: str, default: bool = False) -> bool:
+    try:
+        return _safe_bool(app.config.get(key, default), default)
+    except Exception:
+        return default
+
+
+def _config_str(app: Flask, key: str, default: str = "") -> str:
+    try:
+        value = app.config.get(key, default)
+        text = str(value if value is not None else "").strip()
+        return text or default
+    except Exception:
+        return default
+
+
+def _config_int(app: Flask, key: str, default: int = 0) -> int:
+    try:
+        return _safe_int(app.config.get(key, default), default)
+    except Exception:
+        return default
+
+
+def _status_ok(value: Any) -> bool:
+    try:
+        data = _safe_dict(value)
+        return bool(data.get("ok", False))
+    except Exception:
+        return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -20,23 +151,37 @@ def _import_blueprint(import_path: str, attr_name: str = "bp") -> Optional[Bluep
     Defensive Blueprint importer.
 
     Prevents one broken route module from making `from app import create_app`
-    fail completely. This matters during the current refactor because files are
-    replaced one by one.
+    fail completely. The exact error is stored for /ready diagnostics.
     """
-    try:
-        module_path, _, object_name = import_path.partition(":")
-        target_attr = object_name or attr_name
+    cache_key = f"{import_path}|{attr_name}"
 
-        module = __import__(module_path, fromlist=[target_attr])
-        blueprint = getattr(module, target_attr, None)
+    with _BLUEPRINT_IMPORT_LOCK:
+        if cache_key in _BLUEPRINT_IMPORT_CACHE:
+            return _BLUEPRINT_IMPORT_CACHE.get(cache_key)
 
-        if isinstance(blueprint, Blueprint):
-            return blueprint
+        try:
+            module_path, _, object_name = import_path.partition(":")
+            target_attr = object_name or attr_name
 
-        return None
+            module = importlib.import_module(module_path)
+            blueprint = getattr(module, target_attr, None)
 
-    except Exception:
-        return None
+            if isinstance(blueprint, Blueprint):
+                _BLUEPRINT_IMPORT_CACHE[cache_key] = blueprint
+                _BLUEPRINT_IMPORT_ERRORS.pop(cache_key, None)
+                return blueprint
+
+            _BLUEPRINT_IMPORT_CACHE[cache_key] = None
+            _BLUEPRINT_IMPORT_ERRORS[cache_key] = {
+                "type": "BlueprintMissing",
+                "message": f"{module_path}.{target_attr} is not a flask.Blueprint",
+            }
+            return None
+
+        except Exception as exc:
+            _BLUEPRINT_IMPORT_CACHE[cache_key] = None
+            _BLUEPRINT_IMPORT_ERRORS[cache_key] = _error_payload(exc)
+            return None
 
 
 def _load_core_blueprints() -> Dict[str, Optional[Blueprint]]:
@@ -46,6 +191,10 @@ def _load_core_blueprints() -> Dict[str, Optional[Blueprint]]:
     No legacy Speckle/old-viewer blueprints are loaded here.
     """
     return {
+        # Auth diagnostics.
+        # This file is created in the next step. Until then it is skipped safely.
+        "auth_status_api_bp": _import_blueprint("routes.auth_status_api:bp"),
+
         # Project/API layer.
         "projects_api_bp": _import_blueprint("routes.projects_api:bp"),
 
@@ -84,66 +233,52 @@ def _load_optional_blueprints() -> Dict[str, Optional[Blueprint]]:
 # Config / startup helpers
 # ─────────────────────────────────────────────────────────────
 
-def _config_bool(app: Flask, key: str, default: bool = False) -> bool:
-    try:
-        value = app.config.get(key, default)
-
-        if isinstance(value, bool):
-            return value
-
-        text = str(value if value is not None else "").strip().lower()
-
-        if text in {"1", "true", "yes", "y", "on", "ja"}:
-            return True
-
-        if text in {"0", "false", "no", "n", "off", "nein"}:
-            return False
-
-        return default
-
-    except Exception:
-        return default
-
-
-def _config_str(app: Flask, key: str, default: str = "") -> str:
-    try:
-        value = app.config.get(key, default)
-        text = str(value if value is not None else "").strip()
-        return text or default
-    except Exception:
-        return default
-
-
 def _apply_default_config(app: Flask) -> None:
     """
-    Apply safe defaults for the Speckle-free app shell and new project layer.
+    Apply safe defaults for the auth-backed app shell and project layer.
+
+    No local default user.
+    No dev identity fallback.
+    No placeholder invitation dispatch.
     """
     app.config.setdefault("KEEP_VERSIONS_PER_PROJECT", 10)
     app.config.setdefault("MAX_CONTENT_LENGTH", 512 * 1024 * 1024)
 
-    # Project-management phase defaults.
-    app.config.setdefault("VECTOPLAN_DEFAULT_USER_ID", 1)
+    # App database/bootstrap.
     app.config.setdefault("VECTOPLAN_APP_AUTO_CREATE_ALL", True)
-    app.config.setdefault("VECTOPLAN_APP_ENSURE_DEFAULT_USER", True)
+    app.config.setdefault("VECTOPLAN_APP_ENSURE_DEFAULT_USER", False)
+    app.config.setdefault("VECTOPLAN_DEFAULT_USER_ID", None)
     app.config.setdefault("VECTOPLAN_ALLOW_USER_HEADER_OVERRIDE", False)
 
-    # Auth/demo phase defaults.
-    # Current local development stays compatible with placeholder user id=1.
-    app.config.setdefault("VECTOPLAN_AUTH_MODE", "dev")
+    # Auth phase defaults.
+    app.config.setdefault("VECTOPLAN_AUTH_MODE", "external")
     app.config.setdefault("VECTOPLAN_TRUST_AUTH_HEADERS", False)
     app.config.setdefault("VECTOPLAN_FORCE_DEMO_MODE", False)
-    app.config.setdefault("VECTOPLAN_ALLOW_DEMO_QUERY_PARAM", True)
-    app.config.setdefault("VECTOPLAN_DEMO_TTL_SECONDS", 1800)
+    app.config.setdefault("VECTOPLAN_ALLOW_DEMO_QUERY_PARAM", False)
+    app.config.setdefault("VECTOPLAN_DEMO_TTL_SECONDS", 3600)
 
-    # Future Auth/Registration service bridge.
-    app.config.setdefault("AUTH_IDENTITY_INTERNAL_URL", "")
-    app.config.setdefault("AUTH_IDENTITY_LOOKUP_PATH", "/internal/auth/identity/lookup-email")
-    app.config.setdefault("AUTH_IDENTITY_INVITATION_DISPATCH_PATH", "/internal/auth/invitations/project")
+    # vectoplan-auth URLs.
+    # INTERNAL_URL is server-to-server and must be reachable from the app container.
+    # PUBLIC_URL is browser-facing and only used for links/redirects.
+    app.config.setdefault("VECTOPLAN_AUTH_INTERNAL_URL", "http://vectoplan-auth:5000")
+    app.config.setdefault("VECTOPLAN_AUTH_PUBLIC_URL", "http://localhost:5000")
+    app.config.setdefault("VECTOPLAN_AUTH_CONTEXT_MINIMAL_PATH", "/auth/context/minimal")
+    app.config.setdefault("VECTOPLAN_AUTH_CONTEXT_PATH", "/auth/context")
+    app.config.setdefault("VECTOPLAN_AUTH_ME_PATH", "/auth/me")
+    app.config.setdefault("VECTOPLAN_AUTH_READY_PATH", "/health")
+    app.config.setdefault("VECTOPLAN_AUTH_REQUEST_TIMEOUT_SECONDS", 2.0)
+    app.config.setdefault("VECTOPLAN_AUTH_NEGATIVE_CACHE_TTL_SECONDS", 5)
+    app.config.setdefault("VECTOPLAN_AUTH_STATUS_CACHE_TTL_SECONDS", 5)
+
+    # Auth identity / invitation bridge.
+    app.config.setdefault("AUTH_IDENTITY_INTERNAL_URL", app.config.get("VECTOPLAN_AUTH_INTERNAL_URL", ""))
+    app.config.setdefault("AUTH_IDENTITY_LOOKUP_PATH", "/v1/auth/identity/lookup-email")
+    app.config.setdefault("AUTH_IDENTITY_INVITATION_DISPATCH_PATH", "/v1/auth/invitations/project")
     app.config.setdefault("AUTH_IDENTITY_API_TOKEN", "")
-    app.config.setdefault("AUTH_IDENTITY_DEV_MODE", True)
+    app.config.setdefault("AUTH_IDENTITY_DEV_MODE", False)
     app.config.setdefault("AUTH_IDENTITY_DEV_REGISTERED_EMAILS", "")
     app.config.setdefault("AUTH_IDENTITY_DEV_ACCEPT_ALL_REGISTERED", False)
-    app.config.setdefault("AUTH_IDENTITY_PLACEHOLDER_INVITES", True)
+    app.config.setdefault("AUTH_IDENTITY_PLACEHOLDER_INVITES", False)
 
     # Project publication / simplified form.
     app.config.setdefault("PROJECT_PUBLICATION_CACHE_TTL_SECONDS", 10)
@@ -301,30 +436,37 @@ def _import_all_models(app: Flask) -> Dict[str, Any]:
         "model_count": 0,
         "tables": [],
         "error": None,
+        "default_user_removed": True,
     }
 
     try:
         import models
 
+        classes: Tuple[Any, ...] = ()
+
         try:
             if hasattr(models, "register_all_models"):
-                classes = models.register_all_models()
+                classes = tuple(models.register_all_models() or ())
             elif hasattr(models, "get_core_model_classes"):
-                classes = models.get_core_model_classes()
-            else:
-                classes = ()
-        except Exception:
-            classes = ()
+                classes = tuple(models.get_core_model_classes() or ())
+        except Exception as class_error:
+            status["class_error"] = f"{class_error.__class__.__name__}: {class_error}"
 
         try:
             if hasattr(models, "get_model_import_status"):
-                model_status = models.get_model_import_status()
+                model_status = _safe_dict(models.get_model_import_status())
                 status.update(
                     {
-                        "ok": bool(model_status.get("core_loaded", True)),
-                        "model_count": int(model_status.get("model_count") or 0),
+                        "ok": bool(model_status.get("ok", False)),
+                        "model_count": int(model_status.get("model_count") or len(classes or ())),
                         "tables": list(model_status.get("tables") or []),
-                        "optional_errors": dict(model_status.get("optional_errors") or {}),
+                        "errors": dict(model_status.get("errors") or {}),
+                        "missing_required_modules": list(model_status.get("missing_required_modules") or []),
+                        "appChunkModelShapeReady": bool(model_status.get("appChunkModelShapeReady", False)),
+                        "projectInvitationModelShapeReady": bool(model_status.get("projectInvitationModelShapeReady", False)),
+                        "authLinkModelShapeReady": bool(model_status.get("authLinkModelShapeReady", False)),
+                        "projectAuthContextShapeReady": bool(model_status.get("projectAuthContextShapeReady", False)),
+                        "default_user_removed": bool(model_status.get("defaultUserRemoved", True)),
                     }
                 )
             else:
@@ -333,16 +475,21 @@ def _import_all_models(app: Flask) -> Dict[str, Any]:
                         "ok": True,
                         "model_count": len(tuple(classes or ())),
                         "tables": [],
-                        "optional_errors": {},
+                        "errors": {},
                     }
                 )
-        except Exception:
+        except Exception as status_error:
             status.update(
                 {
-                    "ok": True,
+                    "ok": bool(classes),
                     "model_count": len(tuple(classes or ())),
                     "tables": [],
-                    "optional_errors": {},
+                    "errors": {
+                        "model_status": {
+                            "type": status_error.__class__.__name__,
+                            "message": str(status_error),
+                        }
+                    },
                 }
             )
 
@@ -365,8 +512,8 @@ def _create_database_schema_if_configured(app: Flask) -> Dict[str, Any]:
     Important:
     - db.create_all() creates missing tables only.
     - It does not add missing columns to existing tables.
-    - If an old local DB already has the previous `projects` table, a reset or
-      migration is still required for the new Project columns.
+    - If an old local DB already has previous tables, a reset or migration is
+      still required for new/changed columns.
     """
     result: Dict[str, Any] = {
         "enabled": _config_bool(app, "VECTOPLAN_APP_AUTO_CREATE_ALL", True),
@@ -381,7 +528,8 @@ def _create_database_schema_if_configured(app: Flask) -> Dict[str, Any]:
 
     try:
         with app.app_context():
-            _import_all_models(app)
+            model_status = _import_all_models(app)
+            app.extensions["vectoplan_model_status"] = model_status
             db.create_all()
 
         result["ok"] = True
@@ -398,62 +546,26 @@ def _create_database_schema_if_configured(app: Flask) -> Dict[str, Any]:
         return result
 
 
-def _ensure_default_user_if_configured(app: Flask) -> Dict[str, Any]:
+def _default_user_removed_status(app: Flask) -> Dict[str, Any]:
     """
-    Ensure placeholder AppUser(id=1) exists.
+    Startup diagnostic for the removed default-user bootstrap.
 
-    This is best-effort during startup. Project APIs also ensure it per request.
-
-    In forced demo mode the placeholder user is intentionally not created.
+    This intentionally does not import or call ensure_default_user().
     """
-    result: Dict[str, Any] = {
-        "enabled": _config_bool(app, "VECTOPLAN_APP_ENSURE_DEFAULT_USER", True),
-        "ok": False,
+    return {
+        "enabled": False,
+        "ok": True,
+        "skipped": True,
+        "removed": True,
         "user_id": None,
-        "skipped": False,
-        "error": None,
+        "reason": "vectoplan-auth_is_user_truth",
+        "config_requested": _config_bool(app, "VECTOPLAN_APP_ENSURE_DEFAULT_USER", False),
     }
-
-    if not result["enabled"]:
-        result["ok"] = True
-        return result
-
-    try:
-        auth_mode = _config_str(app, "VECTOPLAN_AUTH_MODE", "dev").lower()
-        force_demo = _config_bool(app, "VECTOPLAN_FORCE_DEMO_MODE", False)
-
-        if force_demo or auth_mode == "demo":
-            result["ok"] = True
-            result["skipped"] = True
-            result["reason"] = "demo_mode"
-            return result
-
-    except Exception:
-        pass
-
-    try:
-        with app.app_context():
-            from services.current_user import ensure_default_user
-
-            user = ensure_default_user()
-            result["user_id"] = getattr(user, "id", None)
-            result["ok"] = user is not None
-
-        return result
-
-    except Exception as ex:
-        try:
-            app.logger.warning("ensure_default_user failed: %s", ex)
-        except Exception:
-            pass
-
-        result["error"] = f"{ex.__class__.__name__}: {ex}"
-        return result
 
 
 def _run_startup_database_tasks(app: Flask) -> None:
     """
-    Run model import, optional create_all and default-user bootstrap.
+    Run model import and optional create_all.
 
     Failure must not prevent the app from starting during refactor; routes will
     report JSON errors if the DB is not ready.
@@ -461,20 +573,60 @@ def _run_startup_database_tasks(app: Flask) -> None:
     try:
         model_status = _import_all_models(app)
         app.extensions["vectoplan_model_status"] = model_status
-    except Exception:
-        pass
+    except Exception as ex:
+        app.extensions["vectoplan_model_status"] = {
+            "ok": False,
+            "error": f"{ex.__class__.__name__}: {ex}",
+            "default_user_removed": True,
+        }
 
     try:
         schema_status = _create_database_schema_if_configured(app)
         app.extensions["vectoplan_schema_status"] = schema_status
-    except Exception:
-        pass
+    except Exception as ex:
+        app.extensions["vectoplan_schema_status"] = {
+            "ok": False,
+            "error": f"{ex.__class__.__name__}: {ex}",
+        }
 
     try:
-        user_status = _ensure_default_user_if_configured(app)
-        app.extensions["vectoplan_default_user_status"] = user_status
+        removed_status = _default_user_removed_status(app)
+        app.extensions["vectoplan_default_user_status"] = removed_status
+    except Exception as ex:
+        app.extensions["vectoplan_default_user_status"] = {
+            "ok": False,
+            "removed": True,
+            "error": f"{ex.__class__.__name__}: {ex}",
+        }
+
+
+def _auth_config_status(app: Flask) -> Dict[str, Any]:
+    internal_url = _config_str(app, "VECTOPLAN_AUTH_INTERNAL_URL", "")
+    public_url = _config_str(app, "VECTOPLAN_AUTH_PUBLIC_URL", "")
+
+    return {
+        "configured": bool(internal_url),
+        "internal_url_configured": bool(internal_url),
+        "public_url_configured": bool(public_url),
+        "internal_url": internal_url,
+        "public_url": public_url,
+        "mode": _config_str(app, "VECTOPLAN_AUTH_MODE", "external"),
+        "timeout_seconds": _safe_float(app.config.get("VECTOPLAN_AUTH_REQUEST_TIMEOUT_SECONDS"), 2.0),
+        "fail_closed": True,
+    }
+
+
+def _blueprint_status(app: Flask) -> Dict[str, Any]:
+    registered: List[str] = []
+    try:
+        registered = sorted(str(name) for name in app.blueprints.keys())
     except Exception:
-        pass
+        registered = []
+
+    return {
+        "registered": registered,
+        "import_errors": dict(_BLUEPRINT_IMPORT_ERRORS),
+    }
 
 
 def _create_system_blueprint() -> Blueprint:
@@ -491,6 +643,8 @@ def _create_system_blueprint() -> Blueprint:
                 "project_management": True,
                 "project_viewer": True,
                 "demo_mode_supported": True,
+                "auth_truth": "vectoplan-auth",
+                "default_user_removed": True,
             }
         )
 
@@ -503,6 +657,8 @@ def _create_system_blueprint() -> Blueprint:
             "project_management": True,
             "project_viewer": True,
             "demo_mode_supported": True,
+            "auth_truth": "vectoplan-auth",
+            "default_user_removed": True,
         }
 
         try:
@@ -518,16 +674,133 @@ def _create_system_blueprint() -> Blueprint:
         try:
             payload["default_user"] = dict(current_app.extensions.get("vectoplan_default_user_status") or {})
         except Exception:
-            payload["default_user"] = {}
+            payload["default_user"] = {
+                "removed": True,
+                "ok": True,
+            }
 
         try:
-            payload["blueprints"] = sorted(str(name) for name in current_app.blueprints.keys())
+            payload["auth"] = _auth_config_status(current_app)
         except Exception:
-            payload["blueprints"] = []
+            payload["auth"] = {}
 
-        return jsonify(payload)
+        try:
+            payload["blueprints"] = _blueprint_status(current_app)
+        except Exception:
+            payload["blueprints"] = {}
+
+        try:
+            model_status = _safe_dict(payload.get("models"))
+            schema_status = _safe_dict(payload.get("schema"))
+            payload["ready"] = bool(model_status.get("ok", False) and schema_status.get("ok", True))
+        except Exception:
+            payload["ready"] = False
+
+        status_code = 200 if payload.get("ready") else 503
+        return jsonify(payload), status_code
 
     return sys_bp
+
+
+# ─────────────────────────────────────────────────────────────
+# Security headers
+# ─────────────────────────────────────────────────────────────
+
+def _allowed_frame_ancestors(app: Flask) -> str:
+    allowed = (
+        "'self' "
+        "http://localhost:5103 "
+        "http://127.0.0.1:5103 "
+        "http://localhost:5200 "
+        "http://127.0.0.1:5200"
+    )
+
+    try:
+        extra = (
+            app.config.get("APP_FRAME_ANCESTORS")
+            or app.config.get("VECTOPLAN_ALLOWED_FRAME_PARENTS")
+            or app.config.get("VECTOPLAN_EDITOR_FRAME_ANCESTORS")
+            or ""
+        )
+        extra = str(extra or "").strip()
+        if extra:
+            allowed = f"{allowed} {extra}"
+    except Exception:
+        pass
+
+    deduped: List[str] = []
+    try:
+        for item in allowed.split():
+            item = item.strip()
+            if item and item not in deduped:
+                deduped.append(item)
+    except Exception:
+        pass
+
+    return " ".join(deduped or ["'self'"])
+
+
+def _request_allows_embed() -> bool:
+    allow_embed = False
+
+    try:
+        allow_embed = request.args.get("allow_embed") == "1"
+    except Exception:
+        allow_embed = False
+
+    try:
+        path = str(request.path or "")
+
+        if path == "/ui/editor":
+            allow_embed = True
+        elif path == "/ui/project/new":
+            allow_embed = True
+        elif path.startswith("/ui/project/"):
+            allow_embed = True
+        elif path.startswith("/ui/chat/") and path.endswith("/editor"):
+            allow_embed = True
+        elif path.startswith("/ui/chat/") and path.endswith("/map"):
+            allow_embed = True
+        elif path.startswith("/ui/chat/") and path.endswith("/cad2d"):
+            allow_embed = True
+        elif path.startswith("/ui/chat/") and path.endswith("/lv"):
+            allow_embed = True
+        elif path.startswith("/ui/chat/") and path.endswith("/admin"):
+            allow_embed = True
+    except Exception:
+        pass
+
+    return bool(allow_embed)
+
+
+def _merge_csp_frame_ancestors(existing_csp: str, frame_ancestors_directive: str) -> str:
+    csp = _safe_str(existing_csp, "", 10000)
+    directive_value = _safe_str(frame_ancestors_directive, "frame-ancestors 'self'", 2000)
+
+    if not csp:
+        return directive_value
+
+    directives: List[str] = []
+    replaced = False
+
+    try:
+        for directive in csp.split(";"):
+            directive = directive.strip()
+            if not directive:
+                continue
+
+            if directive.lower().startswith("frame-ancestors"):
+                directives.append(directive_value)
+                replaced = True
+            else:
+                directives.append(directive)
+
+        if not replaced:
+            directives.append(directive_value)
+
+        return "; ".join(directives)
+    except Exception:
+        return directive_value
 
 
 # ─────────────────────────────────────────────────────────────
@@ -556,7 +829,7 @@ def create_app() -> Flask:
         except Exception:
             pass
 
-    # Import models / create missing tables / ensure placeholder user.
+    # Import models / create missing tables.
     try:
         _run_startup_database_tasks(app)
     except Exception as ex:
@@ -581,6 +854,9 @@ def create_app() -> Flask:
 
     # Core routes.
     core = _load_core_blueprints()
+
+    # Auth diagnostic route first, once the file exists.
+    _register_bp(app, core.get("auth_status_api_bp"), "auth_status_api_bp")
 
     # Project routes.
     # Order matters:
@@ -636,109 +912,17 @@ def create_app() -> Flask:
             pass
 
         try:
-            allow_embed = False
+            frame_ancestors = "frame-ancestors " + _allowed_frame_ancestors(app)
+            existing_csp = str(resp.headers.get("Content-Security-Policy", "") or "")
+            resp.headers["Content-Security-Policy"] = _merge_csp_frame_ancestors(existing_csp, frame_ancestors)
 
-            try:
-                allow_embed = request.args.get("allow_embed") == "1"
-            except Exception:
-                allow_embed = False
-
-            try:
-                path = str(request.path or "")
-
-                # Project workspaces are iframe destinations inside the app shell.
-                if path == "/ui/editor":
-                    allow_embed = True
-                elif path == "/ui/project/new":
-                    allow_embed = True
-                elif path.startswith("/ui/project/"):
-                    allow_embed = True
-                elif path.startswith("/ui/chat/") and path.endswith("/editor"):
-                    allow_embed = True
-                elif path.startswith("/ui/chat/") and path.endswith("/map"):
-                    allow_embed = True
-                elif path.startswith("/ui/chat/") and path.endswith("/cad2d"):
-                    allow_embed = True
-                elif path.startswith("/ui/chat/") and path.endswith("/lv"):
-                    allow_embed = True
-                elif path.startswith("/ui/chat/") and path.endswith("/admin"):
-                    allow_embed = True
-            except Exception:
-                pass
-
-            csp = ""
-            try:
-                csp = str(resp.headers.get("Content-Security-Policy", "") or "")
-            except Exception:
-                csp = ""
-
-            try:
-                allowed_frame_ancestors = (
-                    "'self' "
-                    "http://localhost:5103 "
-                    "http://127.0.0.1:5103 "
-                    "http://localhost:5200 "
-                    "http://127.0.0.1:5200"
-                )
-
-                # Wenn ENV/Config vorhanden ist, zusätzlich berücksichtigen.
-                try:
-                    extra = (
-                            app.config.get("APP_FRAME_ANCESTORS")
-                            or app.config.get("VECTOPLAN_ALLOWED_FRAME_PARENTS")
-                            or app.config.get("VECTOPLAN_EDITOR_FRAME_ANCESTORS")
-                            or ""
-                    )
-                    extra = str(extra or "").strip()
-                    if extra:
-                        allowed_frame_ancestors = f"{allowed_frame_ancestors} {extra}"
-                except Exception:
-                    pass
-
-                # Deduplizieren, Reihenfolge erhalten.
-                deduped = []
-                for item in allowed_frame_ancestors.split():
-                    item = item.strip()
-                    if item and item not in deduped:
-                        deduped.append(item)
-
-                frame_ancestors_directive = "frame-ancestors " + " ".join(deduped)
-
-                if csp:
-                    directives = []
-                    replaced = False
-
-                    for directive in csp.split(";"):
-                        directive = directive.strip()
-                        if not directive:
-                            continue
-
-                        if directive.lower().startswith("frame-ancestors"):
-                            directives.append(frame_ancestors_directive)
-                            replaced = True
-                        else:
-                            directives.append(directive)
-
-                    if not replaced:
-                        directives.append(frame_ancestors_directive)
-
-                    resp.headers["Content-Security-Policy"] = "; ".join(directives)
-                else:
-                    resp.headers["Content-Security-Policy"] = frame_ancestors_directive
-
-            except Exception:
-                pass
-
-            csp_has_frame_ancestors = True
-
-            if not allow_embed and not csp_has_frame_ancestors:
-                resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
-            elif allow_embed:
+            if _request_allows_embed():
                 try:
                     resp.headers.pop("X-Frame-Options", None)
                 except Exception:
                     pass
-
+            else:
+                resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         except Exception:
             try:
                 resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
@@ -783,7 +967,13 @@ def create_app() -> Flask:
                 or path.startswith("/ui/")
                 or path.startswith("/project")
             ):
-                return jsonify({"ok": False, "error": str(error), "code": "internal_error"}), 500
+                return jsonify(
+                    {
+                        "ok": False,
+                        "error": str(error),
+                        "code": "internal_error",
+                    }
+                ), 500
 
             return jsonify({"ok": False, "error": "internal error", "code": "internal_error"}), 500
         except Exception:
