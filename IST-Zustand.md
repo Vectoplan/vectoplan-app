@@ -2,8 +2,8 @@
 
 # IST-Zustand – `vectoplan-app`
 
-Stand: 2026-07-05
-Status: Projektgeführte Portal-App mit zentraler vectoplan-auth-Anbindung, entfernter Default-User-/Dev-User-Logik, fail-closed Auth-Dependency-Diagnose, Demo-/Auth-Kontext, Einladungslogik, Veröffentlichungssteuerung, zentralem Workspace-Gateway und repariertem 3D-Editor-Embed
+Stand: 2026-07-08 (fortgeschrieben; Basisstand 2026-07-05)
+Status: Projektgeführte Portal-App mit zentraler vectoplan-auth-Anbindung, entfernter Default-User-/Dev-User-Logik, fail-closed Auth-Dependency-Diagnose, Demo-/Auth-Kontext, Einladungslogik, Veröffentlichungssteuerung, zentralem Workspace-Gateway, repariertem 3D-Editor-Embed und zuletzt stabilisiertem Projekt-Workspace-Rendering inklusive Team-/Publication-/Form-Partials
 
 > Teil 1 von 3
 
@@ -6698,3 +6698,608 @@ vectoplan-app:
 ```
 
 Damit ist der IST-Zustand nach der Auth-Umstellung dokumentiert.
+
+---
+
+## 50. Nachtrag 2026-07-08 – Projekt-Workspace-Renderfix, Team-/Publication-Stabilisierung und aktueller Arbeitsstand
+
+Dieser Nachtrag ergänzt den bisherigen IST-Zustand, ohne die vorherigen Abschnitte zu kürzen oder zu ersetzen.
+
+Ausgangslage dieser Reparaturrunde:
+
+```text
+Ein eingeloggter User konnte die Projekt-Shell öffnen.
+Die Projektliste links war sichtbar.
+Der rechte Projekt-Workspace brach jedoch mit HTTP 500 ab.
+```
+
+Sichtbares Fehlerbild im Workspace:
+
+```text
+Fehler: Projekt-Workspace konnte nicht gerendert werden.
+Projekt · Status 500 · project_workspace_render_failed
+```
+
+Später beim erneuten Test eines neuen Projekts:
+
+```text
+render project workspace template syntax failed: TemplateSyntaxError
+```
+
+Damit war klar:
+
+```text
+Die Shell selbst war grundsätzlich erreichbar.
+Die Auth-/Projektliste war nicht der primäre Fehler.
+Der Fehler lag im Renderpfad des Projekt-Workspace-Templates.
+```
+
+---
+
+### 50.1 Erste Ursache: Jinja-Syntaxfehler in `templates/viewer/project.html`
+
+Der erste konkrete Fehler lag in:
+
+```text
+services/vectoplan-app/templates/viewer/project.html
+```
+
+Fehlerklasse:
+
+```text
+jinja2.exceptions.TemplateSyntaxError
+```
+
+Fehlerbild:
+
+```text
+unexpected '}'
+expected ')'
+```
+
+Ursache:
+
+```text
+Zu stark verschachtelte Jinja-Ausdrücke in einer set-Zeile.
+```
+
+Problematische Struktur sinngemäß:
+
+```jinja
+{% set value = a|default(b.get('x', c.get('y', ... ))) %}
+```
+
+Diese Struktur ist in Jinja fragil, sobald mehrere `default(...)`, `get(...)`, boolesche Fallbacks und Klammern ineinandergeschachtelt werden.
+
+Reparaturregel ab jetzt:
+
+```text
+Keine tief verschachtelten Jinja-Ausdrücke in Templates.
+Komplexe Context-/Access-/Publication-Logik muss in Python oder in mehrere einfache set-Schritte.
+Templates sollen Werte nur noch defensiv anzeigen und einfache Defaults setzen.
+```
+
+---
+
+### 50.2 Neue Context-Schicht für den Projekt-Workspace
+
+Neu erstellt bzw. als Zielstand eingeführt:
+
+```text
+services/vectoplan-app/services/project_workspace_context.py
+```
+
+Zweck:
+
+```text
+normalisierten Template-Context für templates/viewer/project.html bauen
+Projekt-/Access-/Publication-/Workspace-Flags zentral vorbereiten
+snake_case und camelCase kompatibel liefern
+read_only / public_viewer / demo_mode / persistent sauber ableiten
+Template-500 durch fehlende oder inkonsistente Context-Werte vermeiden
+```
+
+Wichtige Grundidee:
+
+```text
+Jinja soll nicht mehr selbst entscheiden müssen,
+wie Auth-, Permission-, Publication- oder Demo-Zustände zusammenfallen.
+
+Python baut den Context.
+Template rendert den Context.
+```
+
+---
+
+### 50.3 `routes/viewer.py` als robuster Render-Gateway
+
+Wesentlich stabilisiert:
+
+```text
+services/vectoplan-app/routes/viewer.py
+```
+
+Ziele:
+
+```text
+/ui/project/new/project rendern
+/ui/project/<project_id>/project rendern
+Project-Workspace-Context normalisieren
+TemplateNotFound sauber melden
+TemplateSyntaxError sauber melden
+generische Renderfehler kontrolliert als JSON/HTML-Fehler zurückgeben
+```
+
+Neuer Zielzustand im Renderpfad:
+
+```text
+routes/viewer.py
+  ↓
+_build_project_workspace_context_safe(...)
+  ↓
+project_workspace_context.py
+  ↓
+render_template("viewer/project.html", **context)
+```
+
+Wichtig:
+
+```text
+Ein Template-Syntaxfehler wird jetzt ausdrücklich als project_workspace_template_syntax_failed geloggt.
+Die Fehlerantwort enthält Template-Name, Template-Zeile und Fehlermeldung, soweit verfügbar.
+```
+
+Damit ist künftige Analyse schneller.
+
+---
+
+### 50.4 Zweite Ursache: Jinja-Syntaxfehler in `project_team.html`
+
+Nach der ersten Reparatur trat ein weiterer Template-Syntaxfehler auf:
+
+```text
+services/vectoplan-app/templates/viewer/partials/project_team.html
+```
+
+Fehlerklasse:
+
+```text
+jinja2.exceptions.TemplateSyntaxError
+```
+
+Fehlerbild:
+
+```text
+unexpected ')'
+```
+
+Konkrete Ursache:
+
+```text
+Eine zu stark verschachtelte set-Zeile für _team_can_view_settings_raw.
+```
+
+Sinngemäß problematisch:
+
+```jinja
+{% set _team_can_view_settings_raw = _can_view_settings|default(can_view_settings|default(_team_ui.get(...), true), true) %}
+```
+
+Reparatur:
+
+```text
+Die gesamte Permission-/Mode-Ermittlung in project_team.html wurde auf flache, mehrstufige set-Blöcke umgebaut.
+Keine tief geschachtelten default/get-Ketten mehr.
+```
+
+Bestätigter aktueller Stand:
+
+```text
+Der Projekt-Workspace rendert wieder.
+Neues Projekt kann wieder geöffnet werden.
+Die Einstellung/der Projektbereich wird wieder angezeigt.
+```
+
+---
+
+### 50.5 Aktualisierte bzw. erzeugte Dateien dieser Reparaturrunde
+
+In dieser Runde wurden folgende Dateien neu erstellt, ersetzt, stabilisiert oder als geprüfter Zielstand erzeugt:
+
+```text
+services/vectoplan-app/templates/viewer/project.html
+services/vectoplan-app/services/project_workspace_context.py
+services/vectoplan-app/routes/viewer.py
+
+services/vectoplan-app/templates/viewer/partials/project_address.html
+services/vectoplan-app/templates/viewer/partials/project_visibility.html
+services/vectoplan-app/templates/viewer/partials/project_publication.html
+services/vectoplan-app/templates/viewer/partials/project_team.html
+
+services/vectoplan-app/static/js/project/project_form.js
+services/vectoplan-app/static/js/project/project_publication.js
+services/vectoplan-app/static/js/project/project_team.js
+
+services/vectoplan-app/services/project_publication_service.py
+services/vectoplan-app/routes/projects_api.py
+services/vectoplan-app/services/project_permissions.py
+services/vectoplan-app/services/project_invitation_service.py
+services/vectoplan-app/models/project_invitations.py
+services/vectoplan-app/services/project_service.py
+```
+
+Einordnung:
+
+```text
+Nicht jede Datei muss zwingend im aktuell laufenden Container übernommen worden sein.
+Der bestätigte akute Fix war der Template-Renderpfad, insbesondere project.html und project_team.html.
+Die API-/Service-Dateien liegen als vollständige geprüfte Zielstände vor und können bei Bedarf übernommen bleiben oder später nochmals gezielt geprüft werden.
+```
+
+Wichtig für den aktuellen Arbeitsstand:
+
+```text
+Da der Projekt-Workspace wieder läuft, wird vorerst nicht weiter aggressiv umgebaut.
+Der Fokus liegt jetzt auf Stabilität und Dokumentation.
+```
+
+---
+
+### 50.6 Aktueller Projektformular-Zustand nach Reparatur
+
+Das Projektformular bleibt der vereinfachte Zielzustand:
+
+```text
+sichtbar:
+  name
+  description
+  address_text
+  visibility
+```
+
+Weiterhin nicht normal sichtbar:
+
+```text
+street
+house_number
+postal_code
+city
+region
+country
+latitude
+longitude
+coordinate_srid
+service_refs
+artifact_refs
+system_refs
+chunk_project_id
+chunk_universe_id
+chunk_world_id
+```
+
+Grund:
+
+```text
+Strukturierte Adresse und Koordinaten bleiben spätere Geocoder-/Systemaufgabe.
+Das normale Projektformular bleibt fachlich reduziert.
+```
+
+---
+
+### 50.7 Aktueller Template-Zielzustand
+
+`templates/viewer/project.html` ist die zentrale Projektformular-Seite im iframe.
+
+Enthaltene Bereiche:
+
+```text
+Basisdaten
+Adresse
+Sichtbarkeit
+Publication
+Team und Rechte
+```
+
+Partials:
+
+```text
+viewer/partials/project_address.html
+viewer/partials/project_visibility.html
+viewer/partials/project_publication.html
+viewer/partials/project_team.html
+```
+
+Regel:
+
+```text
+Partials dürfen ohne vollständigen Parent-Context rendern.
+Alle Partials müssen Mapping-Prüfungen verwenden.
+Alle Partials müssen Schreib-/Read-only-/Public-/Demo-/Auth-Ausfall-Zustände defensiv behandeln.
+```
+
+Nicht mehr erlaubt:
+
+```text
+Jinja-Monsterausdrücke mit vielen ineinander verschachtelten default/get-Ketten.
+```
+
+---
+
+### 50.8 Aktueller JavaScript-Zielzustand im Projektformular
+
+Beteiligte Dateien:
+
+```text
+static/js/project/project_form.js
+static/js/project/project_publication.js
+static/js/project/project_team.js
+```
+
+`project_form.js`:
+
+```text
+liest Projektformular
+validiert name/address_text/visibility
+sendet POST /v1/projects oder PATCH /v1/projects/<public_id>
+sendet Parent-Events nach Speicherung
+aktualisiert Redirect-/Sidebar-/Workspace-Zustand
+blockiert Mutationen bei read_only/public_viewer/auth_unavailable/user_blocked/access_blocked
+```
+
+`project_publication.js`:
+
+```text
+liest Publication-Card
+speichert Workspace-Veröffentlichung
+sendet PATCH /v1/projects/<project_id>/publication
+blockiert Admin/Team/Settings/Permissions/System
+behandelt Demo/Public/Read-only defensiv
+```
+
+`project_team.js`:
+
+```text
+lädt Mitglieder
+lädt Einladungen
+erstellt Einladungen per registrierter E-Mail
+ändert Rollen
+entfernt Mitglieder
+widerruft Einladungen
+blockiert Owner-Änderung über UI
+blockiert Demo/Public/Read-only/Auth-Ausfall
+```
+
+---
+
+### 50.9 Publication-/Public-Regeln bleiben unverändert
+
+Projekt-Sichtbarkeit:
+
+```text
+private
+unlisted
+public
+```
+
+Workspace-Veröffentlichung bleibt separat:
+
+```text
+project
+map
+editor3d
+cad2d
+lv
+versions
+```
+
+Nie öffentlich:
+
+```text
+admin
+team
+settings
+permissions
+system
+system_refs
+```
+
+Wichtig:
+
+```text
+visibility=public veröffentlicht nicht automatisch alle Workspaces.
+Ein Workspace muss separat published sein.
+Öffentliche Betrachter bleiben read-only.
+```
+
+---
+
+### 50.10 Auth-/Demo-Regeln bleiben unverändert
+
+Weiterhin verbindlich:
+
+```text
+vectoplan-auth bleibt die Auth-Wahrheit.
+vectoplan-app erzeugt keine echten User.
+vectoplan-app erzeugt keinen Default-User.
+vectoplan-app erzeugt keinen Dev-User id=1.
+Auth-Ausfall ist 503.
+Echter blockierter User ist 403.
+Demo ist nur erlaubt, wenn vectoplan-auth demo_project_access liefert.
+Demo darf keine Team-/Invitation-/Publication-/Admin-Aktionen.
+```
+
+Für den Projekt-Workspace bedeutet das:
+
+```text
+auth_unavailable:
+  kein Speichern
+  keine Teamaktionen
+  keine Publication-Aktion
+  kein externer Workspace-Redirect
+  503/fail-closed
+
+user_blocked:
+  kein Speichern
+  keine Teamaktionen
+  keine Publication-Aktion
+  403
+
+public_viewer:
+  read-only
+  kein Team
+  kein Admin
+  nur veröffentlichte Workspaces
+```
+
+---
+
+### 50.11 Aktuelle Smoke-Checks nach dem Renderfix
+
+Bestätigt bzw. als aktueller Arbeitsstand angenommen:
+
+```text
+GET /project=new
+  → Shell lädt
+
+iframe /ui/project/new/project
+  → Projektformular rendert wieder
+
+templates/viewer/project.html
+  → kein ursprünglicher unexpected-'}'-Fehler mehr
+
+templates/viewer/partials/project_team.html
+  → kein unexpected-')'-Fehler mehr
+
+state_api_bp unavailable; skipped
+  → weiterhin möglich
+  → aktuell kein Blocker
+```
+
+Sinnvolle nächste Smoke-Checks, wenn später weitergetestet wird:
+
+```text
+1. Neues Projekt mit name + address_text + visibility speichern.
+2. Nach Redirect /project=<public_id> prüfen.
+3. 3D-Reiter öffnen.
+4. Publication als Projektverwalter lesen.
+5. Publication private → public/unlisted testweise ändern.
+6. Danach Public-Link ohne Login testen.
+7. Admin/Team/Settings im Public-Kontext blockiert prüfen.
+8. Invitation mit registrierter E-Mail testen.
+9. Invitation mit nicht registrierter E-Mail kontrolliert ablehnen.
+10. Auth-Ausfall weiterhin 503 prüfen.
+```
+
+---
+
+### 50.12 Aktueller Umgang mit `projects_api.py` und `project_service.py`
+
+Für `routes/projects_api.py` und `services/project_service.py` wurden vollständige, nicht gekürzte Zielstände erzeugt und mit Python-Syntaxprüfung geprüft.
+
+Wichtig für die praktische Arbeit:
+
+```text
+Wenn diese Dateien bereits übernommen wurden und die App läuft:
+  vorerst nicht weiter ändern.
+
+Wenn diese Dateien noch nicht übernommen wurden und die App läuft:
+  ebenfalls nicht erzwingen.
+  Nur bei konkretem API-/Service-Fehler gezielt erneut prüfen.
+
+Wenn ein neuer Fehler auftritt:
+  Logs prüfen.
+  genau die betroffene Datei bearbeiten.
+  nicht mehrere große Dateien gleichzeitig austauschen.
+```
+
+Grund:
+
+```text
+Der akute Blocker war der Template-Renderpfad.
+Nach erfolgreichem Renderfix ist Stabilität wichtiger als weiterer Umbau.
+```
+
+---
+
+### 50.13 Neue Dokumentationsregel für künftige Reparaturen
+
+Für zukünftige Reparaturen an `vectoplan-app` gilt:
+
+```text
+1. Eine Datei nach der anderen bearbeiten.
+2. Vorher bestehende Datei sichern oder posten.
+3. Keine gekürzten Dateien übernehmen.
+4. Erste Zeile der Datei enthält Pfad+Filename als Kommentar.
+5. Jinja-Templates flach halten.
+6. Komplexe Logik in Python-Service auslagern.
+7. Nach jeder Änderung Smoke-Test.
+8. Erst bei konkretem Fehler nächste Datei anfassen.
+```
+
+Zusätzliche Template-Regel:
+
+```text
+Jede neue Jinja-Datei muss mit möglichst einfachen set-Blöcken arbeiten.
+Keine tief verschachtelten Inline-Fallbacks.
+```
+
+---
+
+### 50.14 Aktualisierte Stabilitätseinschätzung
+
+Aktuell stabil genug:
+
+```text
+Projekt-Shell
+Projekt-Sidebar
+Projektformular-Renderpfad
+project.html
+project_address.html
+project_visibility.html
+project_publication.html
+project_team.html nach Syntaxfix
+project_form.js Zielstand
+project_team.js Zielstand
+Publication-Grundlage
+Team-/Invitation-Grundlage
+Auth-fail-closed-Grundlage
+3D-Gateway-Grundlage
+Chunk-Referenz-Grundlage
+```
+
+Weiterhin nicht final:
+
+```text
+state_api_bp Warnung
+vollständiger Public/Unlisted-Ende-zu-Ende-Test
+produktiver Invitation-Dispatch mit echten Zielpersonen
+2D-Serviceintegration
+LV-Serviceintegration
+alte Chat-/Speckle-/Transcript-Pfade
+spätere Umbenennung chat_* zu shell_*
+```
+
+Aktueller praktischer Beschluss:
+
+```text
+Da der Projekt-Workspace wieder funktioniert, bleibt der Code vorerst so.
+Weitere Änderungen nur bei neuem konkretem Fehler oder geplantem Feature-Test.
+```
+
+---
+
+### 50.15 Abschlussstand 2026-07-08
+
+Kurzfassung:
+
+```text
+Der Projekt-Workspace rendert wieder.
+Der zuletzt sichtbare TemplateSyntaxError in project_team.html ist behoben.
+Die vorherige Fehlerklasse in project.html ist durch flachere Template-Struktur und Context-Normalisierung adressiert.
+Die Projektformular-Struktur bleibt reduziert.
+Auth-/Demo-/Publication-/Team-Sicherheitsregeln bleiben unverändert.
+Vorerst keine weiteren großen Umbauten.
+```
+
+Damit ist der IST-Zustand nach dem Projekt-Workspace-Renderfix vom 2026-07-08 dokumentiert.
+

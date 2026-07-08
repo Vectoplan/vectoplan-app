@@ -4,36 +4,48 @@
   VECTOPLAN Project Form
 
   Zweck:
-  - Projektformular im Workspace-iframe steuern.
-  - Neues Projekt über POST /v1/projects erstellen.
-  - Bestehendes Projekt über PATCH /v1/projects/<public_id> aktualisieren.
-  - Nach Erstellung Parent-Shell auf /project=<public_id> weiterleiten.
-  - Nach Speichern Parent-Shell informieren, damit Sidebar und Workspace-Gating
-    aktualisiert werden können.
-  - Kein direkter Zugriff auf Chunk-, Editor-, 2D- oder LV-Daten.
+  - Steuert das Projektformular im Workspace-iframe.
+  - Erstellt neue Projekte über POST /v1/projects.
+  - Aktualisiert bestehende Projekte über PATCH /v1/projects/<public_id>.
+  - Leitet nach Erstellung die Parent-Shell auf /project=<public_id> weiter.
+  - Informiert nach Speichern Parent-Shell, Sidebar, Workspace-Gating und Publication-UI.
+  - Verwaltet nur App-Projektmetadaten.
+  - Kein direkter Zugriff auf Chunk-, Editor-, Map-, 2D- oder LV-Fachdaten.
 
-  Neuer Formularstand:
-  - Gesendet werden nur:
-      name
-      title
-      description
-      address_text
-      address.text
-      visibility
-  - Keine manuellen Felder mehr für:
-      street
-      house_number
-      postal_code
-      city
-      region
-      country
-      latitude
-      longitude
-      coordinate_srid
-      is_public
+  Gesendet werden nur:
+  - name
+  - title
+  - description
+  - address_text
+  - address.text
+  - visibility
+
+  Nicht gesendet werden:
+  - street
+  - house_number
+  - postal_code
+  - city
+  - region
+  - country
+  - latitude
+  - longitude
+  - coordinate_srid
+  - is_public
+  - publication / published_workspaces
+  - members / invitations
+  - chunk/editor/map/2d/lv/system refs
+
+  Regeln:
+  - Public Viewer ist strikt read-only und darf nie POST/PATCH senden.
+  - Read-only ist strikt read-only und darf nie POST/PATCH senden.
+  - Auth-unavailable, user-blocked und access-blocked senden nie POST/PATCH.
+  - Demo-Modus darf nur dann temporär arbeiten, wenn Backend/Context canEdit erlaubt.
+  - Demo-Modus wird nie mit Public Viewer vermischt.
+  - visibility steuert nur private/unlisted/public.
   - is_public wird serverseitig aus visibility abgeleitet.
   - Veröffentlichte Reiter werden separat über project_publication.js gespeichert.
   - Team/Einladungen werden separat über project_team.js gespeichert.
+  - Frontend-Gating ist nur UX. Backend bleibt die Wahrheit.
 
   Erwartetes Template:
   - services/vectoplan-app/templates/viewer/project.html
@@ -53,12 +65,12 @@
 
   var EXPORT_NAME = "VectoplanProjectForm";
   var LEGACY_EXPORT_NAME = "__VECTOPLAN_PROJECT_FORM__";
-
-  var INTERNAL_VERSION = 2;
+  var INTERNAL_VERSION = 5;
 
   var DEFAULT_CREATE_PATH = "/v1/projects";
   var DEFAULT_PROJECT_NEW_URL = "/project=new";
   var DEFAULT_PROJECT_ROOT_URL = "/";
+  var DEFAULT_PROJECT_CONTEXT_NEW = "/ui/project/new/context.json";
 
   var FORM_SELECTOR = "[data-project-form]";
   var ROOT_SELECTOR = "[data-project-workspace]";
@@ -72,9 +84,11 @@
   var CLASS_READONLY = "is-readonly";
   var CLASS_INVALID = "is-invalid";
   var CLASS_SELECTED = "is-selected";
+  var CLASS_DISABLED = "is-disabled";
 
   var FIELD_ERROR_CLASS = "vp-project-field__error";
 
+  var EVENT_READY = "vectoplan:project-form:ready";
   var EVENT_SAVED = "vectoplan:project:saved";
   var EVENT_CREATED = "vectoplan:project:created";
   var EVENT_UPDATED = "vectoplan:project:updated";
@@ -82,6 +96,9 @@
   var EVENT_DIRTY = "vectoplan:project:dirty";
   var EVENT_ERROR = "vectoplan:project:error";
   var EVENT_VISIBILITY_CHANGED = "vectoplan:project:visibility:changed";
+  var EVENT_READONLY_BLOCKED = "vectoplan:project:readonly-blocked";
+  var EVENT_SIDEBAR_REFRESH = "project-sidebar:refresh";
+  var EVENT_PUBLICATION_REFRESH = "vectoplan:project:publication:refresh";
 
   var VALID_VISIBILITIES = {
     private: true,
@@ -93,20 +110,32 @@
     version: INTERNAL_VERSION,
     initialized: false,
     destroyed: false,
+
     isNew: true,
-    canEdit: true,
+    canEdit: false,
     canManage: false,
+    canMutate: false,
+
     demoMode: false,
-    persistent: true,
-    authenticated: true,
+    publicViewer: false,
+    readOnly: false,
+    persistent: false,
+    authenticated: false,
+    authUnavailable: false,
+    userBlocked: false,
+    accessBlocked: false,
+    accessMode: "anonymous",
+
     isDirty: false,
     isSaving: false,
+    isLoading: false,
     lastSavedAt: null,
     lastError: null,
     originalPayload: null,
     currentProject: null,
     config: null,
-    refs: {}
+    refs: {},
+    listeners: []
   };
 
   function getWindow() {
@@ -172,15 +201,24 @@
         return false;
       }
 
+      if (value === null || value === undefined) {
+        return !!fallback;
+      }
+
       if (typeof value === "string") {
         var normalized = value.trim().toLowerCase();
 
         if (
           normalized === "true" ||
           normalized === "yes" ||
+          normalized === "y" ||
           normalized === "on" ||
           normalized === "ja" ||
-          normalized === "enabled"
+          normalized === "enabled" ||
+          normalized === "enable" ||
+          normalized === "active" ||
+          normalized === "ok" ||
+          normalized === "ready"
         ) {
           return true;
         }
@@ -188,9 +226,20 @@
         if (
           normalized === "false" ||
           normalized === "no" ||
+          normalized === "n" ||
           normalized === "off" ||
           normalized === "nein" ||
-          normalized === "disabled"
+          normalized === "disabled" ||
+          normalized === "disable" ||
+          normalized === "inactive" ||
+          normalized === "readonly" ||
+          normalized === "read_only" ||
+          normalized === "error" ||
+          normalized === "failed" ||
+          normalized === "null" ||
+          normalized === "none" ||
+          normalized === "undefined" ||
+          normalized === ""
         ) {
           return false;
         }
@@ -206,7 +255,7 @@
     try {
       return JSON.stringify(value);
     } catch (error) {
-      return "";
+      return "{}";
     }
   }
 
@@ -245,7 +294,10 @@
         return {
           name: "Error",
           message: "Unknown error",
-          stack: ""
+          stack: "",
+          code: "",
+          status: null,
+          payload: null
         };
       }
 
@@ -253,7 +305,10 @@
         return {
           name: "Error",
           message: error,
-          stack: ""
+          stack: "",
+          code: "",
+          status: null,
+          payload: null
         };
       }
 
@@ -261,15 +316,18 @@
         name: trimString(error.name, "Error"),
         message: trimString(error.message, String(error)),
         stack: trimString(error.stack, ""),
-        code: trimString(error.code, ""),
-        status: error.status || error.statusCode || null,
+        code: trimString(error.code || (error.payload && error.payload.code), ""),
+        status: error.status || error.statusCode || (error.payload && error.payload.status_code) || null,
         payload: error.payload || null
       };
     } catch (innerError) {
       return {
         name: "Error",
         message: "Unknown error",
-        stack: ""
+        stack: "",
+        code: "",
+        status: null,
+        payload: null
       };
     }
   }
@@ -323,9 +381,78 @@
       }
 
       target.addEventListener(type, handler, options || false);
+      state.listeners.push({
+        target: target,
+        type: type,
+        handler: handler,
+        options: options || false
+      });
+
       return true;
     } catch (error) {
       return false;
+    }
+  }
+
+  function removeAllListeners() {
+    try {
+      (state.listeners || []).forEach(function removeOne(item) {
+        try {
+          if (item && item.target && item.target.removeEventListener) {
+            item.target.removeEventListener(item.type, item.handler, item.options);
+          }
+        } catch (error) {}
+      });
+
+      state.listeners = [];
+    } catch (error) {
+      state.listeners = [];
+    }
+  }
+
+  function normalizeAccessMode(value, fallback) {
+    try {
+      var text = trimString(value, fallback || "").toLowerCase().replace(/-/g, "_").replace(/\s+/g, "_");
+
+      if (
+        text === "public_viewer" ||
+        text === "public_readonly" ||
+        text === "public_read_only" ||
+        text === "anonymous_public"
+      ) {
+        return "public";
+      }
+
+      if (text === "demo_guest" || text === "demo_project" || text === "demo_mode") {
+        return "demo";
+      }
+
+      if (text === "auth" || text === "member" || text === "user") {
+        return "authenticated";
+      }
+
+      if (text === "auth_unavailable" || text === "service_unavailable") {
+        return "auth_unavailable";
+      }
+
+      if (text === "blocked" || text === "banned" || text === "access_blocked") {
+        return "blocked";
+      }
+
+      if (
+        text === "public" ||
+        text === "demo" ||
+        text === "authenticated" ||
+        text === "anonymous" ||
+        text === "auth_unavailable" ||
+        text === "blocked"
+      ) {
+        return text;
+      }
+
+      return fallback || "";
+    } catch (error) {
+      return fallback || "";
     }
   }
 
@@ -333,7 +460,8 @@
     try {
       var text = trimString(value, fallback || "private")
         .toLowerCase()
-        .replace(/-/g, "_");
+        .replace(/-/g, "_")
+        .replace(/\s+/g, "_");
 
       if (text === "öffentlich" || text === "oeffentlich" || text === "open" || text === "listed") {
         return "public";
@@ -341,7 +469,9 @@
 
       if (
         text === "not_listed" ||
+        text === "notlisted" ||
         text === "nicht_gelistet" ||
+        text === "hidden_link" ||
         text === "link" ||
         text === "link_shared" ||
         text === "share_link"
@@ -349,7 +479,7 @@
         return "unlisted";
       }
 
-      if (text === "shared" || text === "geteilt" || text === "privat" || text === "internal") {
+      if (text === "shared" || text === "geteilt" || text === "privat" || text === "internal" || text === "members") {
         return "private";
       }
 
@@ -360,6 +490,51 @@
       return fallback || "private";
     } catch (error) {
       return fallback || "private";
+    }
+  }
+
+  function pickBoolean(sources, fallback) {
+    try {
+      for (var i = 0; i < sources.length; i += 1) {
+        if (sources[i] !== undefined && sources[i] !== null && sources[i] !== "") {
+          return toBooleanSafe(sources[i], fallback);
+        }
+      }
+
+      return !!fallback;
+    } catch (error) {
+      return !!fallback;
+    }
+  }
+
+  function pickString(sources, fallback) {
+    try {
+      for (var i = 0; i < sources.length; i += 1) {
+        var value = trimString(sources[i], "");
+        if (value) {
+          return value;
+        }
+      }
+      return fallback || "";
+    } catch (error) {
+      return fallback || "";
+    }
+  }
+
+  function attr(element, name, fallback) {
+    try {
+      if (!element || !element.getAttribute) {
+        return fallback || "";
+      }
+
+      var value = element.getAttribute(name);
+      if (value === null || value === undefined || value === "") {
+        return fallback || "";
+      }
+
+      return value;
+    } catch (error) {
+      return fallback || "";
     }
   }
 
@@ -375,92 +550,335 @@
         config = {};
       }
 
+      var root = query(ROOT_SELECTOR);
+      var form = query(FORM_SELECTOR);
+
       var paths = isObject(config.paths) ? config.paths : {};
       var parentEvents = isObject(config.parentEvents) ? config.parentEvents : {};
       var project = isObject(config.project) ? config.project : {};
+      var currentProject = isObject(config.currentProject) ? config.currentProject : project;
       var currentUser = isObject(config.currentUser) ? config.currentUser : {};
       var access = isObject(config.access) ? config.access : isObject(project.access) ? project.access : {};
+      var workspaceAccess = isObject(config.workspaceAccess) ? config.workspaceAccess : isObject(project.workspace_access) ? project.workspace_access : {};
 
-      var demoMode = toBooleanSafe(
-        config.demoMode ||
-          config.demo_mode ||
-          currentUser.demo_mode ||
-          currentUser.demoMode ||
-          currentUser.is_demo,
+      var accessMode = normalizeAccessMode(
+        pickString(
+          [
+            config.accessMode,
+            config.access_mode,
+            access.accessMode,
+            access.access_mode,
+            workspaceAccess.accessMode,
+            workspaceAccess.access_mode,
+            project.accessMode,
+            project.access_mode,
+            attr(root, "data-project-access-mode", "")
+          ],
+          ""
+        ),
+        ""
+      );
+
+      var authUnavailable = pickBoolean(
+        [
+          config.authUnavailable,
+          config.auth_unavailable,
+          currentUser.auth_unavailable,
+          currentUser.authUnavailable,
+          access.auth_unavailable,
+          access.authUnavailable,
+          attr(root, "data-project-auth-unavailable", ""),
+          attr(form, "data-project-form-auth-unavailable", "")
+        ],
+        accessMode === "auth_unavailable"
+      );
+
+      var userBlocked = pickBoolean(
+        [
+          config.userBlocked,
+          config.user_blocked,
+          currentUser.user_blocked,
+          currentUser.userBlocked,
+          access.user_blocked,
+          access.userBlocked,
+          attr(root, "data-project-user-blocked", ""),
+          attr(form, "data-project-form-user-blocked", "")
+        ],
         false
       );
 
-      var authenticated = toBooleanSafe(
-        config.authenticated ||
-          currentUser.authenticated ||
-          currentUser.is_authenticated ||
-          currentUser.isAuthenticated,
-        !demoMode
+      var accessBlocked = pickBoolean(
+        [
+          config.accessBlocked,
+          config.access_blocked,
+          currentUser.access_blocked,
+          currentUser.accessBlocked,
+          access.access_blocked,
+          access.accessBlocked,
+          attr(root, "data-project-access-blocked", ""),
+          attr(form, "data-project-form-access-blocked", "")
+        ],
+        accessMode === "blocked"
       );
 
-      var persistent = toBooleanSafe(
-        config.persistent !== undefined ? config.persistent : currentUser.persistent,
-        authenticated && !demoMode
+      var publicViewer = pickBoolean(
+        [
+          config.publicViewer,
+          config.isPublicViewer,
+          config.public_viewer,
+          access.publicViewer,
+          access.public_viewer,
+          access.isPublicViewer,
+          access.is_public_viewer,
+          workspaceAccess.publicViewer,
+          workspaceAccess.public_viewer,
+          project.publicViewer,
+          project.public_viewer,
+          attr(root, "data-project-public-viewer", ""),
+          attr(form, "data-project-form-public-viewer", "")
+        ],
+        accessMode === "public"
       );
 
-      var canEdit = toBooleanSafe(config.canEdit, true) && persistent && !demoMode;
-      var canManage = toBooleanSafe(config.canManage, false);
+      if (publicViewer) {
+        accessMode = "public";
+      }
+
+      var readOnly = pickBoolean(
+        [
+          config.readOnly,
+          config.readonly,
+          config.read_only,
+          access.readOnly,
+          access.readonly,
+          access.read_only,
+          workspaceAccess.readOnly,
+          workspaceAccess.read_only,
+          project.readOnly,
+          project.readonly,
+          project.read_only,
+          attr(root, "data-project-read-only", ""),
+          attr(form, "data-project-form-readonly", "")
+        ],
+        publicViewer || authUnavailable || userBlocked || accessBlocked
+      );
+
+      if (publicViewer || authUnavailable || userBlocked || accessBlocked) {
+        readOnly = true;
+      }
+
+      var demoMode = pickBoolean(
+        [
+          config.demoMode,
+          config.demo_mode,
+          currentUser.demo_mode,
+          currentUser.demoMode,
+          currentUser.is_demo,
+          project.demo_mode,
+          project.demoMode,
+          attr(root, "data-project-demo-mode", ""),
+          attr(form, "data-project-form-demo-mode", "")
+        ],
+        false
+      );
+
+      if (publicViewer || authUnavailable || userBlocked || accessBlocked) {
+        demoMode = false;
+      }
+
+      if (!accessMode) {
+        accessMode = authUnavailable
+          ? "auth_unavailable"
+          : userBlocked || accessBlocked
+            ? "blocked"
+            : demoMode
+              ? "demo"
+              : publicViewer
+                ? "public"
+                : "";
+      }
+
+      var authenticated = pickBoolean(
+        [
+          config.authenticated,
+          currentUser.authenticated,
+          currentUser.is_authenticated,
+          currentUser.isAuthenticated
+        ],
+        !demoMode && !publicViewer && !authUnavailable && !userBlocked && !accessBlocked
+      );
+
+      var persistent = pickBoolean(
+        [
+          config.persistent,
+          currentUser.persistent,
+          attr(root, "data-project-persistent", "")
+        ],
+        authenticated && !demoMode && !publicViewer && !authUnavailable && !userBlocked && !accessBlocked
+      );
+
+      if (publicViewer || demoMode || authUnavailable || userBlocked || accessBlocked) {
+        persistent = false;
+      }
+
+      var isNew = pickBoolean(
+        [
+          config.isNew,
+          config.is_new,
+          project.is_new,
+          project.isNew,
+          attr(root, "data-project-is-new", "")
+        ],
+        true
+      );
+
+      var templateCanEdit = pickBoolean(
+        [
+          config.canEdit,
+          config.can_edit,
+          config.canMutate,
+          config.can_mutate,
+          access.canEdit,
+          access.can_edit,
+          access.canMutate,
+          access.can_mutate,
+          attr(root, "data-project-can-edit", ""),
+          attr(form, "data-project-form-can-edit", "")
+        ],
+        false
+      );
+
+      var canEdit = !!templateCanEdit &&
+        !readOnly &&
+        !publicViewer &&
+        !authUnavailable &&
+        !userBlocked &&
+        !accessBlocked &&
+        (persistent || demoMode);
+
+      var canManage = pickBoolean(
+        [
+          config.canManage,
+          config.can_manage,
+          access.canManage,
+          access.can_manage,
+          attr(root, "data-project-can-manage", "")
+        ],
+        false
+      ) && !publicViewer && !readOnly && !demoMode && !authUnavailable && !userBlocked && !accessBlocked;
+
+      var canMutate = pickBoolean(
+        [
+          config.canMutate,
+          config.can_mutate,
+          access.canMutate,
+          access.can_mutate,
+          attr(root, "data-project-can-mutate", ""),
+          attr(form, "data-project-form-can-edit", "")
+        ],
+        canEdit
+      ) && canEdit;
+
+      var projectPublicId = pickString(
+        [
+          config.projectPublicId,
+          config.project_public_id,
+          project.public_id,
+          project.publicId,
+          project.project_public_id,
+          project.projectPublicId,
+          attr(root, "data-project-public-id", "")
+        ],
+        isNew ? "new" : ""
+      );
 
       return {
         version: INTERNAL_VERSION,
-        isNew: toBooleanSafe(config.isNew, true),
+        isNew: isNew,
         canEdit: canEdit,
         canManage: canManage,
+        canMutate: canMutate,
+
         demoMode: demoMode,
+        publicViewer: publicViewer,
+        isPublicViewer: publicViewer,
+        readOnly: readOnly,
+        readonly: readOnly,
         authenticated: authenticated,
         persistent: persistent,
+        authUnavailable: authUnavailable,
+        userBlocked: userBlocked,
+        accessBlocked: accessBlocked,
+        accessMode: accessMode || (authenticated ? "authenticated" : "anonymous"),
+
         project: project,
-        currentProject: isObject(config.currentProject) ? config.currentProject : project,
+        currentProject: currentProject,
         currentUser: currentUser,
         access: access,
-        projectId: trimString(config.projectId || project.id || project.project_id, ""),
-        projectPublicId: trimString(
-          config.projectPublicId ||
-            project.public_id ||
-            project.publicId ||
-            (config.isNew ? "new" : ""),
-          config.isNew ? "new" : ""
+        workspaceAccess: workspaceAccess,
+
+        projectId: pickString(
+          [
+            config.projectId,
+            config.project_id,
+            project.id,
+            project.project_id,
+            project.projectId,
+            attr(root, "data-project-id", "")
+          ],
+          ""
         ),
-        projectVisibility: normalizeVisibility(config.projectVisibility || project.visibility, "private"),
+        projectPublicId: projectPublicId,
+        projectVisibility: normalizeVisibility(config.projectVisibility || config.project_visibility || project.visibility || attr(root, "data-project-visibility", ""), "private"),
+
         paths: {
-          createProject: trimString(paths.createProject, DEFAULT_CREATE_PATH),
-          updateProject: trimString(paths.updateProject, ""),
-          getProject: trimString(paths.getProject, ""),
-          context: trimString(paths.context, ""),
-          publication: trimString(paths.publication, ""),
-          members: trimString(paths.members, ""),
-          invitations: trimString(paths.invitations, ""),
-          projectRoot: trimString(paths.projectRoot, DEFAULT_PROJECT_ROOT_URL),
-          projectNew: trimString(paths.projectNew, DEFAULT_PROJECT_NEW_URL)
+          createProject: trimString(paths.createProject || paths.create_project, DEFAULT_CREATE_PATH),
+          updateProject: trimString(paths.updateProject || paths.update_project, ""),
+          getProject: trimString(paths.getProject || paths.get_project, ""),
+          context: trimString(paths.context, isNew ? DEFAULT_PROJECT_CONTEXT_NEW : ""),
+          workspaceAccess: trimString(paths.workspaceAccess || paths.workspace_access, ""),
+          publication: canManage ? trimString(paths.publication || paths.projectPublication || paths.project_publication, "") : "",
+          members: canManage ? trimString(paths.members, "") : "",
+          invitations: canManage ? trimString(paths.invitations, "") : "",
+          projectRoot: trimString(paths.projectRoot || paths.project_root, DEFAULT_PROJECT_ROOT_URL),
+          projectNew: trimString(paths.projectNew || paths.project_new, DEFAULT_PROJECT_NEW_URL)
         },
+
         parentEvents: {
+          ready: trimString(parentEvents.ready, EVENT_READY),
           saved: trimString(parentEvents.saved, EVENT_SAVED),
           created: trimString(parentEvents.created, EVENT_CREATED),
           updated: trimString(parentEvents.updated, EVENT_UPDATED),
           deleted: trimString(parentEvents.deleted, "vectoplan:project:deleted"),
           configured: trimString(parentEvents.configured, EVENT_CONFIGURED),
           publicationChanged: trimString(parentEvents.publicationChanged, "vectoplan:project:publication:changed"),
-          teamChanged: trimString(parentEvents.teamChanged, "vectoplan:project:team:changed")
+          teamChanged: trimString(parentEvents.teamChanged, "vectoplan:project:team:changed"),
+          error: trimString(parentEvents.error, EVENT_ERROR)
         }
       };
     } catch (error) {
       return {
         version: INTERNAL_VERSION,
         isNew: true,
-        canEdit: true,
+        canEdit: false,
         canManage: false,
+        canMutate: false,
         demoMode: false,
-        authenticated: true,
-        persistent: true,
+        publicViewer: false,
+        isPublicViewer: false,
+        readOnly: true,
+        readonly: true,
+        authenticated: false,
+        persistent: false,
+        authUnavailable: false,
+        userBlocked: false,
+        accessBlocked: true,
+        accessMode: "blocked",
         project: {},
         currentProject: {},
         currentUser: {},
         access: {},
+        workspaceAccess: {},
         projectId: "",
         projectPublicId: "new",
         projectVisibility: "private",
@@ -468,7 +886,8 @@
           createProject: DEFAULT_CREATE_PATH,
           updateProject: "",
           getProject: "",
-          context: "",
+          context: DEFAULT_PROJECT_CONTEXT_NEW,
+          workspaceAccess: "",
           publication: "",
           members: "",
           invitations: "",
@@ -476,13 +895,15 @@
           projectNew: DEFAULT_PROJECT_NEW_URL
         },
         parentEvents: {
+          ready: EVENT_READY,
           saved: EVENT_SAVED,
           created: EVENT_CREATED,
           updated: EVENT_UPDATED,
           deleted: "vectoplan:project:deleted",
           configured: EVENT_CONFIGURED,
           publicationChanged: "vectoplan:project:publication:changed",
-          teamChanged: "vectoplan:project:team:changed"
+          teamChanged: "vectoplan:project:team:changed",
+          error: EVENT_ERROR
         }
       };
     }
@@ -500,6 +921,7 @@
       projectId: queryById("projectId"),
       projectPublicId: queryById("projectPublicId"),
       projectIsNew: queryById("projectIsNew"),
+      projectAccessMode: queryById("projectAccessMode"),
 
       name: queryById("projectName"),
       description: queryById("projectDescription"),
@@ -507,7 +929,9 @@
 
       visibility: queryById("projectVisibility"),
       visibilityOptions: queryAll("[data-project-visibility-option]"),
+      visibilityCard: query("[data-project-visibility-card]"),
       visibilityCurrentLabel: query("[data-project-visibility-current-label]"),
+      visibilityStatus: query("[data-project-visibility-status]"),
       visibilityHelp: query("[data-project-visibility-help]"),
 
       addressCounter: query("[data-project-address-counter]"),
@@ -547,6 +971,7 @@
     try {
       if (element) {
         element.value = value === null || value === undefined ? "" : String(value);
+        element.setAttribute("value", element.value);
       }
     } catch (error) {}
   }
@@ -632,8 +1057,70 @@
       } else if (name === "readonly") {
         root.classList.toggle(CLASS_READONLY, boolValue);
         root.setAttribute("data-project-readonly", boolValue ? "true" : "false");
+        root.setAttribute("data-project-read-only", boolValue ? "true" : "false");
+      } else if (name === "publicViewer") {
+        root.setAttribute("data-project-public-viewer", boolValue ? "true" : "false");
+      } else if (name === "demoMode") {
+        root.setAttribute("data-project-demo-mode", boolValue ? "true" : "false");
+      } else if (name === "authUnavailable") {
+        root.setAttribute("data-project-auth-unavailable", boolValue ? "true" : "false");
+      } else if (name === "userBlocked") {
+        root.setAttribute("data-project-user-blocked", boolValue ? "true" : "false");
+      } else if (name === "accessBlocked") {
+        root.setAttribute("data-project-access-blocked", boolValue ? "true" : "false");
       }
     } catch (error) {}
+  }
+
+  function canWriteProject() {
+    try {
+      return !!(
+        !state.isSaving &&
+        !state.isLoading &&
+        state.canEdit &&
+        state.canMutate &&
+        !state.readOnly &&
+        !state.publicViewer &&
+        !state.authUnavailable &&
+        !state.userBlocked &&
+        !state.accessBlocked &&
+        (state.persistent || state.demoMode)
+      );
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function disabledReason() {
+    try {
+      if (state.authUnavailable) {
+        return "Auth-Service nicht erreichbar. Projekt kann nicht gespeichert werden.";
+      }
+
+      if (state.userBlocked || state.accessBlocked) {
+        return "Der Zugriff ist gesperrt. Projekt kann nicht gespeichert werden.";
+      }
+
+      if (state.publicViewer) {
+        return "Öffentliche Ansicht: Dieses Projekt ist schreibgeschützt.";
+      }
+
+      if (state.readOnly) {
+        return "Diese Ansicht ist schreibgeschützt.";
+      }
+
+      if (!state.persistent && !state.demoMode) {
+        return "Dein Account ist noch nicht lokal verknüpft. Speichern ist deaktiviert.";
+      }
+
+      if (!state.canEdit || !state.canMutate) {
+        return "Du hast für dieses Projekt nur Leserechte.";
+      }
+
+      return "";
+    } catch (error) {
+      return "Projekt kann nicht gespeichert werden.";
+    }
   }
 
   function setSaving(isSaving) {
@@ -641,12 +1128,23 @@
       state.isSaving = !!isSaving;
       setRootState("saving", state.isSaving);
 
+      var disabled = state.isSaving || !canWriteProject();
+
       if (state.refs.submit) {
-        state.refs.submit.disabled = state.isSaving || !state.canEdit;
+        state.refs.submit.disabled = disabled;
         state.refs.submit.setAttribute("aria-busy", state.isSaving ? "true" : "false");
+        state.refs.submit.setAttribute("aria-disabled", disabled ? "true" : "false");
+
+        if (disabledReason()) {
+          state.refs.submit.setAttribute("title", disabledReason());
+        } else {
+          state.refs.submit.removeAttribute("title");
+        }
 
         if (state.isSaving) {
-          state.refs.submit.setAttribute("data-original-text", state.refs.submit.textContent || "");
+          if (!state.refs.submit.getAttribute("data-original-text")) {
+            state.refs.submit.setAttribute("data-original-text", state.refs.submit.textContent || "");
+          }
           state.refs.submit.textContent = state.isNew ? "Projekt wird erstellt…" : "Projekt wird gespeichert…";
         } else {
           var original = state.refs.submit.getAttribute("data-original-text");
@@ -659,20 +1157,30 @@
       }
 
       if (state.refs.reset) {
-        state.refs.reset.disabled = state.isSaving || !state.canEdit;
+        state.refs.reset.disabled = disabled;
+        state.refs.reset.setAttribute("aria-disabled", disabled ? "true" : "false");
       }
     } catch (error) {}
   }
 
   function setDirty(isDirty) {
     try {
+      if (state.readOnly || state.publicViewer || state.authUnavailable || state.userBlocked || state.accessBlocked) {
+        state.isDirty = false;
+        setRootState("dirty", false);
+        return;
+      }
+
       state.isDirty = !!isDirty;
       setRootState("dirty", state.isDirty);
       setRootState("saved", !state.isDirty && !!state.lastSavedAt);
 
       dispatchLocal(EVENT_DIRTY, {
         dirty: state.isDirty,
-        project: state.currentProject
+        project: state.currentProject,
+        readOnly: state.readOnly,
+        publicViewer: state.publicViewer,
+        accessMode: state.accessMode
       });
     } catch (error) {}
   }
@@ -688,9 +1196,19 @@
       }
 
       if (state.refs.statusPill) {
-        state.refs.statusPill.classList.toggle("vp-project-status--configured", !!isConfigured);
-        state.refs.statusPill.classList.toggle("vp-project-status--draft", !isConfigured && !state.demoMode);
-        state.refs.statusPill.textContent = state.demoMode ? "Demo" : isConfigured ? "Konfiguriert" : "Entwurf";
+        state.refs.statusPill.classList.toggle("vp-project-status--configured", !!isConfigured && !state.demoMode && !state.publicViewer && !state.readOnly);
+        state.refs.statusPill.classList.toggle("vp-project-status--draft", !isConfigured && !state.demoMode && !state.publicViewer && !state.readOnly);
+        state.refs.statusPill.classList.toggle("vp-project-status--demo", !!state.demoMode);
+        state.refs.statusPill.classList.toggle("vp-project-status--readonly", !!state.publicViewer || !!state.readOnly);
+
+        state.refs.statusPill.textContent =
+          state.publicViewer || state.readOnly
+            ? "Read-only"
+            : state.demoMode
+              ? "Demo"
+              : isConfigured
+                ? "Konfiguriert"
+                : "Entwurf";
       }
 
       if (state.refs.setupStatusText) {
@@ -767,6 +1285,7 @@
   function clearValidation() {
     try {
       var refs = state.refs || {};
+
       [
         refs.name,
         refs.addressText,
@@ -789,8 +1308,8 @@
       var value = textarea.value || "";
       refs.addressCounterCurrent.textContent = String(value.length);
 
-      var maxLength = Number(textarea.getAttribute("maxlength") || refs.addressCounter.getAttribute("data-max-length") || 2000);
-      if (Number.isFinite(maxLength) && maxLength > 0) {
+      var maxLength = Number(textarea.getAttribute("maxlength") || (refs.addressCounter ? refs.addressCounter.getAttribute("data-max-length") : "") || 2000);
+      if (Number.isFinite(maxLength) && maxLength > 0 && refs.addressCounter) {
         refs.addressCounter.setAttribute("data-over-limit", value.length > maxLength ? "true" : "false");
       }
     } catch (error) {}
@@ -813,8 +1332,24 @@
   function visibilityHelpText(value) {
     var normalized = normalizeVisibility(value, "private");
 
+    if (state.publicViewer) {
+      return "Öffentliche Ansicht: Die Sichtbarkeit kann hier nicht geändert werden.";
+    }
+
+    if (state.readOnly) {
+      return "Schreibgeschützte Ansicht: Die Sichtbarkeit kann hier nicht geändert werden.";
+    }
+
+    if (state.authUnavailable) {
+      return "Auth-Service nicht erreichbar. Die Sichtbarkeit kann aktuell nicht geändert werden.";
+    }
+
+    if (state.userBlocked || state.accessBlocked) {
+      return "Der Zugriff ist gesperrt. Die Sichtbarkeit kann aktuell nicht geändert werden.";
+    }
+
     if (normalized === "public") {
-      return "Öffentlich bedeutet nicht automatisch, dass alle Arbeitsbereiche sichtbar sind. Map, 3D, 2D, LV und Versionen werden separat über Veröffentlichung freigegeben.";
+      return "Öffentlich bedeutet nicht automatisch, dass alle Arbeitsbereiche sichtbar sind. Workspaces werden separat über Veröffentlichung freigegeben.";
     }
 
     if (normalized === "unlisted") {
@@ -828,6 +1363,7 @@
     try {
       var refs = state.refs || {};
       var normalized = normalizeVisibility(value || getValue(refs.visibility), "private");
+      var readonly = !canWriteProject();
 
       setValue(refs.visibility, normalized);
 
@@ -835,8 +1371,19 @@
         refs.root.setAttribute("data-project-visibility", normalized);
       }
 
+      if (refs.visibilityCard) {
+        refs.visibilityCard.setAttribute("data-current-visibility", normalized);
+        refs.visibilityCard.setAttribute("data-project-visibility", normalized);
+        refs.visibilityCard.setAttribute("data-project-visibility-disabled", readonly ? "true" : "false");
+        refs.visibilityCard.setAttribute("data-project-visibility-disabled-reason", disabledReason());
+      }
+
       if (refs.visibilityCurrentLabel) {
         refs.visibilityCurrentLabel.textContent = visibilityLabel(normalized);
+      }
+
+      if (refs.visibilityStatus) {
+        refs.visibilityStatus.textContent = visibilityLabel(normalized);
       }
 
       if (refs.visibilityHelp) {
@@ -845,11 +1392,27 @@
 
       (refs.visibilityOptions || []).forEach(function syncOption(option) {
         try {
-          var optionValue = normalizeVisibility(option.getAttribute("data-value"), "private");
+          var optionValue = normalizeVisibility(option.getAttribute("data-value") || option.getAttribute("data-visibility"), "private");
           var selected = optionValue === normalized;
 
           option.classList.toggle(CLASS_SELECTED, selected);
+          option.classList.toggle(CLASS_DISABLED, readonly);
+          option.classList.toggle(CLASS_READONLY, readonly);
+
           option.setAttribute("aria-checked", selected ? "true" : "false");
+          option.setAttribute("data-selected", selected ? "true" : "false");
+          option.setAttribute("aria-disabled", readonly ? "true" : "false");
+          option.setAttribute("tabindex", readonly ? "-1" : "0");
+
+          if ("disabled" in option) {
+            option.disabled = readonly;
+          }
+
+          if (readonly && disabledReason()) {
+            option.setAttribute("title", disabledReason());
+          } else {
+            option.removeAttribute("title");
+          }
         } catch (error) {}
       });
     } catch (error) {}
@@ -860,13 +1423,32 @@
       var normalized = normalizeVisibility(value, "private");
       var opts = isObject(options) ? options : {};
 
+      if (!canWriteProject()) {
+        syncVisibilityCards(normalized);
+        if (!opts.silent && disabledReason()) {
+          setAlert("info", disabledReason());
+        }
+        return normalized;
+      }
+
       setValue(state.refs.visibility, normalized);
       syncVisibilityCards(normalized);
 
       if (!opts.silent) {
         dispatchLocal(EVENT_VISIBILITY_CHANGED, {
           visibility: normalized,
-          project: state.currentProject
+          value: normalized,
+          project: state.currentProject,
+          accessMode: state.accessMode,
+          source: "project_form"
+        });
+
+        emitParentEvent(EVENT_VISIBILITY_CHANGED, {
+          visibility: normalized,
+          value: normalized,
+          project: state.currentProject,
+          accessMode: state.accessMode,
+          source: "project_form"
         });
 
         markDirtyFromInput();
@@ -883,17 +1465,16 @@
       var refs = state.refs || {};
       var visibility = normalizeVisibility(getValue(refs.visibility), "private");
       var addressText = getValue(refs.addressText);
+      var name = getValue(refs.name);
 
       return {
-        name: getValue(refs.name),
-        title: getValue(refs.name),
+        name: name,
+        title: name,
         description: getValue(refs.description),
-
         address_text: addressText,
         address: {
           text: addressText
         },
-
         visibility: visibility
       };
     } catch (error) {
@@ -964,12 +1545,22 @@
       var p = isObject(project) ? project : {};
       var address = isObject(p.address) ? p.address : {};
 
-      var publicId = p.public_id || p.publicId || "";
+      var publicId = pickString(
+        [
+          p.public_id,
+          p.publicId,
+          p.project_public_id,
+          p.projectPublicId
+        ],
+        ""
+      );
+
       var isNew = toBooleanSafe(p.is_new || p.isNew, false) || !trimString(publicId, "");
 
-      setValue(refs.projectId, p.id || p.project_id || "");
+      setValue(refs.projectId, p.id || p.project_id || p.projectId || "");
       setValue(refs.projectPublicId, publicId);
       setValue(refs.projectIsNew, isNew ? "true" : "false");
+      setValue(refs.projectAccessMode, state.accessMode || "");
 
       setValue(refs.name, p.name || p.display_name || p.displayName || "");
       setValue(refs.description, p.description || "");
@@ -986,6 +1577,16 @@
         p.setup_status || p.setupStatus || "draft"
       );
 
+      if (refs.root) {
+        refs.root.setAttribute("data-project-id", p.id || p.project_id || p.projectId || "");
+        refs.root.setAttribute("data-project-public-id", publicId || (isNew ? "new" : ""));
+        refs.root.setAttribute("data-project-is-new", isNew ? "true" : "false");
+      }
+
+      if (refs.form) {
+        refs.form.setAttribute("data-project-form-can-edit", canWriteProject() ? "true" : "false");
+      }
+
       updateAddressCounter();
       setDirty(false);
     } catch (error) {}
@@ -999,7 +1600,6 @@
           p.publicId ||
           p.project_public_id ||
           p.projectPublicId ||
-          p.id ||
           "",
         ""
       );
@@ -1098,8 +1698,12 @@
     }
   }
 
-  function emitParentEvent(type, detail) {
+  function postParentMessage(type, detail) {
     try {
+      if (!window.parent || window.parent === window) {
+        return false;
+      }
+
       var payload = {
         type: type,
         kind: type,
@@ -1110,46 +1714,61 @@
         ts: Date.now()
       };
 
-      dispatchLocal(type, payload.detail);
-
       try {
-        if (window.parent && window.parent !== window) {
-          window.parent.postMessage(payload, window.location.origin);
-        }
+        window.parent.postMessage(payload, window.location.origin);
+        return true;
       } catch (postError) {
         try {
-          if (window.parent && window.parent !== window) {
-            window.parent.postMessage(payload, "*");
-          }
-        } catch (_) {}
-      }
-
-      try {
-        if (
-          window.parent &&
-          window.parent !== window &&
-          window.parent.dispatchEvent &&
-          typeof window.parent.CustomEvent === "function"
-        ) {
-          window.parent.dispatchEvent(
-            new window.parent.CustomEvent(type, {
-              detail: payload.detail
-            })
-          );
+          window.parent.postMessage(payload, "*");
+          return true;
+        } catch (fallbackError) {
+          return false;
         }
-      } catch (_) {}
+      }
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function dispatchParentEvent(type, detail) {
+    try {
+      if (
+        window.parent &&
+        window.parent !== window &&
+        window.parent.dispatchEvent &&
+        typeof window.parent.CustomEvent === "function"
+      ) {
+        window.parent.dispatchEvent(
+          new window.parent.CustomEvent(type, {
+            detail: detail || {}
+          })
+        );
+        return true;
+      }
+    } catch (error) {}
+
+    return false;
+  }
+
+  function emitParentEvent(type, detail) {
+    try {
+      var payloadDetail = detail || {};
+
+      dispatchLocal(type, payloadDetail);
+      postParentMessage(type, payloadDetail);
+      dispatchParentEvent(type, payloadDetail);
 
       try {
         if (window.parent && window.parent !== window) {
-          window.parent.dispatchEvent(new window.parent.Event("project-sidebar:refresh"));
+          window.parent.dispatchEvent(new window.parent.Event(EVENT_SIDEBAR_REFRESH));
         }
-      } catch (_) {}
+      } catch (error) {}
 
       try {
         if (window.parent && window.parent !== window) {
           window.parent.dispatchEvent(new window.parent.Event("resize"));
         }
-      } catch (_) {}
+      } catch (error) {}
 
       return true;
     } catch (error) {
@@ -1170,7 +1789,9 @@
         method: opts.method || "GET",
         headers: {
           "Content-Type": "application/json",
-          "Accept": "application/json"
+          "Accept": "application/json",
+          "X-Requested-With": "fetch",
+          "X-VECTOPLAN-Client": "project_form.js"
         },
         credentials: "same-origin",
         cache: "no-store",
@@ -1187,7 +1808,9 @@
 
         var error = new Error(message);
         error.status = response.status;
+        error.statusCode = response.status;
         error.payload = data;
+        error.code = data && data.code ? data.code : "request_failed";
         throw error;
       }
 
@@ -1203,7 +1826,7 @@
 
   function markDirtyFromInput() {
     try {
-      if (state.isSaving) {
+      if (state.isSaving || !canWriteProject()) {
         return;
       }
 
@@ -1216,6 +1839,10 @@
 
   function updateConfigPathsFromProject(project) {
     try {
+      if (state.readOnly || state.publicViewer) {
+        return;
+      }
+
       var publicId = getProjectPublicId(project);
 
       if (!publicId || publicId === "new") {
@@ -1223,11 +1850,52 @@
       }
 
       state.config.projectPublicId = publicId;
+      state.config.projectId = project && project.id ? project.id : state.config.projectId;
       state.config.paths.updateProject = "/v1/projects/" + encodeURIComponent(publicId);
       state.config.paths.getProject = "/v1/projects/" + encodeURIComponent(publicId);
-      state.config.paths.publication = "/v1/projects/" + encodeURIComponent(publicId) + "/publication";
-      state.config.paths.members = "/v1/projects/" + encodeURIComponent(publicId) + "/members";
-      state.config.paths.invitations = "/v1/projects/" + encodeURIComponent(publicId) + "/invitations";
+      state.config.paths.context = "/ui/project/" + encodeURIComponent(publicId) + "/context.json";
+      state.config.paths.workspaceAccess = "/v1/projects/" + encodeURIComponent(publicId) + "/workspace-access/project";
+
+      if (state.config.canManage) {
+        state.config.paths.publication = "/v1/projects/" + encodeURIComponent(publicId) + "/publication";
+        state.config.paths.members = "/v1/projects/" + encodeURIComponent(publicId) + "/members";
+        state.config.paths.invitations = "/v1/projects/" + encodeURIComponent(publicId) + "/invitations";
+      }
+    } catch (error) {}
+  }
+
+  function refreshGlobalConfigFromState() {
+    try {
+      var win = getWindow();
+      var config = win.VECTOPLAN_PROJECT_WORKSPACE_CONFIG || win.PROJECT_WORKSPACE_CONFIG || state.config || {};
+
+      config.project = state.currentProject || config.project || {};
+      config.currentProject = config.project;
+      config.projectPublicId = getProjectPublicId(state.currentProject) || state.config.projectPublicId;
+      config.projectVisibility = normalizeVisibility(getValue(state.refs.visibility), "private");
+      config.isNew = !!state.isNew;
+      config.canEdit = !!state.canEdit;
+      config.canManage = !!state.canManage;
+      config.canMutate = !!state.canMutate;
+      config.readOnly = !!state.readOnly;
+      config.publicViewer = !!state.publicViewer;
+      config.demoMode = !!state.demoMode;
+      config.persistent = !!state.persistent;
+      config.authUnavailable = !!state.authUnavailable;
+      config.userBlocked = !!state.userBlocked;
+      config.accessBlocked = !!state.accessBlocked;
+
+      if (!isObject(config.paths)) {
+        config.paths = {};
+      }
+
+      Object.keys(state.config.paths || {}).forEach(function copyPath(key) {
+        config.paths[key] = state.config.paths[key];
+      });
+
+      win.VECTOPLAN_PROJECT_WORKSPACE_CONFIG = config;
+      win.PROJECT_WORKSPACE_CONFIG = config;
+      state.config = config;
     } catch (error) {}
   }
 
@@ -1237,6 +1905,10 @@
 
       if (!project && payload && isObject(payload.item)) {
         project = payload.item;
+      }
+
+      if (!project && payload && isObject(payload.data) && isObject(payload.data.project)) {
+        project = payload.data.project;
       }
 
       if (!project) {
@@ -1252,9 +1924,10 @@
 
       fillFormFromProject({
         id: project.id,
-        project_id: project.project_id,
-        public_id: project.public_id || project.publicId,
-        publicId: project.publicId || project.public_id,
+        project_id: project.project_id || project.projectId,
+        projectId: project.projectId || project.project_id,
+        public_id: project.public_id || project.publicId || project.project_public_id || project.projectPublicId,
+        publicId: project.publicId || project.public_id || project.projectPublicId || project.project_public_id,
         name: project.name,
         display_name: project.display_name || project.displayName,
         displayName: project.displayName || project.display_name,
@@ -1262,7 +1935,7 @@
         address_text: project.address_text || project.addressText,
         addressText: project.addressText || project.address_text,
         address: isObject(project.address) ? project.address : {},
-        visibility: project.visibility,
+        visibility: project.visibility || getValue(state.refs.visibility),
         is_configured: project.is_configured || project.isConfigured,
         isConfigured: project.isConfigured || project.is_configured,
         setup_status: project.setup_status || project.setupStatus,
@@ -1271,12 +1944,25 @@
         isNew: false
       });
 
+      state.isNew = false;
+
+      if (state.refs.projectIsNew) {
+        setValue(state.refs.projectIsNew, "false");
+      }
+
+      if (state.refs.root) {
+        state.refs.root.setAttribute("data-project-is-new", "false");
+        state.refs.root.setAttribute("data-project-public-id", getProjectPublicId(project));
+      }
+
       setDirty(false);
       setRootState("error", false);
       setRootState("saved", true);
 
       var configured = isProjectConfigured(project);
       setConfigured(configured, configured ? "configured" : (project.setup_status || project.setupStatus || "draft"));
+
+      refreshGlobalConfigFromState();
 
       var detail = {
         project: project,
@@ -1286,7 +1972,12 @@
         isConfigured: configured,
         is_configured: configured,
         redirectUrl: payload && payload.redirect_url ? payload.redirect_url : buildProjectUrl(project),
-        savedAt: state.lastSavedAt
+        savedAt: state.lastSavedAt,
+        demoMode: state.demoMode,
+        publicViewer: state.publicViewer,
+        readOnly: state.readOnly,
+        accessMode: state.accessMode,
+        visibility: normalizeVisibility(project.visibility || getValue(state.refs.visibility), "private")
       };
 
       emitParentEvent(state.config.parentEvents.saved || EVENT_SAVED, detail);
@@ -1300,6 +1991,8 @@
       if (configured) {
         emitParentEvent(state.config.parentEvents.configured || EVENT_CONFIGURED, detail);
       }
+
+      emitParentEvent(EVENT_PUBLICATION_REFRESH, detail);
 
       return detail;
     } catch (error) {
@@ -1345,16 +2038,42 @@
     }
   }
 
+  function blockedEditMessage() {
+    return disabledReason() || "Du hast für dieses Projekt nur Leserechte.";
+  }
+
+  function guardCanMutate(actionName) {
+    try {
+      if (!canWriteProject()) {
+        var message = blockedEditMessage();
+        setAlert(state.publicViewer || state.readOnly ? "info" : "warning", message);
+
+        emitParentEvent(EVENT_READONLY_BLOCKED, {
+          action: actionName || "mutate",
+          message: message,
+          project: state.currentProject,
+          publicViewer: state.publicViewer,
+          readOnly: state.readOnly,
+          demoMode: state.demoMode,
+          persistent: state.persistent,
+          authUnavailable: state.authUnavailable,
+          userBlocked: state.userBlocked,
+          accessBlocked: state.accessBlocked,
+          accessMode: state.accessMode
+        });
+
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
   async function saveProject() {
     try {
-      if (!state.canEdit) {
-        if (state.demoMode) {
-          setAlert("warning", "Im Demo-Modus wird dieses Projekt nicht dauerhaft gespeichert.");
-        } else if (!state.persistent) {
-          setAlert("warning", "Dein Account ist noch nicht lokal verknüpft. Speichern ist deaktiviert.");
-        } else {
-          setAlert("warning", "Du hast für dieses Projekt nur Leserechte.");
-        }
+      if (!guardCanMutate("save")) {
         return false;
       }
 
@@ -1397,8 +2116,8 @@
       setAlert(
         "success",
         wasNew
-          ? "Projekt wurde erstellt. Die Projektansicht wird geöffnet…"
-          : "Projekt wurde gespeichert."
+          ? (state.demoMode ? "Demo-Projekt wurde temporär erstellt. Die Projektansicht wird geöffnet…" : "Projekt wurde erstellt. Die Projektansicht wird geöffnet…")
+          : (state.demoMode ? "Demo-Projekt wurde temporär gespeichert." : "Projekt wurde gespeichert.")
       );
 
       if (wasNew) {
@@ -1416,24 +2135,38 @@
 
       emitParentEvent(EVENT_ERROR, {
         error: normalized,
-        project: state.currentProject
+        project: state.currentProject,
+        publicViewer: state.publicViewer,
+        readOnly: state.readOnly,
+        demoMode: state.demoMode,
+        authUnavailable: state.authUnavailable,
+        userBlocked: state.userBlocked,
+        accessBlocked: state.accessBlocked,
+        accessMode: state.accessMode
       });
 
       return false;
     } finally {
       setSaving(false);
+      updateReadonlyState();
     }
   }
 
   function resetForm() {
     try {
+      if (!guardCanMutate("reset")) {
+        return false;
+      }
+
       if (state.originalPayload) {
         var p = {
           id: state.config.projectId,
           public_id: state.config.projectPublicId,
+          publicId: state.config.projectPublicId,
           name: state.originalPayload.name,
           description: state.originalPayload.description,
           address_text: state.originalPayload.address_text,
+          addressText: state.originalPayload.address_text,
           address: {
             text: state.originalPayload.address_text
           },
@@ -1450,7 +2183,10 @@
       clearValidation();
       setAlert("", "");
       setDirty(false);
-    } catch (error) {}
+      return true;
+    } catch (error) {
+      return false;
+    }
   }
 
   function onSubmit(event) {
@@ -1480,11 +2216,18 @@
       }
 
       var target = event && event.currentTarget ? event.currentTarget : null;
-      if (!target || target.disabled) {
+      if (!target) {
         return;
       }
 
-      setVisibility(target.getAttribute("data-value") || "private");
+      if (!canWriteProject() || target.disabled) {
+        if (disabledReason()) {
+          setAlert("info", disabledReason());
+        }
+        return;
+      }
+
+      setVisibility(target.getAttribute("data-value") || target.getAttribute("data-visibility") || "private");
     } catch (error) {}
   }
 
@@ -1505,7 +2248,33 @@
 
   function onVisibilityInputChange() {
     try {
+      if (!canWriteProject()) {
+        syncVisibilityCards(getValue(state.refs.visibility));
+        if (disabledReason()) {
+          setAlert("info", disabledReason());
+        }
+        return;
+      }
+
       setVisibility(getValue(state.refs.visibility));
+    } catch (error) {}
+  }
+
+  function onExternalVisibilityChanged(event) {
+    try {
+      var detail = event && event.detail ? event.detail : {};
+      var visibility = normalizeVisibility(detail.visibility || detail.value || getValue(state.refs.visibility), "private");
+
+      setValue(state.refs.visibility, visibility);
+      syncVisibilityCards(visibility);
+
+      if (detail && detail.source === "project_form") {
+        return;
+      }
+
+      if (canWriteProject()) {
+        markDirtyFromInput();
+      }
     } catch (error) {}
   }
 
@@ -1522,22 +2291,33 @@
         refs.addressText
       ].forEach(function wireInput(element) {
         addListener(element, "input", function onInput() {
+          if (!canWriteProject()) {
+            return;
+          }
           removeFieldError(element);
           markDirtyFromInput();
         });
 
         addListener(element, "change", function onChange() {
+          if (!canWriteProject()) {
+            return;
+          }
           removeFieldError(element);
           markDirtyFromInput();
         });
       });
 
       addListener(refs.visibility, "change", onVisibilityInputChange);
+      addListener(refs.visibility, "input", onVisibilityInputChange);
 
       (refs.visibilityOptions || []).forEach(function wireOption(option) {
         addListener(option, "click", onVisibilityOptionClick);
         addListener(option, "keydown", onVisibilityOptionKeydown);
       });
+
+      if (refs.root) {
+        addListener(refs.root, EVENT_VISIBILITY_CHANGED, onExternalVisibilityChanged);
+      }
 
       addListener(window, "message", function onMessage(event) {
         try {
@@ -1551,6 +2331,10 @@
 
           if (type === "vectoplan:theme:update" && data.theme) {
             applyTheme(data.theme);
+          }
+
+          if (type === EVENT_VISIBILITY_CHANGED) {
+            onExternalVisibilityChanged({ detail: data.detail || data });
           }
         } catch (error) {}
       });
@@ -1603,34 +2387,180 @@
     } catch (error) {}
   }
 
-  function updateReadonlyState() {
+  function setFormControlsReadonly(isReadonly) {
     try {
-      setRootState("readonly", !state.canEdit);
+      var refs = state.refs || {};
+      var readonly = !!isReadonly;
+      var disabled = readonly || !canWriteProject();
 
-      if (state.refs.submit) {
-        state.refs.submit.disabled = state.isSaving || !state.canEdit;
-      }
-
-      if (state.refs.reset) {
-        state.refs.reset.disabled = state.isSaving || !state.canEdit;
-      }
-
-      (state.refs.visibilityOptions || []).forEach(function syncDisabled(option) {
+      [
+        refs.name,
+        refs.description,
+        refs.addressText
+      ].forEach(function syncControl(control) {
         try {
-          option.disabled = !state.canEdit;
-          option.setAttribute("aria-disabled", !state.canEdit ? "true" : "false");
+          if (!control) {
+            return;
+          }
+
+          control.disabled = disabled;
+
+          if (readonly) {
+            control.setAttribute("aria-readonly", "true");
+            control.setAttribute("data-readonly", "true");
+          } else {
+            control.removeAttribute("aria-readonly");
+            control.removeAttribute("data-readonly");
+          }
         } catch (error) {}
       });
 
-      if (!state.canEdit) {
-        if (state.demoMode) {
-          setAlert("warning", "Demo-Modus: Dieses Formular speichert nicht dauerhaft.");
-        } else if (!state.persistent) {
-          setAlert("warning", "Dein Account ist noch nicht lokal verknüpft. Speichern ist deaktiviert.");
+      if (refs.visibility) {
+        refs.visibility.disabled = false;
+        refs.visibility.setAttribute("data-readonly", disabled ? "true" : "false");
+      }
+
+      (refs.visibilityOptions || []).forEach(function syncOption(option) {
+        try {
+          option.disabled = disabled;
+          option.setAttribute("aria-disabled", disabled ? "true" : "false");
+          option.classList.toggle(CLASS_READONLY, disabled);
+          option.classList.toggle(CLASS_DISABLED, disabled);
+          option.setAttribute("tabindex", disabled ? "-1" : "0");
+
+          if (disabled && disabledReason()) {
+            option.setAttribute("title", disabledReason());
+          } else {
+            option.removeAttribute("title");
+          }
+        } catch (error) {}
+      });
+    } catch (error) {}
+  }
+
+  function updateReadonlyState() {
+    try {
+      var readonly = state.readOnly ||
+        state.publicViewer ||
+        state.authUnavailable ||
+        state.userBlocked ||
+        state.accessBlocked ||
+        !state.canEdit ||
+        !state.canMutate;
+
+      setRootState("readonly", readonly);
+      setRootState("publicViewer", state.publicViewer);
+      setRootState("demoMode", state.demoMode);
+      setRootState("authUnavailable", state.authUnavailable);
+      setRootState("userBlocked", state.userBlocked);
+      setRootState("accessBlocked", state.accessBlocked);
+
+      setFormControlsReadonly(readonly);
+
+      if (state.refs.submit) {
+        state.refs.submit.disabled = state.isSaving || !canWriteProject();
+        state.refs.submit.setAttribute("aria-disabled", state.refs.submit.disabled ? "true" : "false");
+        if (state.refs.submit.disabled && disabledReason()) {
+          state.refs.submit.setAttribute("title", disabledReason());
         } else {
-          setAlert("warning", "Du hast für dieses Projekt nur Leserechte.");
+          state.refs.submit.removeAttribute("title");
         }
       }
+
+      if (state.refs.reset) {
+        state.refs.reset.disabled = state.isSaving || !canWriteProject();
+        state.refs.reset.setAttribute("aria-disabled", state.refs.reset.disabled ? "true" : "false");
+      }
+
+      if (readonly) {
+        if (disabledReason()) {
+          setAlert(state.publicViewer || state.readOnly ? "info" : "warning", disabledReason());
+        }
+      } else {
+        setAlert("", "");
+      }
+
+      syncVisibilityCards(getValue(state.refs.visibility) || state.config.projectVisibility);
+    } catch (error) {}
+  }
+
+  function initStateFromConfig() {
+    try {
+      state.isNew = toBooleanSafe(state.config.isNew, true);
+      state.demoMode = toBooleanSafe(state.config.demoMode, false);
+      state.publicViewer = toBooleanSafe(state.config.publicViewer || state.config.isPublicViewer, false);
+      state.authUnavailable = toBooleanSafe(state.config.authUnavailable, false);
+      state.userBlocked = toBooleanSafe(state.config.userBlocked, false);
+      state.accessBlocked = toBooleanSafe(state.config.accessBlocked, false);
+
+      state.readOnly = toBooleanSafe(
+        state.config.readOnly || state.config.readonly,
+        state.publicViewer || state.authUnavailable || state.userBlocked || state.accessBlocked
+      );
+
+      state.accessMode = normalizeAccessMode(
+        state.config.accessMode,
+        state.authUnavailable
+          ? "auth_unavailable"
+          : state.userBlocked || state.accessBlocked
+            ? "blocked"
+            : state.publicViewer
+              ? "public"
+              : state.demoMode
+                ? "demo"
+                : "anonymous"
+      );
+
+      if (state.publicViewer) {
+        state.demoMode = false;
+        state.readOnly = true;
+        state.accessMode = "public";
+      }
+
+      if (state.authUnavailable) {
+        state.demoMode = false;
+        state.readOnly = true;
+        state.accessMode = "auth_unavailable";
+      }
+
+      if (state.userBlocked || state.accessBlocked) {
+        state.demoMode = false;
+        state.readOnly = true;
+        state.accessMode = "blocked";
+      }
+
+      state.authenticated = toBooleanSafe(
+        state.config.authenticated,
+        !state.demoMode && !state.publicViewer && !state.authUnavailable && !state.userBlocked && !state.accessBlocked
+      );
+
+      state.persistent = toBooleanSafe(
+        state.config.persistent,
+        state.authenticated && !state.demoMode && !state.publicViewer && !state.authUnavailable && !state.userBlocked && !state.accessBlocked
+      );
+
+      if (state.demoMode || state.publicViewer || state.authUnavailable || state.userBlocked || state.accessBlocked) {
+        state.persistent = false;
+      }
+
+      state.canEdit = toBooleanSafe(state.config.canEdit, false) &&
+        !state.readOnly &&
+        !state.publicViewer &&
+        !state.authUnavailable &&
+        !state.userBlocked &&
+        !state.accessBlocked &&
+        (state.persistent || state.demoMode);
+
+      state.canManage = toBooleanSafe(state.config.canManage, false) &&
+        !state.publicViewer &&
+        !state.readOnly &&
+        !state.demoMode &&
+        !state.authUnavailable &&
+        !state.userBlocked &&
+        !state.accessBlocked;
+
+      state.canMutate = toBooleanSafe(state.config.canMutate, state.canEdit) && state.canEdit;
+      state.currentProject = safeClone(state.config.project || {});
     } catch (error) {}
   }
 
@@ -1642,13 +2572,8 @@
     try {
       state.config = getConfig();
       state.refs = queryRefs();
-      state.isNew = toBooleanSafe(state.config.isNew, true);
-      state.canEdit = toBooleanSafe(state.config.canEdit, true);
-      state.canManage = toBooleanSafe(state.config.canManage, false);
-      state.demoMode = toBooleanSafe(state.config.demoMode, false);
-      state.authenticated = toBooleanSafe(state.config.authenticated, true);
-      state.persistent = toBooleanSafe(state.config.persistent, true);
-      state.currentProject = safeClone(state.config.project || {});
+
+      initStateFromConfig();
 
       if (!state.refs.root || !state.refs.form) {
         return state;
@@ -1656,12 +2581,11 @@
 
       syncTheme();
 
-      fillFormFromProject({
-        ...(state.currentProject || {}),
+      fillFormFromProject(Object.assign({}, state.currentProject || {}, {
         visibility: state.config.projectVisibility || (state.currentProject && state.currentProject.visibility) || "private",
         is_new: state.isNew,
         isNew: state.isNew
-      });
+      }));
 
       updateReadonlyState();
       wireEvents();
@@ -1670,12 +2594,22 @@
 
       state.initialized = true;
 
-      dispatchLocal("vectoplan:project-form:ready", {
+      dispatchLocal(EVENT_READY, {
         project: state.currentProject,
         isNew: state.isNew,
         canEdit: state.canEdit,
+        canManage: state.canManage,
+        canMutate: state.canMutate,
         demoMode: state.demoMode,
-        persistent: state.persistent
+        publicViewer: state.publicViewer,
+        readOnly: state.readOnly,
+        persistent: state.persistent,
+        authenticated: state.authenticated,
+        authUnavailable: state.authUnavailable,
+        userBlocked: state.userBlocked,
+        accessBlocked: state.accessBlocked,
+        accessMode: state.accessMode,
+        canWrite: canWriteProject()
       });
 
       try {
@@ -1692,6 +2626,7 @@
 
   function destroy() {
     try {
+      removeAllListeners();
       state.destroyed = true;
       state.initialized = false;
     } catch (error) {}
@@ -1708,13 +2643,25 @@
         isNew: state.isNew,
         canEdit: state.canEdit,
         canManage: state.canManage,
+        canMutate: state.canMutate,
+        canWrite: canWriteProject(),
+        disabledReason: disabledReason(),
         demoMode: state.demoMode,
+        publicViewer: state.publicViewer,
+        readOnly: state.readOnly,
         persistent: state.persistent,
+        authenticated: state.authenticated,
+        authUnavailable: state.authUnavailable,
+        userBlocked: state.userBlocked,
+        accessBlocked: state.accessBlocked,
+        accessMode: state.accessMode,
         isDirty: state.isDirty,
         isSaving: state.isSaving,
+        isLoading: state.isLoading,
         lastSavedAt: state.lastSavedAt,
         lastError: state.lastError,
-        currentProject: state.currentProject,
+        currentProject: safeClone(state.currentProject),
+        config: safeClone(state.config),
         payload: collectPayload()
       };
     } catch (error) {
@@ -1738,6 +2685,8 @@
     setAlert: setAlert,
     applyTheme: applyTheme,
     setVisibility: setVisibility,
+    canWrite: canWriteProject,
+    disabledReason: disabledReason,
     _private: {
       getConfig: getConfig,
       queryRefs: queryRefs,
@@ -1746,7 +2695,11 @@
       emitParentEvent: emitParentEvent,
       requestJson: requestJson,
       normalizeError: normalizeError,
-      normalizeVisibility: normalizeVisibility
+      normalizeVisibility: normalizeVisibility,
+      guardCanMutate: guardCanMutate,
+      blockedEditMessage: blockedEditMessage,
+      canWriteProject: canWriteProject,
+      disabledReason: disabledReason
     }
   };
 

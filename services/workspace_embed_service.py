@@ -1,33 +1,45 @@
-# services/vectoplan-app/services/workspace_embed_service.py
+# services/vectoplan-app/services/project_workspace_context.py
 from __future__ import annotations
 
 """
-VECTOPLAN workspace embed service.
+VECTOPLAN Project Workspace Context Service.
 
 Zweck:
-- Baut browserfähige Embed-/Redirect-URLs für externe Workspace-Services.
-- Zentrale Gateway-Logik für routes.viewer.
-- Der Browser bekommt immer PUBLIC_URL-Ziele.
-- INTERNAL_URL-Ziele bleiben ausschließlich für Server-zu-Server-Kommunikation.
-- Wichtigste externe Workspaces:
-    - editor3d → vectoplan-editor
-    - map      → vectoplan-openlayer
-- Später erweiterbar für 2D, LV, Versionen.
+- Baut den vollständigen, normalisierten Template-Context für:
+    templates/viewer/project.html
+- Hält komplexe Access-/Permission-/Publication-/Auth-/Demo-/Read-only-Logik
+  aus Jinja-Templates heraus.
+- Verhindert, dass fehlende optionale Keys, alte Payload-Formate oder
+  Mapping/Object-Mischungen einen Template-Renderfehler auslösen.
+- Liefert konsequent snake_case und camelCase Alias-Felder, damit bestehendes
+  Frontend und alte Template-Fragmente stabil bleiben.
+- Ist bewusst defensiv: Fehler im Context-Aufbau führen zu einem kontrollierten
+  Fallback-Context, nicht zu einem 500 durch das Template.
 
 Sicherheitsregeln:
-- Keine Tokens, Secrets, Auth-Header, User-E-Mails oder INTERNAL_URLs an den Browser geben.
-- App-interne Rechteprüfung bleibt in routes.viewer / project_permissions.
-- Diese Datei baut nur Ziel-URLs nach erfolgreicher Zugriffskontrolle.
-- Admin/System/Settings/Team werden nicht als externe Public-Embeds gebaut.
-- Blocked/Banned/Auth-unavailable erzeugt keine externe Embed-URL.
-- Demo-Projekte dürfen externe Workspaces öffnen, bleiben aber temporär und nicht persistent.
+- Diese Datei entscheidet nicht final über Berechtigungen.
+- Backend-Guards in routes/viewer.py, project_permissions.py und
+  project_publication_service.py bleiben die Wahrheit.
+- Public Viewer werden immer read-only normalisiert.
+- Demo-Kontext darf keine persistenten Management-Aktionen aktivieren.
+- Auth-unavailable / blocked / access-blocked deaktivieren Mutationen.
+- Team, Invitation, Publication und Admin/System-Bereiche werden nur bei
+  berechtigtem, persistentem Nicht-Public-/Nicht-Demo-Kontext freigegeben.
 
-Wichtige Editor-Regel:
-- app_project_public_id / project_public_id bleiben App-Projekt-IDs.
-- project_id ist für den Editor aus Kompatibilitätsgründen die chunk_project_id.
-- world_id ist für den Editor aus Kompatibilitätsgründen die chunk_world_id.
-- Wenn chunk_project_id und chunk_world_id vorhanden sind, wird chunk_ready=1 und
-  chunk_status=ready gesetzt, außer ein Fehler-/Disabled-Status ist explizit bekannt.
+Erwartete Verwendung in routes/viewer.py:
+
+    from services.project_workspace_context import build_project_workspace_context
+
+    context = build_project_workspace_context(
+        project=project,
+        current_user=current_user_context,
+        auth_context=auth_context,
+        workspace_access=workspace_access,
+        publication=publication,
+        is_new=is_new,
+        request_obj=request,
+    )
+    return render_template("viewer/project.html", **context)
 """
 
 import json
@@ -36,7 +48,7 @@ import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Dict, Mapping, Optional
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+
 
 try:
     from flask import current_app, request
@@ -50,173 +62,127 @@ except Exception:  # pragma: no cover
 # ─────────────────────────────────────────────────────────────
 
 WORKSPACE_PROJECT = "project"
-WORKSPACE_MAP = "map"
-WORKSPACE_EDITOR3D = "editor3d"
-WORKSPACE_CAD2D = "cad2d"
-WORKSPACE_LV = "lv"
-WORKSPACE_VERSIONS = "versions"
-WORKSPACE_ADMIN = "admin"
 
-EXTERNAL_WORKSPACES = {
-    WORKSPACE_EDITOR3D,
-    WORKSPACE_MAP,
-}
-
-FORBIDDEN_EXTERNAL_WORKSPACES = {
-    WORKSPACE_ADMIN,
-    "settings",
-    "team",
-    "permissions",
-    "system",
-}
-
-DEFAULT_EDITOR_PUBLIC_URL = "http://localhost:5100"
-DEFAULT_EDITOR_ROUTE = "/editor"
-
-DEFAULT_OPENLAYER_PUBLIC_URL = "http://localhost:5190"
-DEFAULT_OPENLAYER_ROUTE = "/map"
-
-DEFAULT_APP_PUBLIC_URL = "http://localhost:5103"
-
-DEFAULT_CONTEXT_PATH_TEMPLATE = "/ui/project/{project_public_id}/context.json"
-DEFAULT_RETURN_PATH_TEMPLATE = "/project={project_public_id}"
-DEFAULT_CHUNK_BROWSER_BASE_URL = "/editor/api/chunk"
-DEFAULT_CHUNK_WORLD_ID = "world_spawn"
-
-DEFAULT_CACHE_MAX_AGE_SECONDS = 15.0
+DEFAULT_CACHE_TTL_SECONDS = 2.0
 DEFAULT_CACHE_MAX_ITEMS = 512
 
-MAX_QUERY_VALUE_LENGTH = 4096
-MAX_ROUTE_HINTS_QUERY_LENGTH = 12000
+DEFAULT_VISIBILITY = "private"
+DEFAULT_SETUP_STATUS = "draft"
 
-DOCKER_INTERNAL_HOSTS = {
-    "chunk",
-    "editor",
-    "openlayer",
-    "server-chunk",
-    "server-editor",
-    "server-openlayer",
-    "vectoplan-chunk",
-    "vectoplan-editor",
-    "vectoplan-openlayer",
-    "vectoplan_chunk",
-    "vectoplan_editor",
-    "vectoplan_openlayer",
+PROJECT_CONTEXT_PATH_NEW = "/ui/project/new/context.json"
+PROJECT_CONTEXT_PATH_TEMPLATE = "/ui/project/{project_public_id}/context.json"
+PROJECT_RETURN_PATH_TEMPLATE = "/project={project_public_id}"
+
+PUBLICATION_WORKSPACES = (
+    "project",
+    "map",
+    "editor3d",
+    "cad2d",
+    "lv",
+    "versions",
+)
+
+NEVER_PUBLIC_WORKSPACES = (
+    "admin",
+    "team",
+    "settings",
+    "permissions",
+    "system",
+    "system_refs",
+)
+
+TRUTHY_VALUES = {
+    True,
+    1,
+    "1",
+    "true",
+    "True",
+    "TRUE",
+    "yes",
+    "Yes",
+    "YES",
+    "y",
+    "Y",
+    "on",
+    "On",
+    "ON",
+    "ja",
+    "Ja",
+    "JA",
+    "enabled",
+    "Enabled",
+    "ENABLED",
+    "ready",
+    "Ready",
+    "READY",
+    "ok",
+    "OK",
 }
 
-SECRET_QUERY_KEYS = {
-    "token",
-    "access_token",
-    "refresh_token",
-    "jwt",
-    "secret",
-    "password",
-    "api_key",
-    "apikey",
-    "key",
-    "authorization",
-    "auth",
-    "cookie",
-    "session",
-    "session_id",
-    "sessionid",
-    "sid",
-    "csrf",
-    "csrf_token",
-    "auth_user_id",
-    "authuserid",
-    "authUserId",
-    "user_id",
-    "userId",
-    "email",
-    "auth_email",
-    "authEmail",
-    "account_id",
-    "accountId",
-    "internal_url",
-    "internalUrl",
-    "internal_base_url",
-    "internalBaseUrl",
-    "redirect",
-    "redirect_url",
-    "return",
-    "next",
-    "url",
+FALSEY_VALUES = {
+    False,
+    0,
+    "0",
+    "false",
+    "False",
+    "FALSE",
+    "no",
+    "No",
+    "NO",
+    "n",
+    "N",
+    "off",
+    "Off",
+    "OFF",
+    "nein",
+    "Nein",
+    "NEIN",
+    "disabled",
+    "Disabled",
+    "DISABLED",
+    "none",
+    "None",
+    "NONE",
+    "null",
+    "Null",
+    "NULL",
+    "",
+    None,
 }
 
-ALLOWED_CHUNK_STATUS_READY = {"ready", "active", "linked", "created", "provisioned", "ok", "available"}
-ALLOWED_CHUNK_STATUS_PENDING = {"pending", "waiting", "queued", "initializing", "unknown"}
-ALLOWED_CHUNK_STATUS_ERROR = {"error", "failed", "failure", "unavailable"}
-ALLOWED_CHUNK_STATUS_DISABLED = {"disabled", "off"}
+ROLE_OWNER = "owner"
+ROLE_ADMIN = "admin"
+ROLE_EDITOR = "editor"
+ROLE_VIEWER = "viewer"
+
+ROLE_CAN_MANAGE = {ROLE_OWNER, ROLE_ADMIN}
+ROLE_CAN_EDIT = {ROLE_OWNER, ROLE_ADMIN, ROLE_EDITOR}
+ROLE_CAN_VIEW = {ROLE_OWNER, ROLE_ADMIN, ROLE_EDITOR, ROLE_VIEWER}
 
 _MODULE_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 # ─────────────────────────────────────────────────────────────
-# Data classes
+# Result object
 # ─────────────────────────────────────────────────────────────
 
-@dataclass(frozen=True)
-class WorkspaceTargetConfig:
-    workspace: str
-    service_name: str
-    enabled: bool
-    public_base_url: str
-    route: str
-    public_route_url: str
-    source: str = "config"
-    warnings: tuple[str, ...] = field(default_factory=tuple)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "workspace": self.workspace,
-            "service_name": self.service_name,
-            "enabled": self.enabled,
-            "public_base_url": self.public_base_url,
-            "route": self.route,
-            "public_route_url": self.public_route_url,
-            "source": self.source,
-            "warnings": list(self.warnings),
-            "uses_public_url": True,
-        }
-
-
 @dataclass
-class WorkspaceEmbedResult:
+class ProjectWorkspaceContextResult:
     ok: bool
-    workspace: str
-    url: str = ""
-    target_url: str = ""
-    public_base_url: str = ""
-    route: str = ""
+    context: Dict[str, Any] = field(default_factory=dict)
     code: str = "ok"
     message: str = ""
-    project_public_id: str = ""
-    app_project_public_id: str = ""
-    params: Dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
-    error: Optional[str] = None
-    uses_public_url: bool = True
-
-    def __bool__(self) -> bool:
-        return bool(self.ok and self.url)
+    errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "ok": self.ok,
-            "workspace": self.workspace,
-            "url": self.url,
-            "target_url": self.target_url,
-            "public_base_url": self.public_base_url,
-            "route": self.route,
+            "ok": bool(self.ok),
             "code": self.code,
             "message": self.message,
-            "project_public_id": self.project_public_id,
-            "app_project_public_id": self.app_project_public_id,
-            "params": dict(self.params or {}),
             "warnings": list(self.warnings or []),
-            "error": self.error,
-            "uses_public_url": self.uses_public_url,
+            "errors": list(self.errors or []),
+            "context": dict(self.context or {}),
         }
 
 
@@ -224,24 +190,41 @@ class WorkspaceEmbedResult:
 # Generic safe helpers
 # ─────────────────────────────────────────────────────────────
 
+def _now() -> float:
+    try:
+        return time.monotonic()
+    except Exception:
+        return time.time()
+
+
 def _safe_str(value: Any, default: str = "", max_len: int = 4000) -> str:
     try:
-        text = str(value if value is not None else default).strip()
+        if value is None:
+            text = str(default if default is not None else "")
+        else:
+            text = str(value)
+
+        text = text.strip()
 
         if not text:
-            text = default
+            text = str(default if default is not None else "").strip()
 
-        if max_len > 0 and len(text) > max_len:
+        if max_len and max_len > 0 and len(text) > max_len:
             return text[:max_len]
 
         return text
-
     except Exception:
         return default
 
 
 def _safe_bool(value: Any, default: bool = False) -> bool:
     try:
+        if value in TRUTHY_VALUES:
+            return True
+
+        if value in FALSEY_VALUES:
+            return False
+
         if isinstance(value, bool):
             return value
 
@@ -251,22 +234,55 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
         if isinstance(value, float):
             return bool(value)
 
-        text = _safe_str(value, "", 80).lower()
+        text = _safe_str(value, "", 120).strip()
 
-        if text in {"1", "true", "yes", "y", "on", "ja", "enabled", "ready"}:
+        if text in TRUTHY_VALUES:
             return True
 
-        if text in {"0", "false", "no", "n", "off", "nein", "disabled", "pending", "error"}:
+        if text in FALSEY_VALUES:
             return False
 
-        return default
+        lowered = text.lower()
 
+        if lowered in {"1", "true", "yes", "y", "on", "ja", "enabled", "ready", "ok"}:
+            return True
+
+        if lowered in {"0", "false", "no", "n", "off", "nein", "disabled", "none", "null", "error"}:
+            return False
+
+        return bool(default)
+    except Exception:
+        return bool(default)
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+
+        if isinstance(value, bool):
+            return 1 if value else 0
+
+        if isinstance(value, int):
+            return value
+
+        if isinstance(value, float):
+            return int(value)
+
+        text = _safe_str(value, "", 120)
+        if not text:
+            return default
+
+        return int(float(text))
     except Exception:
         return default
 
 
 def _safe_dict(value: Any) -> Dict[str, Any]:
     try:
+        if value is None:
+            return {}
+
         if isinstance(value, dict):
             return dict(value)
 
@@ -277,38 +293,127 @@ def _safe_dict(value: Any) -> Dict[str, Any]:
             try:
                 data = value.to_dict(include_private=True, include_refs=True)
             except TypeError:
-                data = value.to_dict()
+                try:
+                    data = value.to_dict(include_private=True)
+                except TypeError:
+                    try:
+                        data = value.to_dict()
+                    except TypeError:
+                        data = {}
             return dict(data) if isinstance(data, Mapping) else {}
 
         return {}
-
     except Exception:
         return {}
 
 
 def _safe_list(value: Any) -> list[Any]:
     try:
+        if value is None:
+            return []
+
         if isinstance(value, list):
             return list(value)
+
         if isinstance(value, tuple):
             return list(value)
+
+        if isinstance(value, set):
+            return list(value)
+
         return []
     except Exception:
         return []
 
 
-def _safe_quote(value: Any) -> str:
+def _safe_jsonable(value: Any, fallback: Any = None) -> Any:
     try:
-        return quote(_safe_str(value, "", 1000), safe="")
+        json.dumps(value, default=str)
+        return value
+    except Exception:
+        try:
+            if isinstance(value, Mapping):
+                return {str(k): _safe_jsonable(v, None) for k, v in value.items()}
+            if isinstance(value, (list, tuple, set)):
+                return [_safe_jsonable(v, None) for v in value]
+            return str(value)
+        except Exception:
+            return fallback
+
+
+def _json_fingerprint(value: Any, max_len: int = 3000) -> str:
+    try:
+        text = json.dumps(_safe_jsonable(value, {}), sort_keys=True, ensure_ascii=False, default=str)
+        if len(text) > max_len:
+            return text[:max_len]
+        return text
     except Exception:
         return ""
 
 
-def _now() -> float:
+def _first_non_empty(*values: Any, default: Any = "") -> Any:
     try:
-        return time.monotonic()
+        for value in values:
+            if value is None:
+                continue
+
+            if isinstance(value, bool):
+                return value
+
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return value
+
+            if isinstance(value, Mapping) and value:
+                return value
+
+            if isinstance(value, (list, tuple, set)) and value:
+                return value
+
+            text = _safe_str(value, "", 4000)
+            if text:
+                return value
+
+        return default
     except Exception:
-        return time.time()
+        return default
+
+
+def _mapping_value(mapping: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
+    try:
+        if not isinstance(mapping, Mapping):
+            return default
+
+        for key in keys:
+            if key in mapping:
+                value = mapping.get(key)
+                if value is not None:
+                    return value
+
+        return default
+    except Exception:
+        return default
+
+
+def _object_value(obj: Any, *keys: str, default: Any = None) -> Any:
+    try:
+        if obj is None:
+            return default
+
+        if isinstance(obj, Mapping):
+            return _mapping_value(obj, *keys, default=default)
+
+        for key in keys:
+            try:
+                if hasattr(obj, key):
+                    value = getattr(obj, key)
+                    if value is not None:
+                        return value
+            except Exception:
+                continue
+
+        return default
+    except Exception:
+        return default
 
 
 def _log_warning(message: str, *args: Any) -> None:
@@ -319,7 +424,7 @@ def _log_warning(message: str, *args: Any) -> None:
         pass
 
 
-def _log_exception(message: str, exc: Optional[Exception] = None) -> None:
+def _log_exception(message: str, exc: Optional[BaseException] = None) -> None:
     try:
         if current_app is not None:
             if exc is None:
@@ -330,197 +435,8 @@ def _log_exception(message: str, exc: Optional[Exception] = None) -> None:
         pass
 
 
-def _first_non_empty(*values: Any) -> str:
-    try:
-        for value in values:
-            if isinstance(value, bool):
-                return "1" if value else "0"
-
-            text = _safe_str(value, "", 4000)
-            if text:
-                return text
-    except Exception:
-        pass
-
-    return ""
-
-
-def _normalize_status(value: Any, default: str = "pending") -> str:
-    try:
-        text = _safe_str(value, "", 80).lower().replace("-", "_").replace(" ", "_")
-
-        if not text:
-            return default
-
-        if text in ALLOWED_CHUNK_STATUS_READY:
-            return "ready"
-
-        if text in ALLOWED_CHUNK_STATUS_PENDING:
-            return "pending"
-
-        if text in ALLOWED_CHUNK_STATUS_ERROR:
-            return "error"
-
-        if text in ALLOWED_CHUNK_STATUS_DISABLED:
-            return "disabled"
-
-        return default
-    except Exception:
-        return default
-
-
-def _json_dumps_safe(value: Any, max_len: int = MAX_ROUTE_HINTS_QUERY_LENGTH) -> str:
-    try:
-        text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-        if len(text) > max_len:
-            return ""
-        return text
-    except Exception:
-        return ""
-
-
 # ─────────────────────────────────────────────────────────────
-# Cached normalization helpers
-# ─────────────────────────────────────────────────────────────
-
-@lru_cache(maxsize=256)
-def normalize_workspace(value: Any, default: str = WORKSPACE_PROJECT) -> str:
-    try:
-        text = _safe_str(value, default, 120).lower().replace("-", "_").replace(" ", "_")
-
-        aliases = {
-            "": WORKSPACE_PROJECT,
-            "project": WORKSPACE_PROJECT,
-            "projekt": WORKSPACE_PROJECT,
-            "info": WORKSPACE_PROJECT,
-            "overview": WORKSPACE_PROJECT,
-            "details": WORKSPACE_PROJECT,
-            "map": WORKSPACE_MAP,
-            "karte": WORKSPACE_MAP,
-            "openlayer": WORKSPACE_MAP,
-            "openlayers": WORKSPACE_MAP,
-            "3d": WORKSPACE_EDITOR3D,
-            "editor": WORKSPACE_EDITOR3D,
-            "editor3d": WORKSPACE_EDITOR3D,
-            "editor_3d": WORKSPACE_EDITOR3D,
-            "viewer": WORKSPACE_EDITOR3D,
-            "viewer3d": WORKSPACE_EDITOR3D,
-            "model": WORKSPACE_EDITOR3D,
-            "2d": WORKSPACE_CAD2D,
-            "cad": WORKSPACE_CAD2D,
-            "cad2d": WORKSPACE_CAD2D,
-            "cad_2d": WORKSPACE_CAD2D,
-            "plan": WORKSPACE_CAD2D,
-            "plan2d": WORKSPACE_CAD2D,
-            "lv": WORKSPACE_LV,
-            "boq": WORKSPACE_LV,
-            "leistungsverzeichnis": WORKSPACE_LV,
-            "versions": WORKSPACE_VERSIONS,
-            "version": WORKSPACE_VERSIONS,
-            "versionen": WORKSPACE_VERSIONS,
-            "history": WORKSPACE_VERSIONS,
-            "admin": WORKSPACE_ADMIN,
-            "settings": WORKSPACE_ADMIN,
-            "team": WORKSPACE_ADMIN,
-            "permissions": WORKSPACE_ADMIN,
-            "rechte": WORKSPACE_ADMIN,
-            "system": WORKSPACE_ADMIN,
-        }
-
-        return aliases.get(text, default)
-
-    except Exception:
-        return default
-
-
-@lru_cache(maxsize=512)
-def _normalize_base_url_cached(value: str, default: str = "") -> str:
-    try:
-        text = _safe_str(value, default, 4000).rstrip("/")
-        if not text:
-            text = default.rstrip("/")
-
-        parsed = urlsplit(text)
-
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            return default.rstrip("/")
-
-        host = _safe_str(parsed.hostname, "", 255).lower()
-        if host in DOCKER_INTERNAL_HOSTS:
-            return default.rstrip("/")
-
-        return text
-
-    except Exception:
-        return default.rstrip("/")
-
-
-@lru_cache(maxsize=512)
-def _normalize_route_cached(value: str, default: str = "/") -> str:
-    try:
-        text = _safe_str(value, default, 2000)
-
-        if not text:
-            text = default
-
-        if text.startswith("http://") or text.startswith("https://"):
-            return text
-
-        if not text.startswith("/"):
-            text = "/" + text
-
-        while "//" in text:
-            text = text.replace("//", "/")
-
-        return text
-
-    except Exception:
-        return default if default.startswith("/") else "/" + default
-
-
-@lru_cache(maxsize=1024)
-def _join_url_cached(base_url: str, route: str) -> str:
-    try:
-        route_text = _normalize_route_cached(route, "/")
-
-        if route_text.startswith("http://") or route_text.startswith("https://"):
-            return _normalize_base_url_cached(route_text, "")
-
-        base = _normalize_base_url_cached(base_url, "")
-
-        if not base:
-            return route_text
-
-        return base.rstrip("/") + "/" + route_text.lstrip("/")
-
-    except Exception:
-        return ""
-
-
-@lru_cache(maxsize=512)
-def _is_absolute_url_cached(value: str) -> bool:
-    try:
-        parts = urlsplit(_safe_str(value, "", 4000))
-        return parts.scheme in {"http", "https"} and bool(parts.netloc)
-    except Exception:
-        return False
-
-
-@lru_cache(maxsize=512)
-def _is_public_browser_url_cached(value: str) -> bool:
-    try:
-        parts = urlsplit(_safe_str(value, "", 4000))
-        if parts.scheme not in {"http", "https"} or not parts.netloc:
-            return False
-
-        host = _safe_str(parts.hostname, "", 255).lower()
-        return bool(host and host not in DOCKER_INTERNAL_HOSTS)
-    except Exception:
-        return False
-
-
-# ─────────────────────────────────────────────────────────────
-# Config/cache helpers
+# Config and cache helpers
 # ─────────────────────────────────────────────────────────────
 
 def _config_get(key: str, default: Any = None) -> Any:
@@ -542,13 +458,6 @@ def _config_get(key: str, default: Any = None) -> Any:
     return default
 
 
-def _config_str(key: str, default: str = "", max_len: int = 4000) -> str:
-    try:
-        return _safe_str(_config_get(key, default), default, max_len)
-    except Exception:
-        return default
-
-
 def _config_bool(key: str, default: bool = False) -> bool:
     try:
         return _safe_bool(_config_get(key, default), default)
@@ -556,9 +465,9 @@ def _config_bool(key: str, default: bool = False) -> bool:
         return default
 
 
-def _config_float(key: str, default: float, minimum: float | None = None, maximum: float | None = None) -> float:
+def _config_float(key: str, default: float, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
     try:
-        value = float(_safe_str(_config_get(key, default), str(default), 80))
+        value = float(_safe_str(_config_get(key, default), str(default), 100))
 
         if minimum is not None:
             value = max(minimum, value)
@@ -571,51 +480,65 @@ def _config_float(key: str, default: float, minimum: float | None = None, maximu
         return default
 
 
-def _cache_max_age_seconds() -> float:
+def _cache_enabled() -> bool:
+    try:
+        return _config_bool("VECTOPLAN_PROJECT_WORKSPACE_CONTEXT_CACHE_ENABLED", False)
+    except Exception:
+        return False
+
+
+def _cache_ttl_seconds() -> float:
     return _config_float(
-        "VECTOPLAN_WORKSPACE_EMBED_CACHE_TTL_SECONDS",
-        DEFAULT_CACHE_MAX_AGE_SECONDS,
+        "VECTOPLAN_PROJECT_WORKSPACE_CONTEXT_CACHE_TTL_SECONDS",
+        DEFAULT_CACHE_TTL_SECONDS,
         minimum=0.0,
-        maximum=3600.0,
+        maximum=60.0,
     )
 
 
 def _cache_max_items() -> int:
     try:
-        value = int(float(_safe_str(_config_get("VECTOPLAN_WORKSPACE_EMBED_CACHE_MAX_ITEMS", DEFAULT_CACHE_MAX_ITEMS), str(DEFAULT_CACHE_MAX_ITEMS), 80)))
-        return max(16, min(10000, value))
+        value = _safe_int(
+            _config_get("VECTOPLAN_PROJECT_WORKSPACE_CONTEXT_CACHE_MAX_ITEMS", DEFAULT_CACHE_MAX_ITEMS),
+            DEFAULT_CACHE_MAX_ITEMS,
+        )
+        return max(32, min(10000, value))
     except Exception:
         return DEFAULT_CACHE_MAX_ITEMS
 
 
-def _cache_get(name: str) -> Optional[Any]:
+def _cache_get(key: str) -> Optional[Any]:
     try:
-        ttl = _cache_max_age_seconds()
+        if not key:
+            return None
+
+        ttl = _cache_ttl_seconds()
         if ttl <= 0:
             return None
 
-        item = _MODULE_CACHE.get(name)
-
+        item = _MODULE_CACHE.get(key)
         if not item:
             return None
 
-        ts = float(item.get("ts") or 0)
+        ts = float(item.get("ts") or 0.0)
         if _now() - ts > ttl:
-            _MODULE_CACHE.pop(name, None)
+            _MODULE_CACHE.pop(key, None)
             return None
 
         return item.get("value")
-
     except Exception:
         return None
 
 
-def _cache_set(name: str, value: Any) -> Any:
+def _cache_set(key: str, value: Any) -> Any:
     try:
+        if not key:
+            return value
+
         if len(_MODULE_CACHE) > _cache_max_items():
             _cache_prune()
 
-        _MODULE_CACHE[name] = {
+        _MODULE_CACHE[key] = {
             "ts": _now(),
             "value": value,
         }
@@ -627,29 +550,34 @@ def _cache_set(name: str, value: Any) -> Any:
 
 def _cache_prune() -> None:
     try:
-        items = sorted(_MODULE_CACHE.items(), key=lambda item: float(item[1].get("ts") or 0))
         max_items = _cache_max_items()
-        excess = max(0, len(items) - max_items + max(1, max_items // 4))
+        if len(_MODULE_CACHE) <= max_items:
+            return
 
-        for key, _ in items[:excess]:
+        items = sorted(_MODULE_CACHE.items(), key=lambda item: float(item[1].get("ts") or 0))
+        remove_count = max(1, len(items) - max_items + max(1, max_items // 4))
+
+        for key, _ in items[:remove_count]:
             _MODULE_CACHE.pop(key, None)
     except Exception:
-        _MODULE_CACHE.clear()
+        try:
+            _MODULE_CACHE.clear()
+        except Exception:
+            pass
 
 
-def clear_workspace_embed_cache() -> None:
+def clear_project_workspace_context_cache() -> None:
     try:
         _MODULE_CACHE.clear()
     except Exception:
         pass
 
     for cached in (
+        normalize_visibility,
+        normalize_role,
+        normalize_access_mode,
+        normalize_setup_status,
         normalize_workspace,
-        _normalize_base_url_cached,
-        _normalize_route_cached,
-        _join_url_cached,
-        _is_absolute_url_cached,
-        _is_public_browser_url_cached,
     ):
         try:
             cached.cache_clear()
@@ -658,1417 +586,2044 @@ def clear_workspace_embed_cache() -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# Project/Auth extraction helpers
+# Normalizers
 # ─────────────────────────────────────────────────────────────
 
-def _mapping_value(mapping: Mapping[str, Any], *keys: str, default: Any = "") -> Any:
+@lru_cache(maxsize=512)
+def normalize_visibility(value: Any, default: str = DEFAULT_VISIBILITY) -> str:
     try:
-        for key in keys:
-            if key in mapping and mapping.get(key) is not None:
-                return mapping.get(key)
+        text = _safe_str(value, default, 120).lower().replace("-", "_").replace(" ", "_")
 
-        return default
+        aliases = {
+            "": default,
+            "private": "private",
+            "privat": "private",
+            "closed": "private",
+            "internal": "private",
+            "unlisted": "unlisted",
+            "not_listed": "unlisted",
+            "notlisted": "unlisted",
+            "nicht_gelistet": "unlisted",
+            "link": "unlisted",
+            "link_shared": "unlisted",
+            "public": "public",
+            "öffentlich": "public",
+            "oeffentlich": "public",
+            "open": "public",
+        }
 
+        return aliases.get(text, default)
     except Exception:
         return default
 
 
-def _object_value(obj: Any, *keys: str, default: Any = "") -> Any:
+@lru_cache(maxsize=512)
+def normalize_role(value: Any, default: str = "") -> str:
     try:
-        if obj is None:
-            return default
+        text = _safe_str(value, default, 120).lower().replace("-", "_").replace(" ", "_")
 
-        if isinstance(obj, Mapping):
-            return _mapping_value(obj, *keys, default=default)
+        aliases = {
+            "": default,
+            "owner": ROLE_OWNER,
+            "admin": ROLE_ADMIN,
+            "administrator": ROLE_ADMIN,
+            "manager": ROLE_ADMIN,
+            "editor": ROLE_EDITOR,
+            "edit": ROLE_EDITOR,
+            "write": ROLE_EDITOR,
+            "viewer": ROLE_VIEWER,
+            "view": ROLE_VIEWER,
+            "reader": ROLE_VIEWER,
+            "readonly": ROLE_VIEWER,
+            "read_only": ROLE_VIEWER,
+        }
 
-        for key in keys:
+        return aliases.get(text, default)
+    except Exception:
+        return default
+
+
+@lru_cache(maxsize=512)
+def normalize_access_mode(value: Any, default: str = "") -> str:
+    try:
+        text = _safe_str(value, default, 120).lower().replace("-", "_").replace(" ", "_")
+
+        aliases = {
+            "": default,
+            "auth_unavailable": "auth_unavailable",
+            "unavailable": "auth_unavailable",
+            "service_unavailable": "auth_unavailable",
+            "blocked": "blocked",
+            "banned": "blocked",
+            "access_blocked": "blocked",
+            "public": "public",
+            "public_viewer": "public",
+            "anonymous_public": "public",
+            "demo": "demo",
+            "demo_mode": "demo",
+            "authenticated": "authenticated",
+            "auth": "authenticated",
+            "user": "authenticated",
+            "anonymous": "anonymous",
+            "guest": "anonymous",
+            "unauthenticated": "anonymous",
+        }
+
+        return aliases.get(text, default)
+    except Exception:
+        return default
+
+
+@lru_cache(maxsize=512)
+def normalize_setup_status(value: Any, default: str = DEFAULT_SETUP_STATUS) -> str:
+    try:
+        text = _safe_str(value, default, 120).lower().replace("-", "_").replace(" ", "_")
+
+        aliases = {
+            "": default,
+            "draft": "draft",
+            "new": "draft",
+            "created": "draft",
+            "configured": "configured",
+            "complete": "configured",
+            "completed": "configured",
+            "ready": "configured",
+            "active": "configured",
+            "archived": "archived",
+            "deleted": "deleted",
+        }
+
+        return aliases.get(text, default)
+    except Exception:
+        return default
+
+
+@lru_cache(maxsize=512)
+def normalize_workspace(value: Any, default: str = WORKSPACE_PROJECT) -> str:
+    try:
+        text = _safe_str(value, default, 120).lower().replace("-", "_").replace(" ", "_")
+
+        aliases = {
+            "": WORKSPACE_PROJECT,
+            "project": WORKSPACE_PROJECT,
+            "projekt": WORKSPACE_PROJECT,
+            "details": WORKSPACE_PROJECT,
+            "overview": WORKSPACE_PROJECT,
+            "info": WORKSPACE_PROJECT,
+        }
+
+        return aliases.get(text, text or default)
+    except Exception:
+        return default
+
+
+# ─────────────────────────────────────────────────────────────
+# Payload extraction
+# ─────────────────────────────────────────────────────────────
+
+def _object_payload_from_known_attrs(obj: Any) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+
+    try:
+        if obj is None or isinstance(obj, Mapping):
+            return result
+
+        known_attrs = (
+            "id",
+            "public_id",
+            "publicId",
+            "project_id",
+            "projectId",
+            "owner_user_id",
+            "ownerUserId",
+            "conversation_id",
+            "conversationId",
+            "name",
+            "title",
+            "display_name",
+            "displayName",
+            "description",
+            "address_text",
+            "addressText",
+            "street",
+            "house_number",
+            "houseNumber",
+            "postal_code",
+            "postalCode",
+            "city",
+            "region",
+            "country",
+            "latitude",
+            "longitude",
+            "coordinate_srid",
+            "coordinateSrid",
+            "visibility",
+            "is_public",
+            "isPublic",
+            "setup_status",
+            "setupStatus",
+            "setup_completed_at",
+            "setupCompletedAt",
+            "status",
+            "chunk_project_id",
+            "chunkProjectId",
+            "chunk_universe_id",
+            "chunkUniverseId",
+            "chunk_world_id",
+            "chunkWorldId",
+            "plan2d_id",
+            "plan2dId",
+            "lv_id",
+            "lvId",
+            "service_refs",
+            "serviceRefs",
+            "artifact_refs",
+            "artifactRefs",
+            "metadata_json",
+            "metadataJson",
+            "settings",
+            "access",
+            "publication",
+            "workspace_access",
+            "workspaceAccess",
+        )
+
+        for attr in known_attrs:
             try:
-                if hasattr(obj, key):
-                    value = getattr(obj, key)
+                if hasattr(obj, attr):
+                    value = getattr(obj, attr)
                     if value is not None:
-                        return value
+                        result[attr] = _safe_jsonable(value, value)
             except Exception:
                 continue
 
-        return default
-
+        return result
     except Exception:
-        return default
+        return result
 
 
-def _project_payload_from_object(project: Any = None, project_payload: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-    payload = _safe_dict(project_payload)
-
-    if payload:
-        return payload
-
+def _payload_from_object(value: Any) -> Dict[str, Any]:
     try:
-        if hasattr(project, "to_dict") and callable(project.to_dict):
-            try:
-                data = project.to_dict(include_private=True, include_refs=True)
-            except TypeError:
-                data = project.to_dict()
-            return _safe_dict(data)
-    except Exception:
-        pass
-
-    return {}
-
-
-def _project_value(
-    *,
-    project: Any = None,
-    project_payload: Optional[Mapping[str, Any]] = None,
-    keys: tuple[str, ...],
-    default: Any = "",
-) -> Any:
-    try:
-        payload = _safe_dict(project_payload)
-
+        payload = _safe_dict(value)
         if payload:
-            value = _mapping_value(payload, *keys, default=None)
-            if value is not None and value != "":
-                return value
+            return payload
 
-        return _object_value(project, *keys, default=default)
+        payload = _object_payload_from_known_attrs(value)
+        if payload:
+            return payload
 
+        raw_dict = getattr(value, "__dict__", None)
+        if isinstance(raw_dict, Mapping):
+            result = {}
+            for key, item in raw_dict.items():
+                key_text = _safe_str(key, "", 200)
+                if not key_text or key_text.startswith("_sa_"):
+                    continue
+                if key_text.startswith("_"):
+                    continue
+                result[key_text] = _safe_jsonable(item, item)
+            return result
+
+        return {}
     except Exception:
-        return default
+        return {}
 
 
-def _project_public_id(
-    *,
-    project: Any = None,
-    project_payload: Optional[Mapping[str, Any]] = None,
-) -> str:
+def _project_payload(project: Any = None, project_payload: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     try:
-        value = _project_value(
-            project=project,
-            project_payload=project_payload,
-            keys=(
-                "public_id",
-                "publicId",
-                "project_public_id",
-                "projectPublicId",
-                "app_project_public_id",
-                "appProjectPublicId",
-            ),
+        explicit = _safe_dict(project_payload)
+        if explicit:
+            return explicit
+
+        return _payload_from_object(project)
+    except Exception:
+        return {}
+
+
+def _current_user_payload(current_user: Any = None, auth_context: Any = None) -> Dict[str, Any]:
+    try:
+        user = _payload_from_object(current_user)
+        auth = _payload_from_object(auth_context)
+
+        if not user and auth:
+            user = dict(auth)
+
+        if auth:
+            user.setdefault("auth", auth)
+            for key in (
+                "authenticated",
+                "is_authenticated",
+                "isAuthenticated",
+                "auth_unavailable",
+                "authUnavailable",
+                "service_unavailable",
+                "serviceUnavailable",
+                "user_blocked",
+                "userBlocked",
+                "access_blocked",
+                "accessBlocked",
+                "demo_mode",
+                "demoMode",
+                "can_demo",
+                "canDemo",
+                "persistent",
+                "can_persist",
+                "canPersist",
+                "auth_user_id",
+                "authUserId",
+                "email",
+                "display_name",
+                "displayName",
+            ):
+                if key not in user and key in auth:
+                    user[key] = auth.get(key)
+
+        return user
+    except Exception:
+        return {}
+
+
+def _access_payload(project_payload: Mapping[str, Any], access: Any = None) -> Dict[str, Any]:
+    try:
+        explicit = _payload_from_object(access)
+        if explicit:
+            return explicit
+
+        project_access = _safe_dict(project_payload.get("access"))
+        if project_access:
+            return project_access
+
+        permission_result = _safe_dict(project_payload.get("permission_result") or project_payload.get("permissionResult"))
+        if permission_result:
+            return permission_result
+
+        return {}
+    except Exception:
+        return {}
+
+
+def _workspace_access_payload(project_payload: Mapping[str, Any], workspace_access: Any = None) -> Dict[str, Any]:
+    try:
+        explicit = _payload_from_object(workspace_access)
+        if explicit:
+            return explicit
+
+        direct = _safe_dict(project_payload.get("workspace_access") or project_payload.get("workspaceAccess"))
+        if direct:
+            return direct
+
+        access = _safe_dict(project_payload.get("access"))
+        workspace_direct = _safe_dict(access.get("workspace_access") or access.get("workspaceAccess"))
+        if workspace_direct:
+            return workspace_direct
+
+        return {}
+    except Exception:
+        return {}
+
+
+def _publication_payload(project_payload: Mapping[str, Any], publication: Any = None) -> Dict[str, Any]:
+    try:
+        explicit = _payload_from_object(publication)
+        if explicit:
+            return explicit
+
+        direct = _safe_dict(project_payload.get("publication") or project_payload.get("publication_view") or project_payload.get("publicationView"))
+        if direct:
+            return direct
+
+        settings = _safe_dict(project_payload.get("settings"))
+        settings_publication = _safe_dict(settings.get("publication"))
+        if settings_publication:
+            return settings_publication
+
+        metadata = _safe_dict(project_payload.get("metadata_json") or project_payload.get("metadataJson") or project_payload.get("metadata"))
+        metadata_publication = _safe_dict(metadata.get("publication"))
+        if metadata_publication:
+            return metadata_publication
+
+        return {}
+    except Exception:
+        return {}
+
+
+# ─────────────────────────────────────────────────────────────
+# Project normalization
+# ─────────────────────────────────────────────────────────────
+
+def _project_public_id(payload: Mapping[str, Any], is_new: Optional[bool] = None) -> str:
+    try:
+        value = _first_non_empty(
+            payload.get("public_id"),
+            payload.get("publicId"),
+            payload.get("project_public_id"),
+            payload.get("projectPublicId"),
             default="",
         )
+        text = _safe_str(value, "", 240)
 
-        text = _safe_str(value, "", 180)
-        return "" if text.lower() in {"", "none", "null"} else text
+        if text.lower() in {"none", "null"}:
+            text = ""
 
+        if not text and is_new:
+            return "new"
+
+        return text
     except Exception:
-        return ""
+        return "new" if is_new else ""
 
 
-def _project_internal_id(
-    *,
-    project: Any = None,
-    project_payload: Optional[Mapping[str, Any]] = None,
-) -> str:
+def _is_new_project(payload: Mapping[str, Any], explicit_is_new: Any = None) -> bool:
     try:
-        value = _project_value(
-            project=project,
-            project_payload=project_payload,
-            keys=("id", "project_id", "projectId"),
-            default="",
+        if explicit_is_new is not None:
+            return _safe_bool(explicit_is_new, False)
+
+        value = _first_non_empty(
+            payload.get("is_new"),
+            payload.get("isNew"),
+            default=None,
         )
-        return _safe_str(value, "", 180)
-    except Exception:
-        return ""
 
+        if value is not None:
+            return _safe_bool(value, False)
 
-def _project_conversation_id(
-    *,
-    project: Any = None,
-    project_payload: Optional[Mapping[str, Any]] = None,
-) -> str:
-    try:
-        value = _project_value(
-            project=project,
-            project_payload=project_payload,
-            keys=("conversation_id", "conversationId", "chat_id", "chatId"),
-            default="",
-        )
-        return _safe_str(value, "", 180)
-    except Exception:
-        return ""
+        public_id = _project_public_id(payload)
+        if _safe_str(public_id, "", 240).lower() in {"", "new", "create", "neu", "none", "null"}:
+            return True
 
-
-def _is_new_project_id(project_public_id: Any) -> bool:
-    try:
-        text = _safe_str(project_public_id, "", 180).lower()
-        return text in {"", "new", "create", "neu", "none", "null"}
+        return False
     except Exception:
         return True
 
 
-def _project_access_payload(project_payload: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+def _project_address_text(payload: Mapping[str, Any]) -> str:
     try:
-        payload = _safe_dict(project_payload)
-        return _safe_dict(payload.get("access"))
+        address = _safe_dict(payload.get("address"))
+        return _safe_str(
+            _first_non_empty(
+                payload.get("address_text"),
+                payload.get("addressText"),
+                address.get("text"),
+                address.get("address_text"),
+                address.get("addressText"),
+                default="",
+            ),
+            "",
+            2000,
+        )
     except Exception:
-        return {}
+        return ""
 
 
-def _current_user_payload(current_user: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+def _project_is_configured(payload: Mapping[str, Any], setup_status: str) -> bool:
     try:
-        return _safe_dict(current_user)
-    except Exception:
-        return {}
+        explicit = _first_non_empty(
+            payload.get("is_configured"),
+            payload.get("isConfigured"),
+            default=None,
+        )
+        if explicit is not None:
+            return _safe_bool(explicit, False)
 
+        if setup_status == "configured":
+            return True
 
-def _is_blocked_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
-    try:
-        user = _current_user_payload(current_user)
-        return _safe_bool(user.get("blocked"), False)
+        name = _safe_str(_first_non_empty(payload.get("name"), payload.get("title"), default=""), "", 300)
+        address_text = _project_address_text(payload)
+        lat = _first_non_empty(payload.get("latitude"), payload.get("lat"), default=None)
+        lng = _first_non_empty(payload.get("longitude"), payload.get("lng"), payload.get("lon"), default=None)
+
+        has_location = bool(address_text or (lat is not None and lng is not None))
+
+        return bool(name and has_location)
     except Exception:
         return False
 
 
-def _blocked_reason(current_user: Optional[Mapping[str, Any]] = None) -> str:
+def _build_project_view(payload: Mapping[str, Any], *, is_new: bool) -> Dict[str, Any]:
     try:
-        user = _current_user_payload(current_user)
-        return _safe_str(user.get("blocked_reason") or user.get("blockedReason") or user.get("auth_state"), "blocked", 160)
-    except Exception:
-        return "blocked"
+        project_id = _safe_str(_first_non_empty(payload.get("id"), payload.get("project_id"), payload.get("projectId"), default=""), "", 240)
+        public_id = _project_public_id(payload, is_new=is_new)
+        name = _safe_str(_first_non_empty(payload.get("name"), payload.get("title"), default=""), "", 300)
+        display_name = _safe_str(
+            _first_non_empty(payload.get("display_name"), payload.get("displayName"), name, default="Neues Projekt"),
+            "Neues Projekt",
+            300,
+        )
+        description = _safe_str(payload.get("description"), "", 5000)
+        address_text = _project_address_text(payload)
 
-
-def _is_demo_mode(
-    *,
-    current_user: Optional[Mapping[str, Any]] = None,
-    project_payload: Optional[Mapping[str, Any]] = None,
-) -> bool:
-    try:
-        if _is_blocked_context(current_user):
-            return False
-
-        user = _current_user_payload(current_user)
-        payload = _safe_dict(project_payload)
-
-        return _safe_bool(
-            user.get("demo_mode")
-            or user.get("demoMode")
-            or user.get("is_demo")
-            or payload.get("demo_mode")
-            or payload.get("demoMode")
-            or payload.get("is_demo")
-            or payload.get("isDemo"),
-            False,
+        visibility = normalize_visibility(
+            _first_non_empty(
+                payload.get("visibility"),
+                "public" if _safe_bool(payload.get("is_public") or payload.get("isPublic"), False) else "",
+                default=DEFAULT_VISIBILITY,
+            )
         )
 
-    except Exception:
-        return False
+        setup_status = normalize_setup_status(_first_non_empty(payload.get("setup_status"), payload.get("setupStatus"), default=DEFAULT_SETUP_STATUS))
+        is_configured = _project_is_configured(payload, setup_status)
 
-
-def _is_persistent_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
-    try:
-        user = _current_user_payload(current_user)
-
-        if _is_blocked_context(user) or _is_demo_mode(current_user=user):
-            return False
-
-        return _safe_bool(user.get("persistent"), False)
-    except Exception:
-        return False
-
-
-def _can_edit_project(project_payload: Optional[Mapping[str, Any]]) -> bool:
-    try:
-        access = _project_access_payload(project_payload)
-        permissions = _safe_dict(access.get("permissions"))
-
-        return _safe_bool(
-            access.get("can_edit")
-            or access.get("canEdit")
-            or permissions.get("edit")
-            or permissions.get("write"),
-            False,
+        view: Dict[str, Any] = dict(payload)
+        view.update(
+            {
+                "id": project_id,
+                "project_id": project_id,
+                "projectId": project_id,
+                "public_id": public_id,
+                "publicId": public_id,
+                "project_public_id": public_id,
+                "projectPublicId": public_id,
+                "name": name,
+                "title": name,
+                "display_name": display_name,
+                "displayName": display_name,
+                "description": description,
+                "address_text": address_text,
+                "addressText": address_text,
+                "address": {
+                    **_safe_dict(payload.get("address")),
+                    "text": address_text,
+                    "address_text": address_text,
+                    "addressText": address_text,
+                },
+                "visibility": visibility,
+                "is_public": visibility == "public",
+                "isPublic": visibility == "public",
+                "setup_status": setup_status,
+                "setupStatus": setup_status,
+                "is_configured": is_configured,
+                "isConfigured": is_configured,
+                "is_new": is_new,
+                "isNew": is_new,
+            }
         )
 
+        return view
     except Exception:
-        return False
+        return {
+            "id": "",
+            "project_id": "",
+            "projectId": "",
+            "public_id": "new" if is_new else "",
+            "publicId": "new" if is_new else "",
+            "project_public_id": "new" if is_new else "",
+            "projectPublicId": "new" if is_new else "",
+            "name": "",
+            "title": "",
+            "display_name": "Neues Projekt",
+            "displayName": "Neues Projekt",
+            "description": "",
+            "address_text": "",
+            "addressText": "",
+            "address": {"text": "", "address_text": "", "addressText": ""},
+            "visibility": DEFAULT_VISIBILITY,
+            "is_public": False,
+            "isPublic": False,
+            "setup_status": DEFAULT_SETUP_STATUS,
+            "setupStatus": DEFAULT_SETUP_STATUS,
+            "is_configured": False,
+            "isConfigured": False,
+            "is_new": is_new,
+            "isNew": is_new,
+        }
 
 
 # ─────────────────────────────────────────────────────────────
-# Chunk context extraction
+# Auth/access normalization
 # ─────────────────────────────────────────────────────────────
 
-def _chunk_context_from_project(
+def _auth_flag(user: Mapping[str, Any], auth: Mapping[str, Any], *keys: str, default: bool = False) -> bool:
+    try:
+        for key in keys:
+            if key in auth:
+                return _safe_bool(auth.get(key), default)
+            if key in user:
+                return _safe_bool(user.get(key), default)
+
+        nested_auth = _safe_dict(user.get("auth"))
+        for key in keys:
+            if key in nested_auth:
+                return _safe_bool(nested_auth.get(key), default)
+
+        return default
+    except Exception:
+        return default
+
+
+def _auth_value(user: Mapping[str, Any], auth: Mapping[str, Any], *keys: str, default: Any = "") -> Any:
+    try:
+        for key in keys:
+            if key in auth and auth.get(key) is not None:
+                return auth.get(key)
+            if key in user and user.get(key) is not None:
+                return user.get(key)
+
+        nested_auth = _safe_dict(user.get("auth"))
+        for key in keys:
+            if key in nested_auth and nested_auth.get(key) is not None:
+                return nested_auth.get(key)
+
+        return default
+    except Exception:
+        return default
+
+
+def _permission_flag(access: Mapping[str, Any], permissions: Mapping[str, Any], *keys: str, default: bool = False) -> bool:
+    try:
+        for key in keys:
+            if key in access:
+                return _safe_bool(access.get(key), default)
+            if key in permissions:
+                return _safe_bool(permissions.get(key), default)
+
+        return default
+    except Exception:
+        return default
+
+
+def _role_from_payloads(project_view: Mapping[str, Any], access: Mapping[str, Any], user: Mapping[str, Any]) -> str:
+    try:
+        role = _first_non_empty(
+            access.get("role"),
+            access.get("project_role"),
+            access.get("projectRole"),
+            access.get("membership_role"),
+            access.get("membershipRole"),
+            user.get("project_role"),
+            user.get("projectRole"),
+            user.get("role"),
+            project_view.get("role"),
+            project_view.get("project_role"),
+            project_view.get("projectRole"),
+            default="",
+        )
+
+        return normalize_role(role, "")
+    except Exception:
+        return ""
+
+
+def _explicit_public_viewer(project_view: Mapping[str, Any], user: Mapping[str, Any], access: Mapping[str, Any], workspace_access: Mapping[str, Any]) -> bool:
+    try:
+        candidates = (
+            user.get("public_viewer"),
+            user.get("publicViewer"),
+            user.get("is_public_viewer"),
+            user.get("isPublicViewer"),
+            access.get("public_viewer"),
+            access.get("publicViewer"),
+            access.get("is_public_viewer"),
+            access.get("isPublicViewer"),
+            workspace_access.get("public_viewer"),
+            workspace_access.get("publicViewer"),
+            workspace_access.get("is_public_viewer"),
+            workspace_access.get("isPublicViewer"),
+            project_view.get("public_viewer"),
+            project_view.get("publicViewer"),
+            project_view.get("is_public_viewer"),
+            project_view.get("isPublicViewer"),
+        )
+
+        for value in candidates:
+            if value is not None:
+                if _safe_bool(value, False):
+                    return True
+
+        explicit_mode = normalize_access_mode(
+            _first_non_empty(
+                user.get("access_mode"),
+                user.get("accessMode"),
+                access.get("access_mode"),
+                access.get("accessMode"),
+                workspace_access.get("access_mode"),
+                workspace_access.get("accessMode"),
+                project_view.get("access_mode"),
+                project_view.get("accessMode"),
+                default="",
+            ),
+            "",
+        )
+
+        return explicit_mode == "public"
+    except Exception:
+        return False
+
+
+def _derive_access_mode(
     *,
-    project: Any = None,
-    project_payload: Optional[Mapping[str, Any]] = None,
+    user: Mapping[str, Any],
+    auth: Mapping[str, Any],
+    project_view: Mapping[str, Any],
+    access: Mapping[str, Any],
+    workspace_access: Mapping[str, Any],
+    auth_unavailable: bool,
+    user_blocked: bool,
+    access_blocked: bool,
+    demo_mode: bool,
+    public_viewer: bool,
+    authenticated: bool,
+) -> str:
+    try:
+        explicit = normalize_access_mode(
+            _first_non_empty(
+                access.get("access_mode"),
+                access.get("accessMode"),
+                workspace_access.get("access_mode"),
+                workspace_access.get("accessMode"),
+                project_view.get("access_mode"),
+                project_view.get("accessMode"),
+                user.get("access_mode"),
+                user.get("accessMode"),
+                auth.get("access_mode"),
+                auth.get("accessMode"),
+                default="",
+            ),
+            "",
+        )
+
+        if explicit:
+            return explicit
+
+        if auth_unavailable:
+            return "auth_unavailable"
+
+        if user_blocked or access_blocked:
+            return "blocked"
+
+        if public_viewer:
+            return "public"
+
+        if demo_mode:
+            return "demo"
+
+        if authenticated:
+            return "authenticated"
+
+        return "anonymous"
+    except Exception:
+        return "anonymous"
+
+
+def _build_access_view(
+    *,
+    project_view: Mapping[str, Any],
+    access_payload: Mapping[str, Any],
+    workspace_access_payload: Mapping[str, Any],
+    current_user_payload: Mapping[str, Any],
+    auth_payload: Mapping[str, Any],
+    is_new: bool,
 ) -> Dict[str, Any]:
-    result: Dict[str, Any] = {
-        "chunk_project_id": "",
-        "chunk_universe_id": "",
-        "chunk_world_id": "",
-        "chunk_status": "pending",
-        "chunk_ready": False,
-        "chunk_route_hints": {},
-    }
-
     try:
-        payload = _project_payload_from_object(project=project, project_payload=project_payload)
-        candidates = _chunk_context_candidates(project=project, payload=payload)
+        access = _safe_dict(access_payload)
+        workspace_access = _safe_dict(workspace_access_payload)
+        user = _safe_dict(current_user_payload)
+        auth = _safe_dict(auth_payload)
 
-        for candidate in candidates:
-            try:
-                _merge_chunk_candidate(result, candidate)
-            except Exception:
-                continue
+        permissions = _safe_dict(access.get("permissions") or access.get("permission_map") or access.get("permissionMap"))
+        role = _role_from_payloads(project_view, access, user)
 
-        return _normalize_chunk_context(result)
+        authenticated = _auth_flag(user, auth, "authenticated", "is_authenticated", "isAuthenticated", default=False)
 
-    except Exception:
-        return _normalize_chunk_context(result)
+        auth_unavailable = _auth_flag(
+            user,
+            auth,
+            "auth_unavailable",
+            "authUnavailable",
+            "service_unavailable",
+            "serviceUnavailable",
+            "dependency_unavailable",
+            "dependencyUnavailable",
+            default=False,
+        )
 
+        user_blocked = _auth_flag(
+            user,
+            auth,
+            "user_blocked",
+            "userBlocked",
+            "blocked",
+            "is_blocked",
+            "isBlocked",
+            "banned",
+            "is_banned",
+            "isBanned",
+            default=False,
+        )
 
-def _chunk_context_candidates(*, project: Any = None, payload: Optional[Mapping[str, Any]] = None) -> list[Mapping[str, Any]]:
-    candidates: list[Mapping[str, Any]] = []
+        explicit_access_blocked = _permission_flag(
+            access,
+            permissions,
+            "access_blocked",
+            "accessBlocked",
+            "blocked",
+            default=False,
+        ) or _safe_bool(workspace_access.get("access_blocked") or workspace_access.get("accessBlocked"), False)
 
-    try:
-        payload_dict = _safe_dict(payload)
-        if payload_dict:
-            candidates.append(payload_dict)
+        access_blocked = bool(auth_unavailable or user_blocked or explicit_access_blocked)
 
-        direct_candidate = {
-            "chunk_project_id": _object_value(project, "chunk_project_id", default=""),
-            "chunk_universe_id": _object_value(project, "chunk_universe_id", default=""),
-            "chunk_world_id": _object_value(project, "chunk_world_id", default=""),
-            "chunk_status": _object_value(project, "chunk_status", default=""),
-            "chunk_ready": _object_value(project, "chunk_ready", default=None),
-            "chunk_route_hints": _object_value(project, "chunk_route_hints", default={}),
-        }
-        candidates.append(direct_candidate)
+        public_viewer = _explicit_public_viewer(project_view, user, access, workspace_access)
 
-        chunk = _safe_dict(payload_dict.get("chunk"))
-        if chunk:
-            candidates.append(chunk)
+        demo_candidate = _auth_flag(
+            user,
+            auth,
+            "demo_mode",
+            "demoMode",
+            "is_demo",
+            "isDemo",
+            "can_demo",
+            "canDemo",
+            "demo_project_access",
+            "demoProjectAccess",
+            default=False,
+        )
+        demo_mode = bool(demo_candidate and not public_viewer and not auth_unavailable and not user_blocked)
 
-        metadata = _safe_dict(payload_dict.get("metadata") or payload_dict.get("metadata_json") or payload_dict.get("metadataJson"))
-        metadata_chunk = _safe_dict(metadata.get("chunk"))
-        if metadata_chunk:
-            candidates.append(metadata_chunk)
+        persistent = _auth_flag(
+            user,
+            auth,
+            "persistent",
+            "can_persist",
+            "canPersist",
+            "is_persistent",
+            "isPersistent",
+            default=False,
+        )
 
-        service_refs = _safe_dict(payload_dict.get("service_refs") or payload_dict.get("serviceRefs"))
-        service_chunk = _safe_dict(service_refs.get("chunk"))
-        if service_chunk:
-            candidates.append(service_chunk)
-
-        service_links = _safe_list(payload_dict.get("service_links") or payload_dict.get("serviceLinks"))
-        for link in service_links:
-            link_payload = _safe_dict(link)
-            if not link_payload:
-                continue
-
-            service_name = _safe_str(
-                link_payload.get("service")
-                or link_payload.get("service_name")
-                or link_payload.get("serviceName"),
+        if not persistent:
+            auth_user_id = _safe_str(
+                _auth_value(user, auth, "auth_user_id", "authUserId", "user_id", "userId", "id", default=""),
                 "",
-                120,
-            ).lower()
+                240,
+            )
+            persistent = bool(authenticated and auth_user_id and not demo_mode and not public_viewer and not access_blocked)
 
-            if service_name and service_name != "chunk":
-                continue
-
-            link_type = _safe_str(link_payload.get("resource_type") or link_payload.get("resourceType"), "", 120).lower()
-            link_metadata = _safe_dict(link_payload.get("metadata"))
-            link_ref = _safe_dict(link_payload.get("resource_ref") or link_payload.get("resourceRef") or link_payload.get("reference"))
-            link_chunk = _safe_dict(link_payload.get("chunk") or link_metadata.get("chunk") or link_ref.get("chunk"))
-
-            if link_chunk:
-                candidates.append(link_chunk)
-
-            if link_type == "chunk_project":
-                candidates.append(
-                    {
-                        "chunk_project_id": link_payload.get("resource_id")
-                        or link_payload.get("resourceId")
-                        or link_payload.get("external_id")
-                        or link_payload.get("externalId")
-                        or link_payload.get("chunk_project_id")
-                        or link_payload.get("chunkProjectId"),
-                        "chunk_universe_id": link_metadata.get("chunk_universe_id")
-                        or link_metadata.get("chunkUniverseId")
-                        or link_payload.get("chunk_universe_id")
-                        or link_payload.get("chunkUniverseId"),
-                        "chunk_world_id": link_metadata.get("chunk_world_id")
-                        or link_metadata.get("chunkWorldId")
-                        or link_payload.get("chunk_world_id")
-                        or link_payload.get("chunkWorldId"),
-                        "chunk_status": link_payload.get("status") or link_metadata.get("status"),
-                        "chunk_ready": link_payload.get("chunk_ready")
-                        or link_payload.get("chunkReady")
-                        or link_metadata.get("ready"),
-                        "chunk_route_hints": link_metadata.get("route_hints")
-                        or link_metadata.get("routeHints")
-                        or link_ref.get("routeHints"),
-                    }
-                )
-
-            if link_type in {"world", "chunk_world"}:
-                candidates.append(
-                    {
-                        "chunk_project_id": link_metadata.get("chunk_project_id")
-                        or link_metadata.get("chunkProjectId")
-                        or link_ref.get("external_project_id")
-                        or link_ref.get("externalProjectId")
-                        or link_payload.get("external_project_id")
-                        or link_payload.get("externalProjectId"),
-                        "chunk_universe_id": link_metadata.get("chunk_universe_id")
-                        or link_metadata.get("chunkUniverseId"),
-                        "chunk_world_id": link_payload.get("resource_id")
-                        or link_payload.get("resourceId")
-                        or link_payload.get("external_id")
-                        or link_payload.get("externalId")
-                        or link_metadata.get("chunk_world_id")
-                        or link_metadata.get("chunkWorldId"),
-                        "chunk_status": link_payload.get("status") or link_metadata.get("status"),
-                        "chunk_ready": link_payload.get("chunk_ready")
-                        or link_payload.get("chunkReady")
-                        or link_metadata.get("ready"),
-                        "chunk_route_hints": link_metadata.get("route_hints")
-                        or link_metadata.get("routeHints")
-                        or link_ref.get("routeHints"),
-                    }
-                )
-
-        return candidates
-
-    except Exception:
-        return candidates
-
-
-def _merge_chunk_candidate(result: Dict[str, Any], candidate: Mapping[str, Any]) -> None:
-    if not isinstance(candidate, Mapping):
-        return
-
-    chunk_project_id = _first_non_empty(
-        result.get("chunk_project_id"),
-        candidate.get("chunk_project_id"),
-        candidate.get("chunkProjectId"),
-        candidate.get("project_id"),
-        candidate.get("projectId"),
-    )
-
-    chunk_universe_id = _first_non_empty(
-        result.get("chunk_universe_id"),
-        candidate.get("chunk_universe_id"),
-        candidate.get("chunkUniverseId"),
-        candidate.get("universe_id"),
-        candidate.get("universeId"),
-    )
-
-    chunk_world_id = _first_non_empty(
-        result.get("chunk_world_id"),
-        candidate.get("chunk_world_id"),
-        candidate.get("chunkWorldId"),
-        candidate.get("world_id"),
-        candidate.get("worldId"),
-    )
-
-    chunk_status = _normalize_status(
-        _first_non_empty(
-            result.get("chunk_status"),
-            candidate.get("chunk_status"),
-            candidate.get("chunkStatus"),
-            candidate.get("status"),
-        ),
-        default="pending",
-    )
-
-    chunk_ready = _safe_bool(
-        _first_non_empty(
-            result.get("chunk_ready"),
-            candidate.get("chunk_ready"),
-            candidate.get("chunkReady"),
-            candidate.get("ready"),
-        ),
-        False,
-    )
-
-    route_hints = (
-        _safe_dict(result.get("chunk_route_hints"))
-        or _safe_dict(candidate.get("chunk_route_hints"))
-        or _safe_dict(candidate.get("chunkRouteHints"))
-        or _safe_dict(candidate.get("route_hints"))
-        or _safe_dict(candidate.get("routeHints"))
-    )
-
-    result.update(
-        {
-            "chunk_project_id": _safe_str(chunk_project_id, "", 240),
-            "chunk_universe_id": _safe_str(chunk_universe_id, "", 240),
-            "chunk_world_id": _safe_str(chunk_world_id, "", 240),
-            "chunk_status": chunk_status,
-            "chunk_ready": chunk_ready,
-            "chunk_route_hints": route_hints,
-        }
-    )
-
-
-def _normalize_chunk_context(context: Mapping[str, Any]) -> Dict[str, Any]:
-    result = dict(context) if isinstance(context, Mapping) else {}
-
-    chunk_project_id = _safe_str(
-        _first_non_empty(
-            result.get("chunk_project_id"),
-            result.get("chunkProjectId"),
-            result.get("project_id"),
-            result.get("projectId"),
-        ),
-        "",
-        240,
-    )
-
-    chunk_universe_id = _safe_str(
-        _first_non_empty(
-            result.get("chunk_universe_id"),
-            result.get("chunkUniverseId"),
-            result.get("universe_id"),
-            result.get("universeId"),
-        ),
-        "",
-        240,
-    )
-
-    chunk_world_id = _safe_str(
-        _first_non_empty(
-            result.get("chunk_world_id"),
-            result.get("chunkWorldId"),
-            result.get("world_id"),
-            result.get("worldId"),
-        ),
-        "",
-        240,
-    )
-
-    if chunk_project_id and not chunk_world_id:
-        chunk_world_id = DEFAULT_CHUNK_WORLD_ID
-
-    raw_status = _normalize_status(
-        _first_non_empty(
-            result.get("chunk_status"),
-            result.get("chunkStatus"),
-            result.get("status"),
-        ),
-        default="pending",
-    )
-
-    explicit_ready = _safe_bool(
-        _first_non_empty(
-            result.get("chunk_ready"),
-            result.get("chunkReady"),
-            result.get("ready"),
-        ),
-        False,
-    )
-
-    if raw_status in {"error", "disabled"}:
-        chunk_status = raw_status
-        chunk_ready = False
-    elif chunk_project_id and chunk_world_id:
-        chunk_status = "ready"
-        chunk_ready = True
-    else:
-        chunk_status = raw_status or "pending"
-        chunk_ready = explicit_ready and bool(chunk_project_id and chunk_world_id)
-
-    route_hints = (
-        _safe_dict(result.get("chunk_route_hints"))
-        or _safe_dict(result.get("chunkRouteHints"))
-        or _safe_dict(result.get("route_hints"))
-        or _safe_dict(result.get("routeHints"))
-    )
-
-    if not route_hints and chunk_project_id and chunk_world_id:
-        route_hints = _build_chunk_route_hints(
-            chunk_project_id=chunk_project_id,
-            chunk_world_id=chunk_world_id,
-            chunk_universe_id=chunk_universe_id,
+        access_mode = _derive_access_mode(
+            user=user,
+            auth=auth,
+            project_view=project_view,
+            access=access,
+            workspace_access=workspace_access,
+            auth_unavailable=auth_unavailable,
+            user_blocked=user_blocked,
+            access_blocked=access_blocked,
+            demo_mode=demo_mode,
+            public_viewer=public_viewer,
+            authenticated=authenticated,
         )
 
-    result.update(
-        {
-            "chunk_project_id": chunk_project_id,
-            "chunkProjectId": chunk_project_id,
-            "chunk_universe_id": chunk_universe_id,
-            "chunkUniverseId": chunk_universe_id,
-            "chunk_world_id": chunk_world_id,
-            "chunkWorldId": chunk_world_id,
-            "chunk_status": chunk_status,
-            "chunkStatus": chunk_status,
-            "chunk_ready": chunk_ready,
-            "chunkReady": chunk_ready,
-            "chunk_route_hints": route_hints,
-            "chunkRouteHints": route_hints,
+        role_can_view = role in ROLE_CAN_VIEW
+        role_can_edit = role in ROLE_CAN_EDIT
+        role_can_manage = role in ROLE_CAN_MANAGE
+
+        can_view = _permission_flag(
+            access,
+            permissions,
+            "can_view",
+            "canView",
+            "view",
+            "read",
+            default=bool(role_can_view or is_new),
+        )
+
+        can_edit = _permission_flag(
+            access,
+            permissions,
+            "can_edit",
+            "canEdit",
+            "edit",
+            "write",
+            default=bool(role_can_edit or (is_new and (persistent or demo_mode))),
+        )
+
+        can_manage = _permission_flag(
+            access,
+            permissions,
+            "can_manage",
+            "canManage",
+            "manage",
+            "admin",
+            default=bool(role_can_manage),
+        )
+
+        can_view_settings = _permission_flag(
+            access,
+            permissions,
+            "can_view_settings",
+            "canViewSettings",
+            "view_settings",
+            "viewSettings",
+            default=bool(can_manage),
+        )
+
+        can_manage_team = _permission_flag(
+            access,
+            permissions,
+            "can_manage_team",
+            "canManageTeam",
+            "manage_team",
+            "manageTeam",
+            default=bool(can_manage),
+        )
+
+        can_publish = _permission_flag(
+            access,
+            permissions,
+            "can_publish",
+            "canPublish",
+            "publish",
+            "manage_publication",
+            "managePublication",
+            default=bool(can_manage),
+        )
+
+        read_only_explicit = _first_non_empty(
+            access.get("read_only"),
+            access.get("readOnly"),
+            access.get("readonly"),
+            workspace_access.get("read_only"),
+            workspace_access.get("readOnly"),
+            workspace_access.get("readonly"),
+            project_view.get("read_only"),
+            project_view.get("readOnly"),
+            project_view.get("readonly"),
+            default=None,
+        )
+
+        read_only = _safe_bool(read_only_explicit, default=not can_edit) if read_only_explicit is not None else bool(not can_edit)
+
+        if public_viewer:
+            can_view = True
+            can_edit = False
+            can_manage = False
+            can_view_settings = False
+            can_manage_team = False
+            can_publish = False
+            read_only = True
+            persistent = False
+            access_mode = "public"
+
+        if demo_mode:
+            can_view = True
+            can_edit = True
+            can_manage = False
+            can_view_settings = False
+            can_manage_team = False
+            can_publish = False
+            persistent = False
+            if access_mode not in {"public", "blocked", "auth_unavailable"}:
+                access_mode = "demo"
+
+        if auth_unavailable or user_blocked or access_blocked:
+            can_edit = False
+            can_manage = False
+            can_view_settings = False
+            can_manage_team = False
+            can_publish = False
+            read_only = True
+            persistent = False
+
+        if is_new:
+            can_view = True
+            if demo_mode:
+                can_edit = True
+                read_only = False
+            elif persistent and not public_viewer and not access_blocked:
+                can_edit = True
+                read_only = False
+
+        form_can_edit = bool(
+            can_edit
+            and not read_only
+            and (persistent or demo_mode)
+            and not public_viewer
+            and not auth_unavailable
+            and not user_blocked
+            and not access_blocked
+        )
+
+        can_mutate = form_can_edit
+
+        show_management_sections = bool(
+            can_manage
+            and not is_new
+            and not demo_mode
+            and not public_viewer
+            and not read_only
+            and not auth_unavailable
+            and not user_blocked
+            and not access_blocked
+        )
+
+        show_management_locked = bool(
+            not is_new
+            and not show_management_sections
+            and not public_viewer
+            and not demo_mode
+        )
+
+        result: Dict[str, Any] = dict(access)
+        result.update(
+            {
+                "role": role,
+                "permissions": permissions,
+
+                "authenticated": authenticated,
+                "auth_unavailable": auth_unavailable,
+                "authUnavailable": auth_unavailable,
+                "user_blocked": user_blocked,
+                "userBlocked": user_blocked,
+                "access_blocked": access_blocked,
+                "accessBlocked": access_blocked,
+
+                "demo_mode": demo_mode,
+                "demoMode": demo_mode,
+                "persistent": persistent,
+
+                "public_viewer": public_viewer,
+                "publicViewer": public_viewer,
+                "is_public_viewer": public_viewer,
+                "isPublicViewer": public_viewer,
+
+                "access_mode": access_mode,
+                "accessMode": access_mode,
+
+                "read_only": read_only,
+                "readOnly": read_only,
+                "readonly": read_only,
+
+                "can_view": can_view,
+                "canView": can_view,
+                "can_edit": can_edit,
+                "canEdit": can_edit,
+                "can_manage": can_manage,
+                "canManage": can_manage,
+                "can_view_settings": can_view_settings,
+                "canViewSettings": can_view_settings,
+                "can_manage_team": can_manage_team,
+                "canManageTeam": can_manage_team,
+                "can_publish": can_publish,
+                "canPublish": can_publish,
+                "can_mutate": can_mutate,
+                "canMutate": can_mutate,
+                "form_can_edit": form_can_edit,
+                "formCanEdit": form_can_edit,
+                "show_management_sections": show_management_sections,
+                "showManagementSections": show_management_sections,
+                "show_management_locked": show_management_locked,
+                "showManagementLocked": show_management_locked,
+            }
+        )
+
+        return result
+    except Exception as exc:
+        _log_exception("build access view failed", exc)
+        return {
+            "role": "",
+            "permissions": {},
+            "authenticated": False,
+            "auth_unavailable": False,
+            "authUnavailable": False,
+            "user_blocked": False,
+            "userBlocked": False,
+            "access_blocked": True,
+            "accessBlocked": True,
+            "demo_mode": False,
+            "demoMode": False,
+            "persistent": False,
+            "public_viewer": False,
+            "publicViewer": False,
+            "is_public_viewer": False,
+            "isPublicViewer": False,
+            "access_mode": "blocked",
+            "accessMode": "blocked",
+            "read_only": True,
+            "readOnly": True,
+            "readonly": True,
+            "can_view": False,
+            "canView": False,
+            "can_edit": False,
+            "canEdit": False,
+            "can_manage": False,
+            "canManage": False,
+            "can_view_settings": False,
+            "canViewSettings": False,
+            "can_manage_team": False,
+            "canManageTeam": False,
+            "can_publish": False,
+            "canPublish": False,
+            "can_mutate": False,
+            "canMutate": False,
+            "form_can_edit": False,
+            "formCanEdit": False,
+            "show_management_sections": False,
+            "showManagementSections": False,
+            "show_management_locked": True,
+            "showManagementLocked": True,
         }
-    )
-
-    return result
 
 
-def _build_chunk_route_hints(
-    *,
-    chunk_project_id: str,
-    chunk_world_id: str,
-    chunk_universe_id: str = "",
-) -> Dict[str, str]:
+# ─────────────────────────────────────────────────────────────
+# Publication/workspace normalization
+# ─────────────────────────────────────────────────────────────
+
+def _normalize_published_workspaces(value: Any) -> Dict[str, bool]:
+    result = {workspace: False for workspace in PUBLICATION_WORKSPACES}
+
     try:
-        api_base = _normalize_route_cached(
-            _config_str("VECTOPLAN_EDITOR_CHUNK_API_PREFIX", DEFAULT_CHUNK_BROWSER_BASE_URL, 4000)
-            or _config_str("EDITOR_CHUNK_API_PREFIX", DEFAULT_CHUNK_BROWSER_BASE_URL, 4000)
-            or DEFAULT_CHUNK_BROWSER_BASE_URL,
-            DEFAULT_CHUNK_BROWSER_BASE_URL,
+        if isinstance(value, Mapping):
+            for workspace in PUBLICATION_WORKSPACES:
+                result[workspace] = _safe_bool(
+                    value.get(workspace)
+                    or value.get(workspace.replace("_", "-"))
+                    or value.get(workspace.replace("_", "")),
+                    False,
+                )
+            return result
+
+        if isinstance(value, (list, tuple, set)):
+            normalized_items = {_safe_str(item, "", 120).lower().replace("-", "_") for item in value}
+            for workspace in PUBLICATION_WORKSPACES:
+                result[workspace] = workspace in normalized_items
+            return result
+
+        return result
+    except Exception:
+        return result
+
+
+def _build_publication_view(
+    *,
+    project_view: Mapping[str, Any],
+    publication_payload: Mapping[str, Any],
+    access_view: Mapping[str, Any],
+) -> Dict[str, Any]:
+    try:
+        publication = _safe_dict(publication_payload)
+
+        visibility = normalize_visibility(
+            _first_non_empty(
+                publication.get("visibility"),
+                project_view.get("visibility"),
+                default=DEFAULT_VISIBILITY,
+            )
         )
 
-        project_base = _join_route_path(api_base, "projects", chunk_project_id)
-        world_base = _join_route_path(project_base, "worlds", chunk_world_id)
+        publication_enabled = _safe_bool(
+            _first_non_empty(
+                publication.get("publication_enabled"),
+                publication.get("publicationEnabled"),
+                publication.get("enabled"),
+                default=visibility in {"public", "unlisted"},
+            ),
+            visibility in {"public", "unlisted"},
+        )
+
+        published_workspaces = _normalize_published_workspaces(
+            _first_non_empty(
+                publication.get("published_workspaces"),
+                publication.get("publishedWorkspaces"),
+                publication.get("workspaces"),
+                default={},
+            )
+        )
+
+        effective_published_workspaces = _normalize_published_workspaces(
+            _first_non_empty(
+                publication.get("effective_published_workspaces"),
+                publication.get("effectivePublishedWorkspaces"),
+                default=published_workspaces,
+            )
+        )
+
+        if not publication_enabled or visibility == "private":
+            effective_published_workspaces = {workspace: False for workspace in PUBLICATION_WORKSPACES}
+
+        for workspace in NEVER_PUBLIC_WORKSPACES:
+            effective_published_workspaces.pop(workspace, None)
+
+        require_auth = _safe_bool(
+            _first_non_empty(
+                publication.get("require_auth"),
+                publication.get("requireAuth"),
+                default=False,
+            ),
+            False,
+        )
+
+        require_project_permission = _safe_bool(
+            _first_non_empty(
+                publication.get("require_project_permission"),
+                publication.get("requireProjectPermission"),
+                default=False,
+            ),
+            False,
+        )
+
+        result: Dict[str, Any] = dict(publication)
+        result.update(
+            {
+                "visibility": visibility,
+                "publication_enabled": publication_enabled,
+                "publicationEnabled": publication_enabled,
+                "published_workspaces": published_workspaces,
+                "publishedWorkspaces": published_workspaces,
+                "effective_published_workspaces": effective_published_workspaces,
+                "effectivePublishedWorkspaces": effective_published_workspaces,
+                "require_auth": require_auth,
+                "requireAuth": require_auth,
+                "require_project_permission": require_project_permission,
+                "requireProjectPermission": require_project_permission,
+                "can_publish": _safe_bool(access_view.get("can_publish"), False),
+                "canPublish": _safe_bool(access_view.get("can_publish"), False),
+                "read_only": _safe_bool(access_view.get("read_only"), True),
+                "readOnly": _safe_bool(access_view.get("read_only"), True),
+            }
+        )
+
+        return result
+    except Exception:
+        return {
+            "visibility": normalize_visibility(project_view.get("visibility", DEFAULT_VISIBILITY)),
+            "publication_enabled": False,
+            "publicationEnabled": False,
+            "published_workspaces": {workspace: False for workspace in PUBLICATION_WORKSPACES},
+            "publishedWorkspaces": {workspace: False for workspace in PUBLICATION_WORKSPACES},
+            "effective_published_workspaces": {workspace: False for workspace in PUBLICATION_WORKSPACES},
+            "effectivePublishedWorkspaces": {workspace: False for workspace in PUBLICATION_WORKSPACES},
+            "require_auth": False,
+            "requireAuth": False,
+            "require_project_permission": False,
+            "requireProjectPermission": False,
+            "can_publish": False,
+            "canPublish": False,
+            "read_only": True,
+            "readOnly": True,
+        }
+
+
+def _build_workspace_access_view(
+    *,
+    workspace: str,
+    project_view: Mapping[str, Any],
+    workspace_access_payload: Mapping[str, Any],
+    access_view: Mapping[str, Any],
+    publication_view: Mapping[str, Any],
+) -> Dict[str, Any]:
+    try:
+        workspace_access = _safe_dict(workspace_access_payload)
+        normalized_workspace = normalize_workspace(workspace, WORKSPACE_PROJECT)
+
+        explicit_allowed = _first_non_empty(
+            workspace_access.get("allowed"),
+            workspace_access.get("ok"),
+            workspace_access.get("can_view"),
+            workspace_access.get("canView"),
+            default=None,
+        )
+
+        if explicit_allowed is None:
+            allowed = _safe_bool(access_view.get("can_view"), False)
+        else:
+            allowed = _safe_bool(explicit_allowed, False)
+
+        if _safe_bool(access_view.get("access_blocked"), False):
+            allowed = False
+
+        if _safe_bool(access_view.get("public_viewer"), False):
+            effective = _safe_dict(publication_view.get("effective_published_workspaces"))
+            if normalized_workspace in PUBLICATION_WORKSPACES:
+                allowed = bool(effective.get(normalized_workspace, False))
+            else:
+                allowed = False
+
+        reason = _safe_str(
+            _first_non_empty(
+                workspace_access.get("reason"),
+                workspace_access.get("code"),
+                "ok" if allowed else "forbidden",
+                default="forbidden",
+            ),
+            "forbidden",
+            240,
+        )
+
+        status_code = _safe_int(
+            _first_non_empty(
+                workspace_access.get("status_code"),
+                workspace_access.get("statusCode"),
+                200 if allowed else 403,
+                default=403,
+            ),
+            403,
+        )
+
+        if _safe_bool(access_view.get("auth_unavailable"), False):
+            reason = "auth_unavailable"
+            status_code = 503
+        elif _safe_bool(access_view.get("user_blocked"), False):
+            reason = "user_blocked"
+            status_code = 403
+        elif _safe_bool(access_view.get("access_blocked"), False):
+            reason = "access_blocked"
+            status_code = 403
+
+        result: Dict[str, Any] = dict(workspace_access)
+        result.update(
+            {
+                "ok": allowed,
+                "allowed": allowed,
+                "workspace": normalized_workspace,
+                "project_public_id": project_view.get("public_id", ""),
+                "projectPublicId": project_view.get("public_id", ""),
+                "can_view": allowed,
+                "canView": allowed,
+                "can_edit": _safe_bool(access_view.get("form_can_edit"), False),
+                "canEdit": _safe_bool(access_view.get("form_can_edit"), False),
+                "read_only": _safe_bool(access_view.get("read_only"), True),
+                "readOnly": _safe_bool(access_view.get("read_only"), True),
+                "public_viewer": _safe_bool(access_view.get("public_viewer"), False),
+                "publicViewer": _safe_bool(access_view.get("public_viewer"), False),
+                "access_mode": access_view.get("access_mode", "anonymous"),
+                "accessMode": access_view.get("access_mode", "anonymous"),
+                "reason": reason,
+                "code": reason,
+                "status_code": status_code,
+                "statusCode": status_code,
+            }
+        )
+
+        return result
+    except Exception:
+        return {
+            "ok": False,
+            "allowed": False,
+            "workspace": normalize_workspace(workspace, WORKSPACE_PROJECT),
+            "project_public_id": project_view.get("public_id", ""),
+            "projectPublicId": project_view.get("public_id", ""),
+            "can_view": False,
+            "canView": False,
+            "can_edit": False,
+            "canEdit": False,
+            "read_only": True,
+            "readOnly": True,
+            "public_viewer": False,
+            "publicViewer": False,
+            "access_mode": "blocked",
+            "accessMode": "blocked",
+            "reason": "context_error",
+            "code": "context_error",
+            "status_code": 500,
+            "statusCode": 500,
+        }
+
+
+# ─────────────────────────────────────────────────────────────
+# Paths/context helpers
+# ─────────────────────────────────────────────────────────────
+
+def _quote_path_value(value: Any) -> str:
+    try:
+        from urllib.parse import quote
+
+        return quote(_safe_str(value, "", 240), safe="")
+    except Exception:
+        return _safe_str(value, "", 240)
+
+
+def _project_context_path(project_public_id: str, is_new: bool) -> str:
+    try:
+        if is_new or not project_public_id or project_public_id == "new":
+            return PROJECT_CONTEXT_PATH_NEW
+
+        return PROJECT_CONTEXT_PATH_TEMPLATE.format(project_public_id=_quote_path_value(project_public_id))
+    except Exception:
+        return PROJECT_CONTEXT_PATH_NEW
+
+
+def _project_return_path(project_public_id: str, is_new: bool) -> str:
+    try:
+        if is_new or not project_public_id or project_public_id == "new":
+            return "/project=new"
+
+        return PROJECT_RETURN_PATH_TEMPLATE.format(project_public_id=_quote_path_value(project_public_id))
+    except Exception:
+        return "/project=new"
+
+
+def _build_paths(project_public_id: str, is_new: bool, show_management_sections: bool) -> Dict[str, str]:
+    try:
+        has_project = bool(project_public_id and project_public_id != "new" and not is_new)
 
         return {
-            "apiBaseUrl": api_base,
-            "browserBaseUrl": api_base,
-            "status": _join_route_path(api_base, "_status"),
-            "testConnection": _join_route_path(api_base, "_test", "connection"),
-            "placeableBlocks": _join_route_path(api_base, "placeable-blocks"),
-            "projects": _join_route_path(api_base, "projects"),
-            "project": project_base,
-            "projectBootstrap": _join_route_path(project_base, "bootstrap"),
-            "universes": _join_route_path(project_base, "universes"),
-            "universe": _join_route_path(project_base, "universes", chunk_universe_id) if chunk_universe_id else "",
-            "worlds": _join_route_path(project_base, "worlds"),
-            "world": world_base,
-            "blocks": _join_route_path(world_base, "blocks"),
-            "chunk": _join_route_path(world_base, "chunks"),
-            "chunks": _join_route_path(world_base, "chunks"),
-            "chunksBatch": _join_route_path(world_base, "chunks", "batch"),
-            "commands": _join_route_path(world_base, "commands"),
+            "createProject": "/v1/projects",
+            "create_project": "/v1/projects",
+            "updateProject": f"/v1/projects/{project_public_id}" if has_project else "",
+            "update_project": f"/v1/projects/{project_public_id}" if has_project else "",
+            "getProject": f"/v1/projects/{project_public_id}" if has_project else "",
+            "get_project": f"/v1/projects/{project_public_id}" if has_project else "",
+            "context": _project_context_path(project_public_id, is_new),
+            "returnUrl": _project_return_path(project_public_id, is_new),
+            "return_url": _project_return_path(project_public_id, is_new),
+            "workspaceAccess": f"/v1/projects/{project_public_id}/workspace-access/project" if has_project else "",
+            "workspace_access": f"/v1/projects/{project_public_id}/workspace-access/project" if has_project else "",
+            "members": f"/v1/projects/{project_public_id}/members" if has_project and show_management_sections else "",
+            "invitations": f"/v1/projects/{project_public_id}/invitations" if has_project and show_management_sections else "",
+            "publication": f"/v1/projects/{project_public_id}/publication" if has_project and show_management_sections else "",
+            "projectRoot": "/",
+            "project_root": "/",
+            "projectNew": "/project=new",
+            "project_new": "/project=new",
+            "projectOpen": f"/project={project_public_id}" if has_project else "/project=new",
+            "project_open": f"/project={project_public_id}" if has_project else "/project=new",
+        }
+    except Exception:
+        return {
+            "createProject": "/v1/projects",
+            "create_project": "/v1/projects",
+            "updateProject": "",
+            "update_project": "",
+            "getProject": "",
+            "get_project": "",
+            "context": PROJECT_CONTEXT_PATH_NEW,
+            "returnUrl": "/project=new",
+            "return_url": "/project=new",
+            "workspaceAccess": "",
+            "workspace_access": "",
+            "members": "",
+            "invitations": "",
+            "publication": "",
+            "projectRoot": "/",
+            "project_root": "/",
+            "projectNew": "/project=new",
+            "project_new": "/project=new",
+            "projectOpen": "/project=new",
+            "project_open": "/project=new",
         }
 
+
+def _request_info(request_obj: Any = None) -> Dict[str, Any]:
+    try:
+        req = request_obj if request_obj is not None else request
+
+        if req is None:
+            return {}
+
+        return {
+            "path": _safe_str(getattr(req, "path", ""), "", 2000),
+            "method": _safe_str(getattr(req, "method", ""), "", 40),
+            "url_root": _safe_str(getattr(req, "url_root", ""), "", 2000),
+            "host": _safe_str(getattr(req, "host", ""), "", 500),
+        }
     except Exception:
         return {}
 
 
-def _chunk_hint_payload(
+def _context_cache_key(
+    *,
+    project_view: Mapping[str, Any],
+    current_user_payload: Mapping[str, Any],
+    access_payload: Mapping[str, Any],
+    workspace_access_payload: Mapping[str, Any],
+    publication_payload: Mapping[str, Any],
+    is_new: bool,
+    workspace: str,
+) -> str:
+    try:
+        user_fingerprint = {
+            "id": _first_non_empty(
+                current_user_payload.get("id"),
+                current_user_payload.get("user_id"),
+                current_user_payload.get("userId"),
+                current_user_payload.get("app_user_id"),
+                current_user_payload.get("appUserId"),
+                current_user_payload.get("auth_user_id"),
+                current_user_payload.get("authUserId"),
+                default="anonymous",
+            ),
+            "authenticated": current_user_payload.get("authenticated"),
+            "persistent": current_user_payload.get("persistent"),
+            "demo": current_user_payload.get("demo_mode") or current_user_payload.get("demoMode"),
+            "blocked": current_user_payload.get("blocked") or current_user_payload.get("user_blocked"),
+        }
+
+        raw = {
+            "project_public_id": project_view.get("public_id"),
+            "project_updated_at": project_view.get("updated_at") or project_view.get("updatedAt"),
+            "project_status": project_view.get("status"),
+            "visibility": project_view.get("visibility"),
+            "is_new": is_new,
+            "workspace": workspace,
+            "user": user_fingerprint,
+            "access": access_payload,
+            "workspace_access": workspace_access_payload,
+            "publication": publication_payload,
+        }
+
+        return "project_workspace_context:" + str(abs(hash(_json_fingerprint(raw, 6000))))
+    except Exception:
+        return ""
+
+
+# ─────────────────────────────────────────────────────────────
+# Public builders
+# ─────────────────────────────────────────────────────────────
+
+def build_project_workspace_context_result(
     *,
     project: Any = None,
     project_payload: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
+    current_user: Any = None,
+    auth_context: Any = None,
+    access: Any = None,
+    workspace_access: Any = None,
+    publication: Any = None,
+    ui_flags: Any = None,
+    is_new: Any = None,
+    workspace: Any = WORKSPACE_PROJECT,
+    request_obj: Any = None,
+    extra_context: Optional[Mapping[str, Any]] = None,
+    use_cache: Optional[bool] = None,
+) -> ProjectWorkspaceContextResult:
+    warnings: list[str] = []
+    errors: list[str] = []
+
     try:
-        context = _chunk_context_from_project(project=project, project_payload=project_payload)
+        normalized_workspace = normalize_workspace(workspace, WORKSPACE_PROJECT)
 
-        chunk_project_id = _safe_str(context.get("chunk_project_id"), "", 240)
-        chunk_universe_id = _safe_str(context.get("chunk_universe_id"), "", 240)
-        chunk_world_id = _safe_str(context.get("chunk_world_id"), "", 240)
-        chunk_status = _normalize_status(context.get("chunk_status"), "pending")
-        chunk_ready = _safe_bool(context.get("chunk_ready"), False)
-        route_hints = _safe_dict(context.get("chunk_route_hints") or context.get("routeHints"))
+        project_payload_dict = _project_payload(project, project_payload)
+        resolved_is_new = _is_new_project(project_payload_dict, explicit_is_new=is_new)
+        project_view = _build_project_view(project_payload_dict, is_new=resolved_is_new)
 
-        result: Dict[str, Any] = {}
+        current_user_payload = _current_user_payload(current_user, auth_context)
+        auth_payload = _payload_from_object(auth_context) or _safe_dict(current_user_payload.get("auth"))
+        access_payload = _access_payload(project_view, access=access)
+        workspace_access_payload = _workspace_access_payload(project_view, workspace_access=workspace_access)
+        publication_payload = _publication_payload(project_view, publication=publication)
+        ui_flags_payload = _payload_from_object(ui_flags)
 
-        if chunk_project_id:
-            result["chunk_project_id"] = chunk_project_id
-            result["project_id"] = chunk_project_id
+        cache_allowed = _cache_enabled() if use_cache is None else bool(use_cache)
 
-        if chunk_universe_id:
-            result["chunk_universe_id"] = chunk_universe_id
-            result["universe_id"] = chunk_universe_id
+        cache_key = ""
+        if cache_allowed:
+            cache_key = _context_cache_key(
+                project_view=project_view,
+                current_user_payload=current_user_payload,
+                access_payload=access_payload,
+                workspace_access_payload=workspace_access_payload,
+                publication_payload=publication_payload,
+                is_new=resolved_is_new,
+                workspace=normalized_workspace,
+            )
+            cached = _cache_get(cache_key)
+            if isinstance(cached, ProjectWorkspaceContextResult):
+                return cached
+            if isinstance(cached, Mapping):
+                return ProjectWorkspaceContextResult(
+                    ok=True,
+                    code="ok_cached",
+                    message="Project workspace context loaded from cache.",
+                    context=dict(cached),
+                )
 
-        if chunk_world_id:
-            result["chunk_world_id"] = chunk_world_id
-            result["world_id"] = chunk_world_id
+        access_view = _build_access_view(
+            project_view=project_view,
+            access_payload=access_payload,
+            workspace_access_payload=workspace_access_payload,
+            current_user_payload=current_user_payload,
+            auth_payload=auth_payload,
+            is_new=resolved_is_new,
+        )
 
-        if chunk_project_id and chunk_world_id and chunk_status not in {"error", "disabled"}:
-            chunk_status = "ready"
-            chunk_ready = True
+        publication_view = _build_publication_view(
+            project_view=project_view,
+            publication_payload=publication_payload,
+            access_view=access_view,
+        )
 
-        if chunk_status:
-            result["chunk_status"] = chunk_status
+        workspace_access_view = _build_workspace_access_view(
+            workspace=normalized_workspace,
+            project_view=project_view,
+            workspace_access_payload=workspace_access_payload,
+            access_view=access_view,
+            publication_view=publication_view,
+        )
 
-        result["chunk_ready"] = "1" if chunk_ready else "0"
+        project_public_id = _safe_str(project_view.get("public_id"), "new" if resolved_is_new else "", 240)
+        show_management_sections = _safe_bool(access_view.get("show_management_sections"), False)
+        paths = _build_paths(project_public_id, resolved_is_new, show_management_sections)
 
-        if _config_bool("VECTOPLAN_EMBED_INCLUDE_CHUNK_ROUTE_HINTS", False) and route_hints:
-            route_hints_json = _json_dumps_safe(route_hints)
-            if route_hints_json:
-                result["chunk_route_hints"] = route_hints_json
+        ui_flags_view: Dict[str, Any] = dict(ui_flags_payload)
+        ui_flags_view.update(
+            {
+                "workspace": normalized_workspace,
+                "is_new": resolved_is_new,
+                "isNew": resolved_is_new,
+                "is_configured": _safe_bool(project_view.get("is_configured"), False),
+                "isConfigured": _safe_bool(project_view.get("is_configured"), False),
+
+                "authenticated": _safe_bool(access_view.get("authenticated"), False),
+                "auth_unavailable": _safe_bool(access_view.get("auth_unavailable"), False),
+                "authUnavailable": _safe_bool(access_view.get("auth_unavailable"), False),
+                "user_blocked": _safe_bool(access_view.get("user_blocked"), False),
+                "userBlocked": _safe_bool(access_view.get("user_blocked"), False),
+                "access_blocked": _safe_bool(access_view.get("access_blocked"), False),
+                "accessBlocked": _safe_bool(access_view.get("access_blocked"), False),
+
+                "demo_mode": _safe_bool(access_view.get("demo_mode"), False),
+                "demoMode": _safe_bool(access_view.get("demo_mode"), False),
+                "persistent": _safe_bool(access_view.get("persistent"), False),
+                "public_viewer": _safe_bool(access_view.get("public_viewer"), False),
+                "publicViewer": _safe_bool(access_view.get("public_viewer"), False),
+                "read_only": _safe_bool(access_view.get("read_only"), True),
+                "readOnly": _safe_bool(access_view.get("read_only"), True),
+                "access_mode": _safe_str(access_view.get("access_mode"), "anonymous", 120),
+                "accessMode": _safe_str(access_view.get("access_mode"), "anonymous", 120),
+
+                "can_view": _safe_bool(access_view.get("can_view"), False),
+                "canView": _safe_bool(access_view.get("can_view"), False),
+                "can_edit": _safe_bool(access_view.get("can_edit"), False),
+                "canEdit": _safe_bool(access_view.get("can_edit"), False),
+                "can_manage": _safe_bool(access_view.get("can_manage"), False),
+                "canManage": _safe_bool(access_view.get("can_manage"), False),
+                "can_view_settings": _safe_bool(access_view.get("can_view_settings"), False),
+                "canViewSettings": _safe_bool(access_view.get("can_view_settings"), False),
+                "can_manage_team": _safe_bool(access_view.get("can_manage_team"), False),
+                "canManageTeam": _safe_bool(access_view.get("can_manage_team"), False),
+                "can_publish": _safe_bool(access_view.get("can_publish"), False),
+                "canPublish": _safe_bool(access_view.get("can_publish"), False),
+                "can_mutate": _safe_bool(access_view.get("can_mutate"), False),
+                "canMutate": _safe_bool(access_view.get("can_mutate"), False),
+                "form_can_edit": _safe_bool(access_view.get("form_can_edit"), False),
+                "formCanEdit": _safe_bool(access_view.get("form_can_edit"), False),
+                "show_management_sections": show_management_sections,
+                "showManagementSections": show_management_sections,
+                "show_management_locked": _safe_bool(access_view.get("show_management_locked"), False),
+                "showManagementLocked": _safe_bool(access_view.get("show_management_locked"), False),
+
+                "address_mode": "single_box",
+                "addressMode": "single_box",
+                "system_references_visible": False,
+                "systemReferencesVisible": False,
+            }
+        )
+
+        project_view["access"] = access_view
+        project_view["workspace_access"] = workspace_access_view
+        project_view["workspaceAccess"] = workspace_access_view
+        project_view["publication"] = publication_view
+        project_view["ui_flags"] = ui_flags_view
+        project_view["uiFlags"] = ui_flags_view
+        project_view["read_only"] = ui_flags_view["read_only"]
+        project_view["readOnly"] = ui_flags_view["readOnly"]
+        project_view["public_viewer"] = ui_flags_view["public_viewer"]
+        project_view["publicViewer"] = ui_flags_view["publicViewer"]
+        project_view["demo_mode"] = ui_flags_view["demo_mode"]
+        project_view["demoMode"] = ui_flags_view["demoMode"]
+        project_view["access_mode"] = ui_flags_view["access_mode"]
+        project_view["accessMode"] = ui_flags_view["accessMode"]
+
+        context: Dict[str, Any] = {
+            "project": project_view,
+            "current_project": project_view,
+            "project_view": project_view,
+
+            "current_user": current_user_payload,
+            "current_user_view": current_user_payload,
+            "auth": auth_payload or current_user_payload,
+            "auth_context": auth_payload or current_user_payload,
+
+            "access": access_view,
+            "access_view": access_view,
+            "workspace_access": workspace_access_view,
+            "workspace_access_view": workspace_access_view,
+            "publication": publication_view,
+            "publication_view": publication_view,
+            "ui_flags": ui_flags_view,
+
+            "is_new": resolved_is_new,
+            "workspace": normalized_workspace,
+            "paths": paths,
+            "request_info": _request_info(request_obj),
+
+            "project_workspace_context": {
+                "ok": True,
+                "code": "ok",
+                "service": "project_workspace_context",
+                "warnings": warnings,
+                "errors": errors,
+                "cache_enabled": cache_allowed,
+                "workspace": normalized_workspace,
+                "project_public_id": project_public_id,
+            },
+        }
+
+        extra = _safe_dict(extra_context)
+        if extra:
+            context.update(extra)
+
+        result = ProjectWorkspaceContextResult(
+            ok=True,
+            code="ok",
+            message="Project workspace context built.",
+            context=context,
+            warnings=warnings,
+            errors=errors,
+        )
+
+        if cache_allowed and cache_key:
+            _cache_set(cache_key, result)
 
         return result
 
-    except Exception:
-        return {}
-
-
-# ─────────────────────────────────────────────────────────────
-# URL helpers
-# ─────────────────────────────────────────────────────────────
-
-def _request_obj_explicit(request_obj: Any = None) -> Any:
-    if request_obj is not None:
-        return request_obj
-
-    try:
-        return request
-    except Exception:
-        return None
-
-
-def _request_url_root(request_obj: Any = None) -> str:
-    try:
-        req = _request_obj_explicit(request_obj)
-
-        if req is None:
-            return ""
-
-        value = getattr(req, "url_root", "")
-        return _normalize_base_url_cached(_safe_str(value, "", 4000), "")
-
-    except Exception:
-        return ""
-
-
-def _app_public_base_url(request_obj: Any = None, prefer_request_host: Optional[bool] = None) -> str:
-    try:
-        if prefer_request_host is None:
-            prefer_request_host = _config_bool("VECTOPLAN_EMBED_PREFER_REQUEST_HOST", True)
-
-        request_root = _request_url_root(request_obj)
-
-        if prefer_request_host and request_root:
-            return request_root
-
-        configured = (
-            _config_str("VECTOPLAN_APP_PUBLIC_URL", "", 4000)
-            or _config_str("VECTOPLAN_APP_PUBLIC_BASE_URL", "", 4000)
-            or _config_str("APP_PUBLIC_URL", "", 4000)
-            or DEFAULT_APP_PUBLIC_URL
-        )
-
-        return _normalize_base_url_cached(configured, DEFAULT_APP_PUBLIC_URL)
-
-    except Exception:
-        return DEFAULT_APP_PUBLIC_URL
-
-
-def _absolute_app_url(path_or_url: str, request_obj: Any = None, prefer_request_host: Optional[bool] = None) -> str:
-    try:
-        value = _safe_str(path_or_url, "", 4000)
-
-        if not value:
-            return ""
-
-        if _is_absolute_url_cached(value):
-            return value if _is_public_browser_url_cached(value) else ""
-
-        base = _app_public_base_url(request_obj, prefer_request_host)
-
-        if not value.startswith("/"):
-            value = "/" + value
-
-        return _join_url_cached(base, value)
-
-    except Exception:
-        return ""
-
-
-def _context_path(project_public_id: str) -> str:
-    try:
-        template = _config_str("VECTOPLAN_PROJECT_CONTEXT_PATH_TEMPLATE", DEFAULT_CONTEXT_PATH_TEMPLATE, 4000)
-        return template.format(project_public_id=_safe_quote(project_public_id))
-    except Exception:
-        return DEFAULT_CONTEXT_PATH_TEMPLATE.format(project_public_id=_safe_quote(project_public_id))
-
-
-def _return_path(project_public_id: str) -> str:
-    try:
-        template = _config_str("VECTOPLAN_PROJECT_RETURN_PATH_TEMPLATE", DEFAULT_RETURN_PATH_TEMPLATE, 4000)
-        return template.format(project_public_id=_safe_quote(project_public_id))
-    except Exception:
-        return DEFAULT_RETURN_PATH_TEMPLATE.format(project_public_id=_safe_quote(project_public_id))
-
-
-def _clean_query_params(params: Mapping[str, Any]) -> Dict[str, Any]:
-    clean: Dict[str, Any] = {}
-
-    try:
-        for key, value in dict(params or {}).items():
-            key_text = _safe_str(key, "", 180)
-
-            if not key_text:
-                continue
-
-            key_lower = key_text.lower()
-
-            if key_lower in {item.lower() for item in SECRET_QUERY_KEYS}:
-                continue
-
-            if value is None:
-                continue
-
-            if isinstance(value, bool):
-                clean[key_text] = "1" if value else "0"
-                continue
-
-            if isinstance(value, (list, tuple)):
-                values = []
-                for item in value:
-                    item_text = _safe_str(item, "", MAX_QUERY_VALUE_LENGTH)
-                    if item_text:
-                        values.append(item_text)
-                if values:
-                    clean[key_text] = values
-                continue
-
-            value_text = _safe_str(value, "", MAX_QUERY_VALUE_LENGTH)
-            if value_text:
-                if _looks_like_internal_url(value_text):
-                    continue
-                clean[key_text] = value_text
-
-        return clean
-
-    except Exception:
-        return clean
-
-
-def _looks_like_internal_url(value: str) -> bool:
-    try:
-        text = _safe_str(value, "", 4000)
-        if not text:
-            return False
-
-        parsed = urlsplit(text)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            return False
-
-        host = _safe_str(parsed.hostname, "", 255).lower()
-        return host in DOCKER_INTERNAL_HOSTS
-    except Exception:
-        return False
-
-
-def _append_query_params(url: str, params: Mapping[str, Any]) -> str:
-    try:
-        target = _safe_str(url, "", 4000)
-        if not target:
-            return ""
-
-        clean = _clean_query_params(params)
-        if not clean:
-            return target
-
-        split = urlsplit(target)
-        existing = parse_qsl(split.query, keep_blank_values=True)
-
-        merged: Dict[str, Any] = {}
-
-        for key, value in existing:
-            if key:
-                merged[key] = value
-
-        for key, value in clean.items():
-            merged[key] = value
-
-        query = urlencode(merged, doseq=True)
-
-        return urlunsplit(
-            (
-                split.scheme,
-                split.netloc,
-                split.path,
-                query,
-                split.fragment,
-            )
-        )
-
-    except Exception:
-        return url
-
-
-def _join_route_path(*parts: str) -> str:
-    cleaned: list[str] = []
-
-    for part in parts:
-        text = _safe_str(part, "", 1000)
-        if not text:
-            continue
-        cleaned.append(text.strip("/"))
-
-    return "/" + "/".join(cleaned) if cleaned else "/"
-
-
-# ─────────────────────────────────────────────────────────────
-# Target config
-# ─────────────────────────────────────────────────────────────
-
-def _editor_target_config() -> WorkspaceTargetConfig:
-    cache_key = "target:editor3d"
-
-    cached = _cache_get(cache_key)
-    if isinstance(cached, WorkspaceTargetConfig):
-        return cached
-
-    warnings: list[str] = []
-
-    try:
-        enabled = _config_bool("VECTOPLAN_EDITOR_EMBED_ENABLED", True)
-
-        public_base_url = (
-            _config_str("VECTOPLAN_EDITOR_PUBLIC_URL", "", 4000)
-            or _config_str("VECTOPLAN_EDITOR_PUBLIC_BASE_URL", "", 4000)
-            or DEFAULT_EDITOR_PUBLIC_URL
-        )
-        public_base_url = _normalize_base_url_cached(public_base_url, DEFAULT_EDITOR_PUBLIC_URL)
-
-        route = (
-            _config_str("VECTOPLAN_EDITOR_EMBED_ROUTE", "", 2000)
-            or _config_str("VECTOPLAN_EDITOR_ROUTE", "", 2000)
-            or DEFAULT_EDITOR_ROUTE
-        )
-        route = _normalize_route_cached(route, DEFAULT_EDITOR_ROUTE)
-
-        if not public_base_url:
-            warnings.append("VECTOPLAN_EDITOR_PUBLIC_URL fehlt; Default wird verwendet.")
-            public_base_url = DEFAULT_EDITOR_PUBLIC_URL
-
-        if not _is_public_browser_url_cached(public_base_url):
-            enabled = False
-            warnings.append("Editor-Public-URL ist keine sichere Browser-URL.")
-
-        public_route_url = _join_url_cached(public_base_url, route)
-
-        if not public_route_url:
-            enabled = False
-            warnings.append("Editor-Public-URL konnte nicht gebaut werden.")
-
-        result = WorkspaceTargetConfig(
-            workspace=WORKSPACE_EDITOR3D,
-            service_name="vectoplan-editor",
-            enabled=enabled,
-            public_base_url=public_base_url,
-            route=route,
-            public_route_url=public_route_url,
-            source="VECTOPLAN_EDITOR_PUBLIC_URL",
-            warnings=tuple(warnings),
-        )
-
-        return _cache_set(cache_key, result)
-
     except Exception as exc:
-        _log_warning("editor target config failed: %s", exc.__class__.__name__)
+        _log_exception("build_project_workspace_context_result failed", exc)
 
-        result = WorkspaceTargetConfig(
-            workspace=WORKSPACE_EDITOR3D,
-            service_name="vectoplan-editor",
-            enabled=False,
-            public_base_url=DEFAULT_EDITOR_PUBLIC_URL,
-            route=DEFAULT_EDITOR_ROUTE,
-            public_route_url=_join_url_cached(DEFAULT_EDITOR_PUBLIC_URL, DEFAULT_EDITOR_ROUTE),
-            source="fallback_error",
-            warnings=("Editor-Konfiguration konnte nicht gelesen werden.",),
+        errors.append(f"{exc.__class__.__name__}: {exc}")
+
+        fallback_context = build_project_workspace_fallback_context(
+            code="project_workspace_context_failed",
+            message="Projekt-Workspace-Kontext konnte nicht vollständig aufgebaut werden.",
+            error=f"{exc.__class__.__name__}: {exc}",
         )
 
-        return _cache_set(cache_key, result)
-
-
-def _map_target_config() -> WorkspaceTargetConfig:
-    cache_key = "target:map"
-
-    cached = _cache_get(cache_key)
-    if isinstance(cached, WorkspaceTargetConfig):
-        return cached
-
-    warnings: list[str] = []
-
-    try:
-        enabled = _config_bool("OPENLAYER_EMBED_ENABLED", True)
-
-        public_base_url = (
-            _config_str("OPENLAYER_PUBLIC_URL", "", 4000)
-            or _config_str("OPENLAYER_PUBLIC_BASE_URL", "", 4000)
-            or DEFAULT_OPENLAYER_PUBLIC_URL
-        )
-        public_base_url = _normalize_base_url_cached(public_base_url, DEFAULT_OPENLAYER_PUBLIC_URL)
-
-        route = _config_str("OPENLAYER_ROUTE", DEFAULT_OPENLAYER_ROUTE, 2000)
-        route = _normalize_route_cached(route, DEFAULT_OPENLAYER_ROUTE)
-
-        if not _is_public_browser_url_cached(public_base_url):
-            enabled = False
-            warnings.append("OpenLayer-Public-URL ist keine sichere Browser-URL.")
-
-        public_route_url = _join_url_cached(public_base_url, route)
-
-        if not public_route_url:
-            enabled = False
-            warnings.append("OpenLayer-Public-URL konnte nicht gebaut werden.")
-
-        result = WorkspaceTargetConfig(
-            workspace=WORKSPACE_MAP,
-            service_name="vectoplan-openlayer",
-            enabled=enabled,
-            public_base_url=public_base_url,
-            route=route,
-            public_route_url=public_route_url,
-            source="OPENLAYER_PUBLIC_URL",
-            warnings=tuple(warnings),
+        return ProjectWorkspaceContextResult(
+            ok=False,
+            code="project_workspace_context_failed",
+            message="Project workspace context failed; fallback context returned.",
+            context=fallback_context,
+            warnings=warnings,
+            errors=errors,
         )
 
-        return _cache_set(cache_key, result)
 
-    except Exception as exc:
-        _log_warning("map target config failed: %s", exc.__class__.__name__)
-
-        result = WorkspaceTargetConfig(
-            workspace=WORKSPACE_MAP,
-            service_name="vectoplan-openlayer",
-            enabled=False,
-            public_base_url=DEFAULT_OPENLAYER_PUBLIC_URL,
-            route=DEFAULT_OPENLAYER_ROUTE,
-            public_route_url=_join_url_cached(DEFAULT_OPENLAYER_PUBLIC_URL, DEFAULT_OPENLAYER_ROUTE),
-            source="fallback_error",
-            warnings=("OpenLayer-Konfiguration konnte nicht gelesen werden.",),
-        )
-
-        return _cache_set(cache_key, result)
-
-
-def get_workspace_target_config(workspace: Any) -> WorkspaceTargetConfig:
-    normalized = normalize_workspace(workspace)
-
-    if normalized == WORKSPACE_EDITOR3D:
-        return _editor_target_config()
-
-    if normalized == WORKSPACE_MAP:
-        return _map_target_config()
-
-    return WorkspaceTargetConfig(
-        workspace=normalized,
-        service_name="vectoplan-app",
-        enabled=False,
-        public_base_url="",
-        route="",
-        public_route_url="",
-        source="not_external",
-        warnings=(f"Workspace {normalized!r} ist kein externer Embed-Workspace.",),
-    )
-
-
-def is_external_workspace(workspace: Any) -> bool:
-    try:
-        return normalize_workspace(workspace) in EXTERNAL_WORKSPACES
-    except Exception:
-        return False
-
-
-# ─────────────────────────────────────────────────────────────
-# Embed URL builders
-# ─────────────────────────────────────────────────────────────
-
-def _base_embed_params(
+def build_project_workspace_context(
     *,
-    workspace: str,
     project: Any = None,
     project_payload: Optional[Mapping[str, Any]] = None,
-    current_user: Optional[Mapping[str, Any]] = None,
+    current_user: Any = None,
+    auth_context: Any = None,
+    access: Any = None,
+    workspace_access: Any = None,
+    publication: Any = None,
+    ui_flags: Any = None,
+    is_new: Any = None,
+    workspace: Any = WORKSPACE_PROJECT,
     request_obj: Any = None,
-    include_context: bool = True,
-    include_return_url: bool = True,
-    include_chunk_hints: Optional[bool] = None,
-    prefer_request_host: Optional[bool] = None,
+    extra_context: Optional[Mapping[str, Any]] = None,
+    use_cache: Optional[bool] = None,
 ) -> Dict[str, Any]:
     try:
-        payload = _project_payload_from_object(project=project, project_payload=project_payload)
-        project_public_id = _project_public_id(project=project, project_payload=payload)
-        project_id = _project_internal_id(project=project, project_payload=payload)
-        conversation_id = _project_conversation_id(project=project, project_payload=payload)
-
-        demo_mode = _is_demo_mode(current_user=current_user, project_payload=payload)
-        persistent = _is_persistent_context(current_user)
-        can_edit = _can_edit_project(payload)
-        read_only = bool(not can_edit)
-
-        params: Dict[str, Any] = {
-            "embed": "1",
-            "source": "vectoplan-app",
-            "workspace": workspace,
-            "app_project_public_id": project_public_id,
-            "project_public_id": project_public_id,
-            "read_only": read_only,
-            "readonly": read_only,
-            "persistent": "1" if persistent else "0",
-        }
-
-        if conversation_id and persistent:
-            params["conversation_id"] = conversation_id
-            params["chat_id"] = conversation_id
-
-        if _config_bool("VECTOPLAN_EMBED_INCLUDE_INTERNAL_PROJECT_ID", False) and project_id:
-            params["app_project_db_id"] = project_id
-            params["app_project_id"] = project_id
-
-        if include_context and project_public_id:
-            context_path = _context_path(project_public_id)
-            params["context_url"] = _absolute_app_url(
-                context_path,
-                request_obj=request_obj,
-                prefer_request_host=prefer_request_host,
-            )
-
-        if include_return_url and project_public_id:
-            return_path = _return_path(project_public_id)
-            params["return_url"] = _absolute_app_url(
-                return_path,
-                request_obj=request_obj,
-                prefer_request_host=prefer_request_host,
-            )
-
-        app_public_url = _app_public_base_url(request_obj=request_obj, prefer_request_host=prefer_request_host)
-        if app_public_url:
-            params["app_public_url"] = app_public_url
-
-        if demo_mode:
-            params["demo_mode"] = "1"
-            params["ephemeral"] = "1"
-
-        if include_chunk_hints is None:
-            include_chunk_hints = _config_bool("VECTOPLAN_EMBED_INCLUDE_CHUNK_QUERY_PARAMS", True)
-
-        if include_chunk_hints:
-            params.update(_chunk_hint_payload(project=project, project_payload=payload))
-
-        return _clean_query_params(params)
-
-    except Exception:
-        return {}
-
-
-def build_workspace_embed_result(
-    workspace: Any,
-    *,
-    project: Any = None,
-    project_payload: Optional[Mapping[str, Any]] = None,
-    current_user: Optional[Mapping[str, Any]] = None,
-    request_obj: Any = None,
-    extra_params: Optional[Mapping[str, Any]] = None,
-    include_context: bool = True,
-    include_return_url: bool = True,
-    include_chunk_hints: Optional[bool] = None,
-    prefer_request_host: Optional[bool] = None,
-) -> WorkspaceEmbedResult:
-    normalized_workspace = normalize_workspace(workspace)
-
-    try:
-        current_user_payload = _current_user_payload(current_user)
-
-        if _is_blocked_context(current_user_payload):
-            return WorkspaceEmbedResult(
-                ok=False,
-                workspace=normalized_workspace,
-                code="auth_blocked",
-                message="Der Zugriff ist gesperrt.",
-                error=_blocked_reason(current_user_payload),
-            )
-
-        if normalized_workspace in FORBIDDEN_EXTERNAL_WORKSPACES:
-            return WorkspaceEmbedResult(
-                ok=False,
-                workspace=normalized_workspace,
-                code="workspace_forbidden",
-                message="Dieser Workspace darf nicht extern eingebettet werden.",
-                error="forbidden_workspace",
-            )
-
-        if normalized_workspace not in EXTERNAL_WORKSPACES:
-            return WorkspaceEmbedResult(
-                ok=False,
-                workspace=normalized_workspace,
-                code="workspace_not_external",
-                message="Dieser Workspace wird nicht über einen externen Embed-Service geladen.",
-                error="workspace_not_external",
-            )
-
-        target = get_workspace_target_config(normalized_workspace)
-
-        payload = _project_payload_from_object(project=project, project_payload=project_payload)
-        project_public_id = _project_public_id(project=project, project_payload=payload)
-
-        if _is_new_project_id(project_public_id):
-            return WorkspaceEmbedResult(
-                ok=False,
-                workspace=normalized_workspace,
-                code="project_public_id_missing",
-                message="Für externe Workspaces muss das Projekt zuerst gespeichert sein.",
-                project_public_id=project_public_id,
-                app_project_public_id=project_public_id,
-                warnings=list(target.warnings),
-                error="project_public_id_missing",
-            )
-
-        if not target.enabled:
-            return WorkspaceEmbedResult(
-                ok=False,
-                workspace=normalized_workspace,
-                code="embed_disabled",
-                message=f"Embed für Workspace {normalized_workspace!r} ist deaktiviert.",
-                project_public_id=project_public_id,
-                app_project_public_id=project_public_id,
-                public_base_url=target.public_base_url,
-                route=target.route,
-                target_url=target.public_route_url,
-                warnings=list(target.warnings),
-                error="embed_disabled",
-            )
-
-        if not target.public_route_url:
-            return WorkspaceEmbedResult(
-                ok=False,
-                workspace=normalized_workspace,
-                code="target_url_missing",
-                message="Public-Embed-Ziel konnte nicht gebaut werden.",
-                project_public_id=project_public_id,
-                app_project_public_id=project_public_id,
-                public_base_url=target.public_base_url,
-                route=target.route,
-                warnings=list(target.warnings),
-                error="target_url_missing",
-            )
-
-        params = _base_embed_params(
-            workspace=normalized_workspace,
+        result = build_project_workspace_context_result(
             project=project,
-            project_payload=payload,
-            current_user=current_user_payload,
+            project_payload=project_payload,
+            current_user=current_user,
+            auth_context=auth_context,
+            access=access,
+            workspace_access=workspace_access,
+            publication=publication,
+            ui_flags=ui_flags,
+            is_new=is_new,
+            workspace=workspace,
             request_obj=request_obj,
-            include_context=include_context,
-            include_return_url=include_return_url,
-            include_chunk_hints=include_chunk_hints,
-            prefer_request_host=prefer_request_host,
+            extra_context=extra_context,
+            use_cache=use_cache,
         )
-
-        extra = _clean_query_params(extra_params or {})
-        params.update(extra)
-
-        url = _append_query_params(target.public_route_url, params)
-
-        return WorkspaceEmbedResult(
-            ok=bool(url),
-            workspace=normalized_workspace,
-            url=url,
-            target_url=target.public_route_url,
-            public_base_url=target.public_base_url,
-            route=target.route,
-            code="ok" if url else "url_build_failed",
-            message="Embed-URL wurde gebaut." if url else "Embed-URL konnte nicht gebaut werden.",
-            project_public_id=project_public_id,
-            app_project_public_id=project_public_id,
-            params=params,
-            warnings=list(target.warnings),
-            error=None if url else "url_build_failed",
-            uses_public_url=True,
-        )
-
+        return dict(result.context or {})
     except Exception as exc:
-        _log_exception("build_workspace_embed_result failed", exc)
-
-        return WorkspaceEmbedResult(
-            ok=False,
-            workspace=normalized_workspace,
-            code="embed_url_build_exception",
-            message="Embed-URL konnte wegen eines internen Fehlers nicht gebaut werden.",
+        _log_exception("build_project_workspace_context failed", exc)
+        return build_project_workspace_fallback_context(
+            code="project_workspace_context_exception",
+            message="Projekt-Workspace-Kontext konnte nicht aufgebaut werden.",
             error=f"{exc.__class__.__name__}: {exc}",
         )
 
 
-def build_workspace_embed_url(
-    workspace: Any,
+def build_project_workspace_fallback_context(
     *,
-    project: Any = None,
-    project_payload: Optional[Mapping[str, Any]] = None,
-    current_user: Optional[Mapping[str, Any]] = None,
-    request_obj: Any = None,
-    extra_params: Optional[Mapping[str, Any]] = None,
-    include_context: bool = True,
-    include_return_url: bool = True,
-    include_chunk_hints: Optional[bool] = None,
-    prefer_request_host: Optional[bool] = None,
-    fallback: str = "",
-) -> str:
+    code: str = "project_workspace_context_fallback",
+    message: str = "Projekt-Workspace-Kontext wurde mit Fallback-Werten aufgebaut.",
+    error: str = "",
+) -> Dict[str, Any]:
     try:
-        result = build_workspace_embed_result(
-            workspace,
-            project=project,
-            project_payload=project_payload,
-            current_user=current_user,
-            request_obj=request_obj,
-            extra_params=extra_params,
-            include_context=include_context,
-            include_return_url=include_return_url,
-            include_chunk_hints=include_chunk_hints,
-            prefer_request_host=prefer_request_host,
-        )
-        return result.url if result.ok else fallback
-    except Exception:
-        return fallback
+        access_view = {
+            "role": "",
+            "permissions": {},
+            "authenticated": False,
+            "auth_unavailable": False,
+            "authUnavailable": False,
+            "user_blocked": False,
+            "userBlocked": False,
+            "access_blocked": True,
+            "accessBlocked": True,
+            "demo_mode": False,
+            "demoMode": False,
+            "persistent": False,
+            "public_viewer": False,
+            "publicViewer": False,
+            "is_public_viewer": False,
+            "isPublicViewer": False,
+            "access_mode": "blocked",
+            "accessMode": "blocked",
+            "read_only": True,
+            "readOnly": True,
+            "readonly": True,
+            "can_view": False,
+            "canView": False,
+            "can_edit": False,
+            "canEdit": False,
+            "can_manage": False,
+            "canManage": False,
+            "can_view_settings": False,
+            "canViewSettings": False,
+            "can_manage_team": False,
+            "canManageTeam": False,
+            "can_publish": False,
+            "canPublish": False,
+            "can_mutate": False,
+            "canMutate": False,
+            "form_can_edit": False,
+            "formCanEdit": False,
+            "show_management_sections": False,
+            "showManagementSections": False,
+            "show_management_locked": True,
+            "showManagementLocked": True,
+        }
 
+        publication_view = {
+            "visibility": DEFAULT_VISIBILITY,
+            "publication_enabled": False,
+            "publicationEnabled": False,
+            "published_workspaces": {workspace: False for workspace in PUBLICATION_WORKSPACES},
+            "publishedWorkspaces": {workspace: False for workspace in PUBLICATION_WORKSPACES},
+            "effective_published_workspaces": {workspace: False for workspace in PUBLICATION_WORKSPACES},
+            "effectivePublishedWorkspaces": {workspace: False for workspace in PUBLICATION_WORKSPACES},
+            "require_auth": False,
+            "requireAuth": False,
+            "require_project_permission": False,
+            "requireProjectPermission": False,
+            "can_publish": False,
+            "canPublish": False,
+            "read_only": True,
+            "readOnly": True,
+        }
 
-def build_editor3d_embed_result(
-    *,
-    project: Any = None,
-    project_payload: Optional[Mapping[str, Any]] = None,
-    current_user: Optional[Mapping[str, Any]] = None,
-    request_obj: Any = None,
-    extra_params: Optional[Mapping[str, Any]] = None,
-    include_context: bool = True,
-    include_return_url: bool = True,
-    include_chunk_hints: Optional[bool] = None,
-    prefer_request_host: Optional[bool] = None,
-) -> WorkspaceEmbedResult:
-    return build_workspace_embed_result(
-        WORKSPACE_EDITOR3D,
-        project=project,
-        project_payload=project_payload,
-        current_user=current_user,
-        request_obj=request_obj,
-        extra_params=extra_params,
-        include_context=include_context,
-        include_return_url=include_return_url,
-        include_chunk_hints=include_chunk_hints,
-        prefer_request_host=prefer_request_host,
-    )
+        workspace_access_view = {
+            "ok": False,
+            "allowed": False,
+            "workspace": WORKSPACE_PROJECT,
+            "project_public_id": "new",
+            "projectPublicId": "new",
+            "can_view": False,
+            "canView": False,
+            "can_edit": False,
+            "canEdit": False,
+            "read_only": True,
+            "readOnly": True,
+            "public_viewer": False,
+            "publicViewer": False,
+            "access_mode": "blocked",
+            "accessMode": "blocked",
+            "reason": code,
+            "code": code,
+            "status_code": 500,
+            "statusCode": 500,
+        }
 
+        ui_flags = {
+            "workspace": WORKSPACE_PROJECT,
+            "is_new": True,
+            "isNew": True,
+            "is_configured": False,
+            "isConfigured": False,
+            "authenticated": False,
+            "auth_unavailable": False,
+            "authUnavailable": False,
+            "user_blocked": False,
+            "userBlocked": False,
+            "access_blocked": True,
+            "accessBlocked": True,
+            "demo_mode": False,
+            "demoMode": False,
+            "persistent": False,
+            "public_viewer": False,
+            "publicViewer": False,
+            "read_only": True,
+            "readOnly": True,
+            "access_mode": "blocked",
+            "accessMode": "blocked",
+            "can_view": False,
+            "canView": False,
+            "can_edit": False,
+            "canEdit": False,
+            "can_manage": False,
+            "canManage": False,
+            "can_view_settings": False,
+            "canViewSettings": False,
+            "can_manage_team": False,
+            "canManageTeam": False,
+            "can_publish": False,
+            "canPublish": False,
+            "can_mutate": False,
+            "canMutate": False,
+            "form_can_edit": False,
+            "formCanEdit": False,
+            "show_management_sections": False,
+            "showManagementSections": False,
+            "show_management_locked": True,
+            "showManagementLocked": True,
+            "address_mode": "single_box",
+            "addressMode": "single_box",
+            "system_references_visible": False,
+            "systemReferencesVisible": False,
+        }
 
-def build_editor3d_embed_url(
-    *,
-    project: Any = None,
-    project_payload: Optional[Mapping[str, Any]] = None,
-    current_user: Optional[Mapping[str, Any]] = None,
-    request_obj: Any = None,
-    extra_params: Optional[Mapping[str, Any]] = None,
-    include_context: bool = True,
-    include_return_url: bool = True,
-    include_chunk_hints: Optional[bool] = None,
-    prefer_request_host: Optional[bool] = None,
-    fallback: str = "",
-) -> str:
-    return build_workspace_embed_url(
-        WORKSPACE_EDITOR3D,
-        project=project,
-        project_payload=project_payload,
-        current_user=current_user,
-        request_obj=request_obj,
-        extra_params=extra_params,
-        include_context=include_context,
-        include_return_url=include_return_url,
-        include_chunk_hints=include_chunk_hints,
-        prefer_request_host=prefer_request_host,
-        fallback=fallback,
-    )
-
-
-def build_map_embed_result(
-    *,
-    project: Any = None,
-    project_payload: Optional[Mapping[str, Any]] = None,
-    current_user: Optional[Mapping[str, Any]] = None,
-    request_obj: Any = None,
-    extra_params: Optional[Mapping[str, Any]] = None,
-    include_context: bool = True,
-    include_return_url: bool = True,
-    prefer_request_host: Optional[bool] = None,
-) -> WorkspaceEmbedResult:
-    return build_workspace_embed_result(
-        WORKSPACE_MAP,
-        project=project,
-        project_payload=project_payload,
-        current_user=current_user,
-        request_obj=request_obj,
-        extra_params=extra_params,
-        include_context=include_context,
-        include_return_url=include_return_url,
-        include_chunk_hints=False,
-        prefer_request_host=prefer_request_host,
-    )
-
-
-# ─────────────────────────────────────────────────────────────
-# Status / diagnostics
-# ─────────────────────────────────────────────────────────────
-
-def get_workspace_embed_status() -> Dict[str, Any]:
-    try:
-        editor = get_workspace_target_config(WORKSPACE_EDITOR3D)
-        map_target = get_workspace_target_config(WORKSPACE_MAP)
+        project_view = {
+            "id": "",
+            "project_id": "",
+            "projectId": "",
+            "public_id": "new",
+            "publicId": "new",
+            "project_public_id": "new",
+            "projectPublicId": "new",
+            "name": "",
+            "title": "",
+            "display_name": "Neues Projekt",
+            "displayName": "Neues Projekt",
+            "description": "",
+            "address_text": "",
+            "addressText": "",
+            "address": {"text": "", "address_text": "", "addressText": ""},
+            "visibility": DEFAULT_VISIBILITY,
+            "is_public": False,
+            "isPublic": False,
+            "setup_status": DEFAULT_SETUP_STATUS,
+            "setupStatus": DEFAULT_SETUP_STATUS,
+            "is_configured": False,
+            "isConfigured": False,
+            "is_new": True,
+            "isNew": True,
+            "access": access_view,
+            "workspace_access": workspace_access_view,
+            "workspaceAccess": workspace_access_view,
+            "publication": publication_view,
+            "ui_flags": ui_flags,
+            "uiFlags": ui_flags,
+            "read_only": True,
+            "readOnly": True,
+            "public_viewer": False,
+            "publicViewer": False,
+            "demo_mode": False,
+            "demoMode": False,
+            "access_mode": "blocked",
+            "accessMode": "blocked",
+        }
 
         return {
-            "ok": True,
-            "service": "workspace_embed_service",
-            "phase": "vectoplan-auth-safe-embed",
-            "cache": {
-                "module_cache_keys": sorted(_MODULE_CACHE.keys()),
-                "ttl_seconds": _cache_max_age_seconds(),
-                "max_items": _cache_max_items(),
+            "project": project_view,
+            "current_project": project_view,
+            "project_view": project_view,
+            "current_user": {},
+            "current_user_view": {},
+            "auth": {},
+            "auth_context": {},
+            "access": access_view,
+            "access_view": access_view,
+            "workspace_access": workspace_access_view,
+            "workspace_access_view": workspace_access_view,
+            "publication": publication_view,
+            "publication_view": publication_view,
+            "ui_flags": ui_flags,
+            "is_new": True,
+            "workspace": WORKSPACE_PROJECT,
+            "paths": _build_paths("new", True, False),
+            "request_info": {},
+            "project_workspace_context": {
+                "ok": False,
+                "code": code,
+                "service": "project_workspace_context",
+                "message": message,
+                "error": error,
+                "warnings": [],
+                "errors": [error] if error else [],
+                "cache_enabled": False,
+                "workspace": WORKSPACE_PROJECT,
+                "project_public_id": "new",
             },
-            "targets": {
-                WORKSPACE_EDITOR3D: editor.to_dict(),
-                WORKSPACE_MAP: map_target.to_dict(),
-            },
-            "external_workspaces": sorted(EXTERNAL_WORKSPACES),
-            "forbidden_external_workspaces": sorted(FORBIDDEN_EXTERNAL_WORKSPACES),
-            "rules": {
-                "browser_uses_public_url": True,
-                "internal_urls_exposed": False,
-                "tokens_exposed": False,
-                "auth_identity_exposed": False,
-                "blocked_gets_embed_url": False,
-                "demo_is_ephemeral": True,
-                "admin_is_never_external_embed": True,
-                "editor_project_id_is_chunk_project_id": True,
-                "editor_world_id_is_chunk_world_id": True,
-                "chunk_ids_force_ready_unless_error_or_disabled": True,
+        }
+    except Exception:
+        return {
+            "project": {},
+            "current_project": {},
+            "project_view": {},
+            "current_user": {},
+            "current_user_view": {},
+            "auth": {},
+            "auth_context": {},
+            "access": {},
+            "access_view": {},
+            "workspace_access": {},
+            "workspace_access_view": {},
+            "publication": {},
+            "publication_view": {},
+            "ui_flags": {},
+            "is_new": True,
+            "workspace": WORKSPACE_PROJECT,
+            "paths": {},
+            "request_info": {},
+            "project_workspace_context": {
+                "ok": False,
+                "code": "fatal_fallback_failed",
+                "service": "project_workspace_context",
             },
         }
 
+
+def get_project_workspace_context_status() -> Dict[str, Any]:
+    try:
+        return {
+            "ok": True,
+            "service": "project_workspace_context",
+            "phase": "template-context-normalization",
+            "cache": {
+                "enabled": _cache_enabled(),
+                "ttl_seconds": _cache_ttl_seconds(),
+                "max_items": _cache_max_items(),
+                "module_cache_keys": sorted(_MODULE_CACHE.keys()),
+                "module_cache_size": len(_MODULE_CACHE),
+            },
+            "rules": {
+                "template_receives_normalized_context": True,
+                "public_viewer_forces_read_only": True,
+                "demo_disables_management_sections": True,
+                "auth_unavailable_disables_mutations": True,
+                "blocked_user_disables_mutations": True,
+                "team_publication_only_for_management_context": True,
+                "snake_and_camel_aliases": True,
+                "fallback_context_on_error": True,
+            },
+            "publication_workspaces": list(PUBLICATION_WORKSPACES),
+            "never_public_workspaces": list(NEVER_PUBLIC_WORKSPACES),
+        }
     except Exception as exc:
         return {
             "ok": False,
-            "service": "workspace_embed_service",
+            "service": "project_workspace_context",
             "error": f"{exc.__class__.__name__}: {exc}",
         }
 
 
-# Compatibility aliases.
-build_3d_embed_result = build_editor3d_embed_result
-build_3d_embed_url = build_editor3d_embed_url
-build_editor_embed_result = build_editor3d_embed_result
-build_editor_embed_url = build_editor3d_embed_url
-
-
 __all__ = [
     "WORKSPACE_PROJECT",
-    "WORKSPACE_MAP",
-    "WORKSPACE_EDITOR3D",
-    "WORKSPACE_CAD2D",
-    "WORKSPACE_LV",
-    "WORKSPACE_VERSIONS",
-    "WORKSPACE_ADMIN",
-    "WorkspaceTargetConfig",
-    "WorkspaceEmbedResult",
+    "ProjectWorkspaceContextResult",
+    "build_project_workspace_context",
+    "build_project_workspace_context_result",
+    "build_project_workspace_fallback_context",
+    "clear_project_workspace_context_cache",
+    "get_project_workspace_context_status",
+    "normalize_visibility",
+    "normalize_role",
+    "normalize_access_mode",
+    "normalize_setup_status",
     "normalize_workspace",
-    "clear_workspace_embed_cache",
-    "get_workspace_target_config",
-    "get_workspace_embed_status",
-    "is_external_workspace",
-    "build_workspace_embed_result",
-    "build_workspace_embed_url",
-    "build_editor3d_embed_result",
-    "build_editor3d_embed_url",
-    "build_3d_embed_result",
-    "build_3d_embed_url",
-    "build_editor_embed_result",
-    "build_editor_embed_url",
-    "build_map_embed_result",
 ]

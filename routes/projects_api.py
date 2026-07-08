@@ -1101,6 +1101,329 @@ def _demo_publication_payload(project: Any) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────
+# Publication request/response helpers
+# ─────────────────────────────────────────────────────────────
+
+PUBLICATION_ROUTE_WORKSPACES = (
+    "project",
+    "map",
+    "editor3d",
+    "cad2d",
+    "lv",
+    "versions",
+)
+
+NEVER_PUBLIC_ROUTE_WORKSPACES = {
+    "admin",
+    "team",
+    "settings",
+    "permissions",
+    "system",
+    "system_refs",
+}
+
+PUBLICATION_VISIBILITY_ALIASES = {
+    "private": "private",
+    "privat": "private",
+    "closed": "private",
+    "internal": "private",
+    "intern": "private",
+    "members": "private",
+    "member": "private",
+    "shared": "private",
+    "unlisted": "unlisted",
+    "not_listed": "unlisted",
+    "notlisted": "unlisted",
+    "hidden_link": "unlisted",
+    "link": "unlisted",
+    "link_shared": "unlisted",
+    "share_link": "unlisted",
+    "nicht_gelistet": "unlisted",
+    "public": "public",
+    "open": "public",
+    "listed": "public",
+    "öffentlich": "public",
+    "oeffentlich": "public",
+}
+
+PUBLICATION_WORKSPACE_ALIASES = {
+    "project": "project",
+    "projekt": "project",
+    "project_info": "project",
+    "projectinfo": "project",
+    "info": "project",
+    "overview": "project",
+    "details": "project",
+    "map": "map",
+    "maps": "map",
+    "karte": "map",
+    "openlayer": "map",
+    "openlayers": "map",
+    "gis": "map",
+    "3d": "editor3d",
+    "editor": "editor3d",
+    "editor3d": "editor3d",
+    "editor_3d": "editor3d",
+    "viewer": "editor3d",
+    "viewer3d": "editor3d",
+    "viewer_3d": "editor3d",
+    "world": "editor3d",
+    "2d": "cad2d",
+    "cad": "cad2d",
+    "cad2d": "cad2d",
+    "cad_2d": "cad2d",
+    "plan": "cad2d",
+    "plan2d": "cad2d",
+    "lv": "lv",
+    "boq": "lv",
+    "leistungsverzeichnis": "lv",
+    "versions": "versions",
+    "version": "versions",
+    "versionen": "versions",
+    "history": "versions",
+    "snapshots": "versions",
+    "admin": "admin",
+    "team": "team",
+    "settings": "settings",
+    "permissions": "permissions",
+    "system": "system",
+    "system_refs": "system_refs",
+}
+
+
+def _normalize_publication_visibility_for_route(value: Any, default: str = "private") -> str:
+    try:
+        text = _safe_str(value, default, 80).strip().lower().replace("-", "_").replace(" ", "_")
+        return PUBLICATION_VISIBILITY_ALIASES.get(text, default)
+    except Exception:
+        return default
+
+
+def _normalize_publication_workspace_for_route(value: Any, default: str = "") -> str:
+    try:
+        if callable(normalize_workspace_key):
+            try:
+                normalized = normalize_workspace_key(value)
+                if normalized:
+                    return _safe_str(normalized, default, 80)
+            except Exception:
+                pass
+
+        text = _safe_str(value, default, 120).strip().lower().replace("-", "_").replace(" ", "_")
+        if not text:
+            return default
+        return PUBLICATION_WORKSPACE_ALIASES.get(text, default)
+    except Exception:
+        return default
+
+
+def _normalize_publication_workspace_map(value: Any, *, existing: Optional[Mapping[str, Any]] = None) -> Dict[str, bool]:
+    result = {key: False for key in PUBLICATION_ROUTE_WORKSPACES}
+
+    try:
+        existing_dict = _safe_dict(existing)
+        for key in PUBLICATION_ROUTE_WORKSPACES:
+            if key in existing_dict:
+                result[key] = _safe_bool(existing_dict.get(key), False)
+
+        if value is None:
+            return result
+
+        if isinstance(value, Mapping):
+            for raw_key, raw_value in value.items():
+                key = _normalize_publication_workspace_for_route(raw_key)
+                if key in PUBLICATION_ROUTE_WORKSPACES:
+                    result[key] = _safe_bool(raw_value, False)
+            return result
+
+        items = []
+        if isinstance(value, str):
+            parts = value.replace(";", ",").replace("|", ",").split(",")
+            items = [item.strip() for item in parts if item.strip()]
+        else:
+            items = _safe_list(value)
+
+        explicit_list_result = {key: False for key in PUBLICATION_ROUTE_WORKSPACES}
+        has_explicit_item = False
+
+        for item in items:
+            item_payload = _safe_dict(item)
+            if item_payload:
+                raw_key = (
+                    item_payload.get("key")
+                    or item_payload.get("workspace")
+                    or item_payload.get("name")
+                    or item_payload.get("id")
+                )
+                key = _normalize_publication_workspace_for_route(raw_key)
+                if key in PUBLICATION_ROUTE_WORKSPACES:
+                    has_explicit_item = True
+                    explicit_list_result[key] = _safe_bool(
+                        item_payload.get("published")
+                        if "published" in item_payload
+                        else item_payload.get("enabled")
+                        if "enabled" in item_payload
+                        else item_payload.get("value")
+                        if "value" in item_payload
+                        else True,
+                        True,
+                    )
+                continue
+
+            key = _normalize_publication_workspace_for_route(item)
+            if key in PUBLICATION_ROUTE_WORKSPACES:
+                has_explicit_item = True
+                explicit_list_result[key] = True
+
+        return explicit_list_result if has_explicit_item else result
+
+    except Exception:
+        return result
+
+
+def _extract_publication_payload_root(data: Mapping[str, Any]) -> Dict[str, Any]:
+    try:
+        payload = _safe_dict(data)
+        nested = _safe_dict(payload.get("publication"))
+
+        if not nested:
+            return payload
+
+        merged = dict(nested)
+        for key, value in payload.items():
+            if key == "publication":
+                continue
+            merged[key] = value
+        return merged
+    except Exception:
+        return _safe_dict(data)
+
+
+def _normalize_publication_update_payload(data: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Normalisiert Frontend-Varianten für PATCH/PUT /publication.
+
+    Akzeptiert:
+    - {visibility, published_workspaces, require_auth, require_project_permission}
+    - {publication: {...}}
+    - {workspaces: [{key, published}]}
+    - {workspaces: ["project", "map", "editor3d"]}
+    - camelCase Varianten aus JS.
+    """
+    try:
+        payload = _extract_publication_payload_root(data)
+
+        visibility_raw = (
+            payload.get("visibility")
+            or payload.get("project_visibility")
+            or payload.get("projectVisibility")
+            or payload.get("mode")
+        )
+        visibility = _normalize_publication_visibility_for_route(visibility_raw, default="private")
+
+        published_raw = (
+            payload.get("published_workspaces")
+            if "published_workspaces" in payload
+            else payload.get("publishedWorkspaces")
+            if "publishedWorkspaces" in payload
+            else payload.get("workspaces")
+            if "workspaces" in payload
+            else payload.get("tabs")
+            if "tabs" in payload
+            else payload.get("published_tabs")
+            if "published_tabs" in payload
+            else payload.get("publishedTabs")
+            if "publishedTabs" in payload
+            else None
+        )
+
+        workspace_candidates = {}
+        for key in PUBLICATION_ROUTE_WORKSPACES:
+            if key in payload:
+                workspace_candidates[key] = payload.get(key)
+
+        published_workspaces = _normalize_publication_workspace_map(published_raw)
+        if workspace_candidates:
+            published_workspaces.update(_normalize_publication_workspace_map(workspace_candidates, existing=published_workspaces))
+
+        require_auth_raw = payload.get("require_auth") if "require_auth" in payload else payload.get("requireAuth")
+        require_permission_raw = (
+            payload.get("require_project_permission")
+            if "require_project_permission" in payload
+            else payload.get("requireProjectPermission")
+        )
+
+        if visibility == "private":
+            require_auth = True
+            require_project_permission = True
+        else:
+            require_auth = _safe_bool(require_auth_raw, False)
+            require_project_permission = _safe_bool(require_permission_raw, False)
+
+        normalized = {
+            "visibility": visibility,
+            "published_workspaces": published_workspaces,
+            "publishedWorkspaces": published_workspaces,
+            "require_auth": require_auth,
+            "requireAuth": require_auth,
+            "require_project_permission": require_project_permission,
+            "requireProjectPermission": require_project_permission,
+        }
+
+        if payload.get("reason"):
+            normalized["reason"] = _safe_str(payload.get("reason"), "", 500)
+
+        metadata = _safe_dict(payload.get("metadata") or payload.get("meta"))
+        if metadata:
+            normalized["metadata"] = metadata
+
+        return normalized
+    except Exception:
+        return {
+            "visibility": "private",
+            "published_workspaces": {key: False for key in PUBLICATION_ROUTE_WORKSPACES},
+            "publishedWorkspaces": {key: False for key in PUBLICATION_ROUTE_WORKSPACES},
+            "require_auth": True,
+            "requireAuth": True,
+            "require_project_permission": True,
+            "requireProjectPermission": True,
+        }
+
+
+def _publication_response(
+    payload: Mapping[str, Any],
+    *,
+    project: Any = None,
+    default_status: int = 200,
+    no_store: bool = True,
+):
+    try:
+        body = _safe_dict(payload)
+        status = _safe_int(body.get("status_code"), default_status)
+        if status <= 0:
+            status = default_status
+
+        if project is not None:
+            body.setdefault("project_id", getattr(project, "id", None))
+            body.setdefault("project_public_id", getattr(project, "public_id", None))
+            body.setdefault("public_id", getattr(project, "public_id", None))
+
+        body.setdefault("ok", status < 400)
+        body.setdefault("status_code", status)
+
+        publication_payload = _safe_dict(body.get("publication"))
+        if publication_payload:
+            body.setdefault("visibility", publication_payload.get("visibility"))
+            body.setdefault("published_workspaces", publication_payload.get("published_workspaces") or publication_payload.get("publishedWorkspaces"))
+            body.setdefault("effective_published_workspaces", publication_payload.get("effective_published_workspaces") or publication_payload.get("effectivePublishedWorkspaces"))
+
+        return _json_response(body, status, no_store=no_store)
+    except Exception as exc:
+        return _exception_response("_publication_response failed", exc, code="publication_response_failed")
+
+
+
+# ─────────────────────────────────────────────────────────────
 # Response helpers
 # ─────────────────────────────────────────────────────────────
 
@@ -2185,32 +2508,46 @@ def project_publication_get(project_id: str):
         if not callable(get_project_publication):
             return _json_error("project publication service unavailable", 503, code="publication_service_unavailable")
 
+        if not callable(resolve_project):
+            return _json_error("project service unavailable", 503, code="project_service_unavailable")
+
         project = resolve_project(project_id)
 
         if project is None:
             return _json_error("project not found", 404, code="project_not_found")
 
         user_id = _current_user_id_optional()
+        public_request = not bool(user_id)
 
         if _project_is_demo(project):
-            _require_project_permission_checked(project, PERMISSION_VIEW, user_id, allow_public_view=False)
+            try:
+                _require_project_permission_checked(project, PERMISSION_VIEW, user_id, allow_public_view=False)
+            except PermissionDenied as exc:
+                return _permission_error_response(exc)
             return _json_response(_demo_publication_payload(project), 200, no_store=True)
 
         include_private_requested = _request_bool("include_private", False)
-
         include_private = False
-        if include_private_requested and user_id and callable(can_manage_project) and can_manage_project(project, user_id):
-            include_private = True
+
+        if include_private_requested and user_id and callable(can_manage_project):
+            try:
+                include_private = bool(can_manage_project(project, user_id))
+            except Exception:
+                include_private = False
 
         result = get_project_publication(
             project,
             actor_user_id=user_id,
             include_private=include_private,
-            for_public=not bool(user_id),
+            for_public=public_request,
             use_cache=False,
         )
 
-        return _service_dict_response(result, default_status=200)
+        result_payload = _safe_dict(result)
+        result_payload.setdefault("public_request", public_request)
+        result_payload.setdefault("include_private", include_private)
+
+        return _publication_response(result_payload, project=project, default_status=200, no_store=True)
 
     except PermissionDenied as exc:
         return _permission_error_response(exc)
@@ -2230,6 +2567,9 @@ def project_publication_update(project_id: str):
         if not callable(update_project_publication):
             return _json_error("project publication service unavailable", 503, code="publication_service_unavailable")
 
+        if not callable(resolve_project):
+            return _json_error("project service unavailable", 503, code="project_service_unavailable")
+
         project = resolve_project(project_id)
 
         if project is None:
@@ -2240,7 +2580,8 @@ def project_publication_update(project_id: str):
         user_id = _current_user_id_optional()
         _require_project_permission_checked(project, PERMISSION_MANAGE, user_id, allow_public_view=False)
 
-        data = _request_json({})
+        raw_data = _request_json({})
+        data = _normalize_publication_update_payload(raw_data)
 
         result = update_project_publication(
             project,
@@ -2249,7 +2590,11 @@ def project_publication_update(project_id: str):
             commit=True,
         )
 
-        return _service_dict_response(result, default_status=200)
+        result_payload = _safe_dict(result)
+        result_payload.setdefault("request", data)
+        result_payload.setdefault("raw_request_keys", sorted([_safe_str(key, "", 120) for key in raw_data.keys()]) if isinstance(raw_data, dict) else [])
+
+        return _publication_response(result_payload, project=project, default_status=200, no_store=True)
 
     except PermissionDenied as exc:
         return _permission_error_response(exc)
@@ -2269,22 +2614,68 @@ def project_workspace_access_get(project_id: str, workspace: str):
         if not callable(can_access_project_workspace):
             return _json_error("project publication service unavailable", 503, code="publication_service_unavailable")
 
+        if not callable(resolve_project):
+            return _json_error("project service unavailable", 503, code="project_service_unavailable")
+
         user_id = _current_user_id_optional()
         public_request = _request_bool("public", False) or user_id is None
-        workspace_key = normalize_workspace_key(workspace) if callable(normalize_workspace_key) else workspace
+        workspace_key = _normalize_publication_workspace_for_route(workspace, default=_safe_str(workspace, "", 80))
+
+        if workspace_key in NEVER_PUBLIC_ROUTE_WORKSPACES:
+            project = resolve_project(project_id)
+            if project is None:
+                return _json_error("project not found", 404, code="project_not_found")
+
+            if user_id and callable(can_manage_project):
+                try:
+                    if can_manage_project(project, user_id) and not public_request:
+                        return _json_response(
+                            {
+                                "ok": True,
+                                "allowed": True,
+                                "project_id": getattr(project, "id", None),
+                                "public_id": getattr(project, "public_id", None),
+                                "project_public_id": getattr(project, "public_id", None),
+                                "workspace": workspace_key,
+                                "access_source": "project_manage_permission",
+                                "public_request": public_request,
+                                "read_only": False,
+                            },
+                            200,
+                            no_store=True,
+                        )
+                except Exception:
+                    pass
+
+            return _json_error(
+                "Dieser Workspace kann nicht öffentlich geöffnet werden.",
+                403,
+                code="workspace_never_public",
+                extra={
+                    "project_id": project_id,
+                    "workspace": workspace_key,
+                    "public_request": public_request,
+                    "allowed": False,
+                    "read_only": True,
+                },
+            )
 
         project = resolve_project(project_id)
         if project is not None and _project_is_demo(project):
             access = serialize_project_permissions(project, user_id=user_id)
-            allowed = bool(_safe_dict(access.get("permissions")).get(PERMISSION_VIEW))
+            permissions = _safe_dict(access.get("permissions"))
+            allowed = bool(_safe_bool(permissions.get(PERMISSION_VIEW), False) or _safe_bool(access.get("can_view"), False))
             return _json_response(
                 {
-                    "ok": True,
+                    "ok": allowed,
+                    "allowed": allowed,
                     "project_id": getattr(project, "id", None),
                     "public_id": getattr(project, "public_id", None),
+                    "project_public_id": getattr(project, "public_id", None),
                     "workspace": workspace_key,
-                    "allowed": allowed,
                     "access": access,
+                    "public_request": public_request,
+                    "read_only": True,
                     "reason": "demo_project_workspace_access" if allowed else "demo_project_denied",
                 },
                 200 if allowed else 403,
@@ -2292,13 +2683,25 @@ def project_workspace_access_get(project_id: str, workspace: str):
             )
 
         result = can_access_project_workspace(
-            project_id,
+            project if project is not None else project_id,
             workspace_key,
             actor_user_id=user_id,
             public_request=public_request,
         )
 
-        return _service_dict_response(result, default_status=200)
+        result_payload = _safe_dict(result)
+        status = _safe_int(result_payload.get("status_code"), 200 if _safe_bool(result_payload.get("ok") or result_payload.get("allowed"), False) else 403)
+        allowed = _safe_bool(result_payload.get("ok") or result_payload.get("allowed"), False)
+
+        result_payload.setdefault("ok", allowed)
+        result_payload.setdefault("allowed", allowed)
+        result_payload.setdefault("workspace", workspace_key)
+        result_payload.setdefault("project_public_id", getattr(project, "public_id", None) if project is not None else project_id)
+        result_payload.setdefault("public_id", getattr(project, "public_id", None) if project is not None else project_id)
+        result_payload.setdefault("public_request", public_request)
+        result_payload.setdefault("read_only", bool(public_request and allowed))
+
+        return _json_response(result_payload, status, no_store=True)
 
     except Exception as exc:
         return _exception_response("project_workspace_access_get failed", exc, code="workspace_access_failed")

@@ -6,57 +6,167 @@
   - Reduzierter Adressbereich für das Projektformular.
   - Sichtbar ist nur eine einzige Adressbox: address_text.
   - Strukturierte Adressfelder und Koordinaten werden hier bewusst nicht angezeigt.
-  - Späterer Geocoder kann aus address_text automatisch street/city/lat/lon usw. erzeugen.
+  - Späterer Geocoder kann serverseitig oder über einen eigenen Service aus address_text
+    street/city/lat/lon/geocode-Metadaten ableiten.
   - Dieses Partial erzeugt keine Systemreferenzen und keine Koordinaten-Eingaben.
+  - Dieses Partial speichert keine Chunk-, Editor-, Map-, 2D- oder LV-Daten.
 
   Erwartete optionale Variablen:
-  - project
-  - current_project
-  - _project
-  - can_edit
-  - _can_edit
-  - is_new
-  - _is_new
-  - demo_mode
-  - _demo_mode
+  - project / current_project / project_view / _project
+  - access / access_view / _access
+  - ui_flags
+  - can_edit / _can_edit
+  - can_mutate / _can_mutate
+  - is_new / _is_new
+  - demo_mode / _demo_mode
+  - read_only / _read_only
+  - public_viewer / _public_viewer
+  - persistent / _persistent
+  - auth_unavailable / _auth_unavailable
+  - user_blocked / _user_blocked
+  - access_blocked / _access_blocked
 
   Robustheitsregel:
-  - Bei Dicts immer .get(...) verwenden.
-  - Partial darf auch funktionieren, wenn es ohne vorbereitete Parent-Variablen eingebunden wird.
+  - Partial funktioniert auch ohne vorbereitete Parent-Variablen.
+  - Keine tief verschachtelte Jinja-Logik.
+  - Bei Dicts immer Mapping prüfen.
+  - Alle Werte haben Defaults.
+  - Frontend-Gating ist nur UX. Backend bleibt die Wahrheit.
 #}
 
-{% set _address_project_raw = _project|default(project|default(current_project|default({}, true), true), true) %}
+{% set _truthy_values = [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'Yes', 'YES', 'y', 'Y', 'on', 'On', 'ON', 'ja', 'Ja', 'JA', 'enabled', 'Enabled', 'ENABLED', 'ok', 'OK'] %}
+
+{# ------------------------------------------------------------------------- #}
+{# Defensive context extraction                                               #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _address_project_raw = project_view|default(_project|default(project|default(current_project|default({}, true), true), true), true) %}
 {% set _address_project = _address_project_raw if _address_project_raw is mapping else {} %}
+
+{% set _address_access_raw = access_view|default(access|default(_access|default(_address_project.get('access', {}), true), true), true) %}
+{% set _address_access = _address_access_raw if _address_access_raw is mapping else {} %}
+
+{% set _address_permissions_raw = _address_access.get('permissions', {}) %}
+{% set _address_permissions = _address_permissions_raw if _address_permissions_raw is mapping else {} %}
+
+{% set _address_ui_raw = ui_flags|default(_address_project.get('ui_flags', _address_project.get('uiFlags', {})), true) %}
+{% set _address_ui = _address_ui_raw if _address_ui_raw is mapping else {} %}
 
 {% set _address_obj_raw = _address_project.get('address', {}) %}
 {% set _address_obj = _address_obj_raw if _address_obj_raw is mapping else {} %}
 
-{% set _metadata_raw = _address_project.get('metadata', _address_project.get('metadata_json', {})) %}
+{% set _metadata_raw = _address_project.get('metadata', _address_project.get('metadata_json', _address_project.get('metadataJson', {}))) %}
 {% set _metadata = _metadata_raw if _metadata_raw is mapping else {} %}
 
 {% set _geocode_raw = _address_project.get('geocode', _metadata.get('geocode', {})) %}
 {% set _geocode = _geocode_raw if _geocode_raw is mapping else {} %}
 
-{% set _address_text = _address_project.get('address_text', _address_project.get('addressText', _address_obj.get('text', ''))) %}
+{# ------------------------------------------------------------------------- #}
+{# Address value                                                              #}
+{# ------------------------------------------------------------------------- #}
 
-{% set _address_can_edit_raw = _can_edit|default(can_edit|default(true, true), true) %}
-{% set _address_can_edit = true if _address_can_edit_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _address_text = _address_project.get('address_text', _address_project.get('addressText', _address_obj.get('text', _address_obj.get('address_text', _address_obj.get('addressText', ''))))) %}
+{% set _address_text = '' if _address_text is none else _address_text %}
+{% set _address_text_len = _address_text|string|length %}
+{% set _address_max_len = 2000 %}
 
-{% set _address_is_new_raw = _is_new|default(is_new|default(_address_project.get('is_new', _address_project.get('isNew', false)), true), true) %}
-{% set _address_is_new = true if _address_is_new_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{# ------------------------------------------------------------------------- #}
+{# Project identity                                                           #}
+{# ------------------------------------------------------------------------- #}
 
-{% set _address_demo_raw = _demo_mode|default(demo_mode|default(_address_project.get('demo_mode', _address_project.get('demoMode', false)), true), true) %}
-{% set _address_demo_mode = true if _address_demo_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _address_project_public_id = _address_project.get('public_id', _address_project.get('publicId', _address_project.get('project_public_id', _address_project.get('projectPublicId', _address_project.get('id', ''))))) %}
+{% set _address_project_public_id = 'new' if not _address_project_public_id else _address_project_public_id %}
+
+{# ------------------------------------------------------------------------- #}
+{# Permission / mode flags                                                    #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _address_can_edit_raw = _can_edit|default(can_edit|default(_address_ui.get('can_edit', _address_ui.get('canEdit', _address_access.get('can_edit', _address_access.get('canEdit', _address_permissions.get('edit', false))))), true), true) %}
+{% set _address_can_edit = true if _address_can_edit_raw in _truthy_values else false %}
+
+{% set _address_can_mutate_raw = _can_mutate|default(can_mutate|default(_address_ui.get('can_mutate', _address_ui.get('canMutate', _address_access.get('can_mutate', _address_access.get('canMutate', _address_can_edit)))), true), true) %}
+{% set _address_can_mutate = true if _address_can_mutate_raw in _truthy_values else false %}
+
+{% set _address_is_new_raw = _is_new|default(is_new|default(_address_ui.get('is_new', _address_ui.get('isNew', _address_project.get('is_new', _address_project.get('isNew', false)))), true), true) %}
+{% set _address_is_new = true if _address_is_new_raw in _truthy_values or _address_project_public_id == 'new' else false %}
+
+{% set _address_demo_raw = _demo_mode|default(demo_mode|default(_address_ui.get('demo_mode', _address_ui.get('demoMode', _address_project.get('demo_mode', _address_project.get('demoMode', _address_access.get('demo_mode', _address_access.get('demoMode', false)))))), true), true) %}
+{% set _address_demo_mode = true if _address_demo_raw in _truthy_values else false %}
+
+{% set _address_persistent_raw = _persistent|default(persistent|default(_address_ui.get('persistent', _address_access.get('persistent', true)), true), true) %}
+{% set _address_persistent = true if _address_persistent_raw in _truthy_values else false %}
+
+{% set _address_public_viewer_raw = _public_viewer|default(public_viewer|default(_address_ui.get('public_viewer', _address_ui.get('publicViewer', _address_access.get('public_viewer', _address_access.get('publicViewer', false)))), true), true) %}
+{% set _address_public_viewer = true if _address_public_viewer_raw in _truthy_values else false %}
+
+{% set _address_read_only_raw = _read_only|default(read_only|default(_address_ui.get('read_only', _address_ui.get('readOnly', _address_access.get('read_only', _address_access.get('readOnly', false)))), true), true) %}
+{% set _address_read_only = true if _address_read_only_raw in _truthy_values else false %}
+
+{% set _address_auth_unavailable_raw = _auth_unavailable|default(auth_unavailable|default(_address_ui.get('auth_unavailable', _address_ui.get('authUnavailable', _address_access.get('auth_unavailable', _address_access.get('authUnavailable', false)))), true), true) %}
+{% set _address_auth_unavailable = true if _address_auth_unavailable_raw in _truthy_values else false %}
+
+{% set _address_user_blocked_raw = _user_blocked|default(user_blocked|default(_address_ui.get('user_blocked', _address_ui.get('userBlocked', _address_access.get('user_blocked', _address_access.get('userBlocked', false)))), true), true) %}
+{% set _address_user_blocked = true if _address_user_blocked_raw in _truthy_values else false %}
+
+{% set _address_access_blocked_raw = _access_blocked|default(access_blocked|default(_address_ui.get('access_blocked', _address_ui.get('accessBlocked', _address_access.get('access_blocked', _address_access.get('accessBlocked', false)))), true), true) %}
+{% set _address_access_blocked = true if _address_access_blocked_raw in _truthy_values else false %}
+
+{% set _address_can_write = true if _address_can_edit and _address_can_mutate and not _address_read_only and not _address_public_viewer and not _address_auth_unavailable and not _address_user_blocked and not _address_access_blocked and (_address_persistent or _address_demo_mode) else false %}
+
+{# ------------------------------------------------------------------------- #}
+{# Geocode metadata                                                           #}
+{# ------------------------------------------------------------------------- #}
 
 {% set _geocode_status = _address_project.get('geocode_status', _address_project.get('geocodeStatus', _geocode.get('status', 'none'))) %}
+{% set _geocode_status = 'none' if not _geocode_status else _geocode_status %}
 {% set _geocode_source = _geocode.get('source', '') %}
 {% set _geocode_updated_at = _geocode.get('updated_at', _geocode.get('updatedAt', '')) %}
+{% set _geocode_confidence = _geocode.get('confidence', _geocode.get('score', '')) %}
+
+{# ------------------------------------------------------------------------- #}
+{# Disabled reason                                                            #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _address_disabled_reason = '' %}
+{% if _address_auth_unavailable %}
+  {% set _address_disabled_reason = 'Auth-Service nicht erreichbar. Adresse kann nicht gespeichert werden.' %}
+{% elif _address_user_blocked or _address_access_blocked %}
+  {% set _address_disabled_reason = 'Der Zugriff ist gesperrt. Adresse kann nicht gespeichert werden.' %}
+{% elif _address_public_viewer %}
+  {% set _address_disabled_reason = 'Öffentliche Ansicht ist schreibgeschützt.' %}
+{% elif _address_read_only %}
+  {% set _address_disabled_reason = 'Dieses Projekt ist schreibgeschützt.' %}
+{% elif not _address_can_edit %}
+  {% set _address_disabled_reason = 'Du hast keine Berechtigung, die Adresse zu ändern.' %}
+{% elif not _address_can_mutate %}
+  {% set _address_disabled_reason = 'Projektmutationen sind für deinen Kontext deaktiviert.' %}
+{% elif not _address_persistent and not _address_demo_mode %}
+  {% set _address_disabled_reason = 'Für dauerhafte Adressänderungen ist ein persistenter AppUser-Kontext erforderlich.' %}
+{% elif _address_demo_mode %}
+  {% set _address_disabled_reason = 'Demo-Modus: Die Adresse kann getestet werden, wird aber nicht dauerhaft gespeichert.' %}
+{% endif %}
 
 <section
-  class="vp-project-card vp-project-card--address"
+  class="vp-project-card vp-project-card--address{% if not _address_can_write %} is-disabled{% endif %}{% if _address_read_only %} is-readonly{% endif %}"
   aria-labelledby="projectAddressTitle"
   data-project-address-card
-  data-geocode-status="{{ _geocode_status|default('none', true)|e }}"
+  data-project-public-id="{{ _address_project_public_id|e }}"
+  data-project-is-new="{{ 'true' if _address_is_new else 'false' }}"
+  data-project-can-edit="{{ 'true' if _address_can_edit else 'false' }}"
+  data-project-can-mutate="{{ 'true' if _address_can_mutate else 'false' }}"
+  data-project-address-can-write="{{ 'true' if _address_can_write else 'false' }}"
+  data-project-demo-mode="{{ 'true' if _address_demo_mode else 'false' }}"
+  data-project-persistent="{{ 'true' if _address_persistent else 'false' }}"
+  data-project-public-viewer="{{ 'true' if _address_public_viewer else 'false' }}"
+  data-project-read-only="{{ 'true' if _address_read_only else 'false' }}"
+  data-project-auth-unavailable="{{ 'true' if _address_auth_unavailable else 'false' }}"
+  data-project-user-blocked="{{ 'true' if _address_user_blocked else 'false' }}"
+  data-project-access-blocked="{{ 'true' if _address_access_blocked else 'false' }}"
+  data-project-address-disabled="{{ 'false' if _address_can_write else 'true' }}"
+  data-project-address-disabled-reason="{{ _address_disabled_reason|e }}"
+  data-geocode-status="{{ _geocode_status|e }}"
+  data-geocode-source="{{ _geocode_source|e }}"
+  data-geocode-updated-at="{{ _geocode_updated_at|e }}"
 >
   <header class="vp-project-card__header">
     <div>
@@ -65,17 +175,49 @@
       </h2>
 
       <p class="vp-project-card__text">
-        Gib die Adresse deines Projektes ein
+        Gib die Adresse oder eine eindeutige Standortbeschreibung des Projekts ein.
       </p>
     </div>
 
-
+    <div class="vp-project-card__meta" aria-live="polite">
+      <span
+        class="vp-project-chip {% if _address_auth_unavailable or _address_user_blocked or _address_access_blocked %}vp-project-chip--error{% elif _geocode_status in ['ready', 'ok', 'resolved', 'geocoded'] %}vp-project-chip--success{% elif _geocode_status in ['pending', 'queued', 'processing'] %}vp-project-chip--warning{% else %}vp-project-chip--muted{% endif %}"
+        data-project-address-geocode-status
+      >
+        {% if _address_auth_unavailable %}
+          Auth nicht erreichbar
+        {% elif _address_user_blocked or _address_access_blocked %}
+          Zugriff gesperrt
+        {% elif _geocode_status in ['ready', 'ok', 'resolved', 'geocoded'] %}
+          Standort erkannt
+        {% elif _geocode_status in ['pending', 'queued', 'processing'] %}
+          Standort wird geprüft
+        {% elif _address_text %}
+          Adresse erfasst
+        {% else %}
+          Keine Adresse
+        {% endif %}
+      </span>
+    </div>
   </header>
+
+  {% if _address_disabled_reason %}
+    <div
+      class="vp-project-inline-note {% if _address_auth_unavailable or _address_user_blocked or _address_access_blocked %}vp-project-inline-note--error{% elif _address_demo_mode %}vp-project-inline-note--demo{% else %}vp-project-inline-note--locked{% endif %}"
+      data-project-address-disabled-note
+    >
+      {{ _address_disabled_reason }}
+    </div>
+  {% endif %}
 
   {% if _address_demo_mode %}
     <div class="vp-project-inline-note vp-project-inline-note--demo" data-project-address-demo-note>
       <strong>Demo-Modus:</strong>
       Diese Adresse wird nicht dauerhaft gespeichert. Änderungen können nach Aktualisierung oder spätestens nach Ablauf der Demo-Sitzung verloren gehen.
+    </div>
+  {% elif _address_public_viewer %}
+    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-address-public-note>
+      Öffentliche Ansicht: Die Adresse ist sichtbar, aber schreibgeschützt.
     </div>
   {% endif %}
 
@@ -90,21 +232,81 @@
         class="vp-project-textarea"
         name="address_text"
         rows="4"
-        maxlength="2000"
+        maxlength="{{ _address_max_len }}"
         placeholder="z. B. Musterstraße 1, 12345 Berlin, Deutschland"
         required
         autocomplete="street-address"
         data-project-address-text
         data-project-single-address-input
-        {% if not _address_can_edit %}disabled{% endif %}
+        data-project-address-max-length="{{ _address_max_len }}"
+        aria-describedby="projectAddressHelp projectAddressCounter"
+        {% if not _address_can_write %}disabled{% endif %}
+        {% if _address_read_only %}aria-readonly="true"{% endif %}
+        {% if _address_disabled_reason %}title="{{ _address_disabled_reason|e }}"{% endif %}
       >{{ _address_text|default('', true)|e }}</textarea>
 
+      <div class="vp-project-field__meta">
+        <p id="projectAddressHelp" class="vp-project-help">
+          Verwende eine vollständige Adresse oder eine eindeutige Standortbeschreibung. Strukturierte Adressfelder und Koordinaten werden hier bewusst nicht manuell gepflegt.
+        </p>
 
+        <p
+          id="projectAddressCounter"
+          class="vp-project-counter"
+          data-project-address-counter
+          data-max-length="{{ _address_max_len }}"
+          data-over-limit="{{ 'true' if _address_text_len > _address_max_len else 'false' }}"
+        >
+          <span data-project-address-counter-current>{{ _address_text_len }}</span>/<span>{{ _address_max_len }}</span>
+        </p>
+      </div>
     </div>
   </div>
 
+  {% if _geocode_status and _geocode_status != 'none' %}
+    <div class="vp-project-address-meta" data-project-address-geocode-meta>
+      <p class="vp-project-help">
+        Geocode-Status:
+        <strong>{{ _geocode_status }}</strong>{% if _geocode_source %} · Quelle: {{ _geocode_source }}{% endif %}{% if _geocode_confidence %} · Score: {{ _geocode_confidence }}{% endif %}{% if _geocode_updated_at %} · Aktualisiert: {{ _geocode_updated_at }}{% endif %}
+      </p>
+    </div>
+  {% endif %}
 
-
+  <script type="application/json" data-project-address-initial-json>
+    {
+      "address_text": {{ _address_text|tojson }},
+      "addressText": {{ _address_text|tojson }},
+      "can_edit": {{ _address_can_edit|tojson }},
+      "canEdit": {{ _address_can_edit|tojson }},
+      "can_mutate": {{ _address_can_mutate|tojson }},
+      "canMutate": {{ _address_can_mutate|tojson }},
+      "can_write": {{ _address_can_write|tojson }},
+      "canWrite": {{ _address_can_write|tojson }},
+      "is_new": {{ _address_is_new|tojson }},
+      "isNew": {{ _address_is_new|tojson }},
+      "demo_mode": {{ _address_demo_mode|tojson }},
+      "demoMode": {{ _address_demo_mode|tojson }},
+      "persistent": {{ _address_persistent|tojson }},
+      "public_viewer": {{ _address_public_viewer|tojson }},
+      "publicViewer": {{ _address_public_viewer|tojson }},
+      "read_only": {{ _address_read_only|tojson }},
+      "readOnly": {{ _address_read_only|tojson }},
+      "auth_unavailable": {{ _address_auth_unavailable|tojson }},
+      "authUnavailable": {{ _address_auth_unavailable|tojson }},
+      "user_blocked": {{ _address_user_blocked|tojson }},
+      "userBlocked": {{ _address_user_blocked|tojson }},
+      "access_blocked": {{ _address_access_blocked|tojson }},
+      "accessBlocked": {{ _address_access_blocked|tojson }},
+      "geocode": {
+        "status": {{ _geocode_status|tojson }},
+        "source": {{ _geocode_source|tojson }},
+        "updated_at": {{ _geocode_updated_at|tojson }},
+        "confidence": {{ _geocode_confidence|tojson }}
+      },
+      "max_length": {{ _address_max_len|tojson }},
+      "disabled_reason": {{ _address_disabled_reason|tojson }}
+    }
+  </script>
 
   <noscript>
     <p class="vp-project-help">

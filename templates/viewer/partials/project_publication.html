@@ -6,82 +6,159 @@
   - Steuert, welche Workspace-Reiter veröffentlicht/freigegeben werden.
   - Sichtbarkeit des Projekts wird in project_visibility.html gewählt.
   - Dieses Partial steuert nur die Reiter-/Workspace-Freigabe.
-  - Admin, Team, Rechte, Einstellungen und Systemreferenzen werden nie öffentlich freigegeben.
-  - Die Werte werden später über /v1/projects/<project_id>/publication gespeichert.
+  - Admin, Team, Rechte, Einstellungen, Permissions und Systemreferenzen werden nie öffentlich freigegeben.
+  - Speichern läuft über /v1/projects/<project_id>/publication.
+  - Keine Projekt-Basisdaten.
+  - Keine Team-/Einladungsdaten.
+  - Keine Chunk-/Editor-/Map-/2D-/LV-Fachdaten.
 
-  Veröffentlichbare Reiter:
-  - Projektinfo
-  - Map
-  - 3D
-  - 2D
-  - LV
-  - Versionen
+  Veröffentlichbare Workspaces:
+  - project
+  - map
+  - editor3d
+  - cad2d
+  - lv
+  - versions
 
-  Nicht veröffentlichbar:
-  - Admin
-  - Team
-  - Einstellungen
-  - Rechte
-  - Systemreferenzen
+  Nie veröffentlichbar:
+  - admin
+  - team
+  - settings
+  - permissions
+  - system
+  - system_refs
 
   Erwartete optionale Variablen:
-  - project
-  - current_project
-  - _project
-  - can_edit
-  - _can_edit
-  - can_manage
-  - _can_manage
-  - is_new
-  - _is_new
-  - demo_mode
-  - _demo_mode
+  - project / current_project / project_view / _project
+  - publication / publication_view
+  - access / access_view / _access
+  - ui_flags
+  - paths
+  - is_new / _is_new
+  - can_edit / _can_edit
+  - can_manage / _can_manage
+  - can_publish / _can_publish
+  - demo_mode / _demo_mode
+  - read_only / _read_only
+  - public_viewer / _public_viewer
 
   Robustheitsregel:
   - Partial darf auch ohne vorbereitete Parent-Variablen rendern.
-  - Bei Dicts immer .get(...) verwenden.
+  - Keine tief verschachtelten Jinja-Ausdrücke.
+  - Bei Dicts immer Mapping prüfen.
+  - Alle Werte haben Defaults.
+  - Frontend-Gating ist nur UX. Backend bleibt Berechtigungswahrheit.
 #}
 
-{% set _publication_project_raw = _project|default(project|default(current_project|default({}, true), true), true) %}
+{% set _truthy_values = [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'Yes', 'YES', 'y', 'Y', 'on', 'On', 'ON', 'ja', 'Ja', 'JA', 'enabled', 'Enabled', 'ENABLED', 'ok', 'OK'] %}
+
+{# ------------------------------------------------------------------------- #}
+{# Defensive context extraction                                               #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _publication_project_raw = project_view|default(_project|default(project|default(current_project|default({}, true), true), true), true) %}
 {% set _publication_project = _publication_project_raw if _publication_project_raw is mapping else {} %}
 
-{% set _publication_raw = _publication_project.get('publication', {}) %}
-{% set _publication = _publication_raw if _publication_raw is mapping else {} %}
+{% set _publication_access_raw = access_view|default(access|default(_access|default(_publication_project.get('access', {}), true), true), true) %}
+{% set _publication_access = _publication_access_raw if _publication_access_raw is mapping else {} %}
 
-{% set _embed_policy_raw = _publication_project.get('embed_policy', _publication_project.get('embedPolicy', {})) %}
+{% set _publication_permissions_raw = _publication_access.get('permissions', {}) %}
+{% set _publication_permissions = _publication_permissions_raw if _publication_permissions_raw is mapping else {} %}
+
+{% set _publication_ui_raw = ui_flags|default(_publication_project.get('ui_flags', _publication_project.get('uiFlags', {})), true) %}
+{% set _publication_ui = _publication_ui_raw if _publication_ui_raw is mapping else {} %}
+
+{% set _publication_paths_raw = paths|default(_publication_project.get('paths', {}), true) %}
+{% set _publication_paths = _publication_paths_raw if _publication_paths_raw is mapping else {} %}
+
+{% set _publication_raw_candidate = publication_view|default(publication|default(_publication_project.get('publication', {}), true), true) %}
+{% set _publication_candidate = _publication_raw_candidate if _publication_raw_candidate is mapping else {} %}
+{% set _publication_nested_raw = _publication_candidate.get('publication', {}) %}
+{% set _publication_nested = _publication_nested_raw if _publication_nested_raw is mapping else {} %}
+{% set _publication = _publication_nested if _publication_nested else _publication_candidate %}
+
+{% set _embed_policy_raw = _publication_project.get('embed_policy', _publication_project.get('embedPolicy', _publication.get('embed_policy', _publication.get('embedPolicy', {})))) %}
 {% set _embed_policy = _embed_policy_raw if _embed_policy_raw is mapping else {} %}
 
-{% set _published_raw = _publication.get('published_workspaces', _publication.get('publishedWorkspaces', {})) %}
+{% set _published_raw = _publication.get('published_workspaces', _publication.get('publishedWorkspaces', _publication.get('workspaces', _publication.get('tabs', {})))) %}
 {% set _published = _published_raw if _published_raw is mapping else {} %}
 
 {% set _effective_raw = _publication.get('effective_published_workspaces', _publication.get('effectivePublishedWorkspaces', {})) %}
 {% set _effective = _effective_raw if _effective_raw is mapping else {} %}
 
-{% set _visibility_raw = _publication_project.get('visibility', _publication.get('visibility', 'private')) %}
+{# ------------------------------------------------------------------------- #}
+{# Project identity                                                           #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _project_public_id = _publication_project.get('public_id', _publication_project.get('publicId', _publication_project.get('project_public_id', _publication_project.get('projectPublicId', _publication_project.get('id', ''))))) %}
+{% set _project_public_id = 'new' if not _project_public_id else _project_public_id %}
+
+{% set _publication_url = _publication_paths.get('publication', _publication_paths.get('projectPublication', _publication_paths.get('project_publication', ''))) %}
+{% if not _publication_url and _project_public_id and _project_public_id != 'new' %}
+  {% set _publication_url = '/v1/projects/' ~ _project_public_id ~ '/publication' %}
+{% endif %}
+
+{# ------------------------------------------------------------------------- #}
+{# Visibility                                                                 #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _visibility_raw = _publication.get('visibility', _publication_project.get('visibility', 'private')) %}
+{% set _visibility_text = _visibility_raw|string|lower %}
 {% set _publication_visibility = 'private' %}
-{% if _visibility_raw in ['public', 'öffentlich', 'oeffentlich', 'open'] %}
+
+{% if _visibility_text in ['public', 'öffentlich', 'oeffentlich', 'open', 'listed'] %}
   {% set _publication_visibility = 'public' %}
-{% elif _visibility_raw in ['unlisted', 'not_listed', 'nicht_gelistet', 'link', 'link_shared'] %}
+{% elif _visibility_text in ['unlisted', 'not_listed', 'notlisted', 'nicht_gelistet', 'hidden_link', 'link', 'link_shared', 'share_link'] %}
   {% set _publication_visibility = 'unlisted' %}
 {% else %}
   {% set _publication_visibility = 'private' %}
 {% endif %}
 
-{% set _publication_can_edit_raw = _can_edit|default(can_edit|default(true, true), true) %}
-{% set _publication_can_edit = true if _publication_can_edit_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{# ------------------------------------------------------------------------- #}
+{# Permission / mode flags                                                    #}
+{# ------------------------------------------------------------------------- #}
 
-{% set _publication_can_manage_raw = _can_manage|default(can_manage|default(_publication_project.get('access', {}).get('can_manage', _publication_project.get('access', {}).get('permissions', {}).get('manage', false)), true), true) %}
-{% set _publication_can_manage = true if _publication_can_manage_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _publication_can_edit_raw = _can_edit|default(can_edit|default(_publication_ui.get('can_edit', _publication_ui.get('canEdit', _publication_access.get('can_edit', _publication_access.get('canEdit', _publication_permissions.get('edit', false))))), true), true) %}
+{% set _publication_can_edit = true if _publication_can_edit_raw in _truthy_values else false %}
 
-{% set _publication_is_new_raw = _is_new|default(is_new|default(_publication_project.get('is_new', _publication_project.get('isNew', false)), true), true) %}
-{% set _publication_is_new = true if _publication_is_new_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _publication_can_manage_raw = _can_manage|default(can_manage|default(_publication_ui.get('can_manage', _publication_ui.get('canManage', _publication_access.get('can_manage', _publication_access.get('canManage', _publication_permissions.get('manage', false))))), true), true) %}
+{% set _publication_can_manage = true if _publication_can_manage_raw in _truthy_values else false %}
 
-{% set _publication_demo_raw = _demo_mode|default(demo_mode|default(_publication_project.get('demo_mode', _publication_project.get('demoMode', false)), true), true) %}
-{% set _publication_demo_mode = true if _publication_demo_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _publication_can_publish_raw = _can_publish|default(can_publish|default(_publication_ui.get('can_publish', _publication_ui.get('canPublish', _publication_access.get('can_publish', _publication_access.get('canPublish', _publication_can_manage)))), true), true) %}
+{% set _publication_can_publish = true if _publication_can_publish_raw in _truthy_values else false %}
 
-{% set _publication_form_enabled = true if _publication_can_edit and _publication_can_manage and not _publication_is_new else false %}
+{% set _publication_can_mutate_raw = _can_mutate|default(can_mutate|default(_publication_ui.get('can_mutate', _publication_ui.get('canMutate', _publication_access.get('can_mutate', _publication_access.get('canMutate', _publication_can_publish or _publication_can_manage)))), true), true) %}
+{% set _publication_can_mutate = true if _publication_can_mutate_raw in _truthy_values else false %}
 
-{% set _project_public_id = _publication_project.get('public_id', _publication_project.get('publicId', _publication_project.get('id', ''))) %}
+{% set _publication_is_new_raw = _is_new|default(is_new|default(_publication_ui.get('is_new', _publication_ui.get('isNew', _publication_project.get('is_new', _publication_project.get('isNew', false)))), true), true) %}
+{% set _publication_is_new = true if _publication_is_new_raw in _truthy_values or _project_public_id == 'new' else false %}
+
+{% set _publication_demo_raw = _demo_mode|default(demo_mode|default(_publication_ui.get('demo_mode', _publication_ui.get('demoMode', _publication_project.get('demo_mode', _publication_project.get('demoMode', _publication_access.get('demo_mode', _publication_access.get('demoMode', false)))))), true), true) %}
+{% set _publication_demo_mode = true if _publication_demo_raw in _truthy_values else false %}
+
+{% set _publication_persistent_raw = _persistent|default(persistent|default(_publication_ui.get('persistent', _publication_access.get('persistent', true)), true), true) %}
+{% set _publication_persistent = true if _publication_persistent_raw in _truthy_values else false %}
+
+{% set _publication_public_viewer_raw = _public_viewer|default(public_viewer|default(_publication_ui.get('public_viewer', _publication_ui.get('publicViewer', _publication_access.get('public_viewer', _publication_access.get('publicViewer', false)))), true), true) %}
+{% set _publication_public_viewer = true if _publication_public_viewer_raw in _truthy_values else false %}
+
+{% set _publication_read_only_raw = _read_only|default(read_only|default(_publication_ui.get('read_only', _publication_ui.get('readOnly', _publication_access.get('read_only', _publication_access.get('readOnly', false)))), true), true) %}
+{% set _publication_read_only = true if _publication_read_only_raw in _truthy_values else false %}
+
+{% set _publication_auth_unavailable_raw = _auth_unavailable|default(auth_unavailable|default(_publication_ui.get('auth_unavailable', _publication_ui.get('authUnavailable', _publication_access.get('auth_unavailable', _publication_access.get('authUnavailable', false)))), true), true) %}
+{% set _publication_auth_unavailable = true if _publication_auth_unavailable_raw in _truthy_values else false %}
+
+{% set _publication_user_blocked_raw = _user_blocked|default(user_blocked|default(_publication_ui.get('user_blocked', _publication_ui.get('userBlocked', _publication_access.get('user_blocked', _publication_access.get('userBlocked', false)))), true), true) %}
+{% set _publication_user_blocked = true if _publication_user_blocked_raw in _truthy_values else false %}
+
+{% set _publication_access_blocked_raw = _access_blocked|default(access_blocked|default(_publication_ui.get('access_blocked', _publication_ui.get('accessBlocked', _publication_access.get('access_blocked', _publication_access.get('accessBlocked', false)))), true), true) %}
+{% set _publication_access_blocked = true if _publication_access_blocked_raw in _truthy_values else false %}
+
+{% set _publication_can_write = true if (_publication_can_manage or _publication_can_publish or _publication_can_mutate) and not _publication_is_new and not _publication_demo_mode and _publication_persistent and not _publication_public_viewer and not _publication_read_only and not _publication_auth_unavailable and not _publication_user_blocked and not _publication_access_blocked and _publication_url else false %}
+
+{# ------------------------------------------------------------------------- #}
+{# Workspace values                                                           #}
+{# ------------------------------------------------------------------------- #}
 
 {% set _project_published_raw = _published.get('project', _embed_policy.get('allow_project_info', true)) %}
 {% set _map_published_raw = _published.get('map', _embed_policy.get('allow_map', false)) %}
@@ -90,34 +167,127 @@
 {% set _lv_published_raw = _published.get('lv', _embed_policy.get('allow_lv', false)) %}
 {% set _versions_published_raw = _published.get('versions', _embed_policy.get('allow_versions', false)) %}
 
-{% set _project_published = true if _project_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set _map_published = true if _map_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set _editor_published = true if _editor_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set _cad2d_published = true if _cad2d_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set _lv_published = true if _lv_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set _versions_published = true if _versions_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _project_published = true if _project_published_raw in _truthy_values else false %}
+{% set _map_published = true if _map_published_raw in _truthy_values else false %}
+{% set _editor_published = true if _editor_published_raw in _truthy_values else false %}
+{% set _cad2d_published = true if _cad2d_published_raw in _truthy_values else false %}
+{% set _lv_published = true if _lv_published_raw in _truthy_values else false %}
+{% set _versions_published = true if _versions_published_raw in _truthy_values else false %}
 
-{% set _effective_project = true if _effective.get('project', false) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set _effective_map = true if _effective.get('map', false) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set _effective_editor = true if _effective.get('editor3d', false) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set _effective_cad2d = true if _effective.get('cad2d', false) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set _effective_lv = true if _effective.get('lv', false) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set _effective_versions = true if _effective.get('versions', false) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _effective_project_raw = _effective.get('project', false if _publication_visibility == 'private' else _project_published) %}
+{% set _effective_map_raw = _effective.get('map', false if _publication_visibility == 'private' else _map_published) %}
+{% set _effective_editor_raw = _effective.get('editor3d', _effective.get('3d', false if _publication_visibility == 'private' else _editor_published)) %}
+{% set _effective_cad2d_raw = _effective.get('cad2d', _effective.get('2d', false if _publication_visibility == 'private' else _cad2d_published)) %}
+{% set _effective_lv_raw = _effective.get('lv', false if _publication_visibility == 'private' else _lv_published) %}
+{% set _effective_versions_raw = _effective.get('versions', false if _publication_visibility == 'private' else _versions_published) %}
 
-{% set _require_auth_raw = _publication.get('require_auth', _publication.get('requireAuth', _embed_policy.get('require_auth', false))) %}
-{% set _require_permission_raw = _publication.get('require_project_permission', _publication.get('requireProjectPermission', _embed_policy.get('require_project_permission', false))) %}
+{% set _effective_project = true if _effective_project_raw in _truthy_values else false %}
+{% set _effective_map = true if _effective_map_raw in _truthy_values else false %}
+{% set _effective_editor = true if _effective_editor_raw in _truthy_values else false %}
+{% set _effective_cad2d = true if _effective_cad2d_raw in _truthy_values else false %}
+{% set _effective_lv = true if _effective_lv_raw in _truthy_values else false %}
+{% set _effective_versions = true if _effective_versions_raw in _truthy_values else false %}
 
-{% set _require_auth = true if _require_auth_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set _require_project_permission = true if _require_permission_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _require_auth_raw = _publication.get('require_auth', _publication.get('requireAuth', _embed_policy.get('require_auth', true if _publication_visibility == 'private' else false))) %}
+{% set _require_permission_raw = _publication.get('require_project_permission', _publication.get('requireProjectPermission', _embed_policy.get('require_project_permission', true if _publication_visibility == 'private' else false))) %}
+
+{% set _require_auth = true if _publication_visibility == 'private' or _require_auth_raw in _truthy_values else false %}
+{% set _require_project_permission = true if _publication_visibility == 'private' or _require_permission_raw in _truthy_values else false %}
+
+{% set _has_effective_publication = true if _effective_project or _effective_map or _effective_editor or _effective_cad2d or _effective_lv or _effective_versions else false %}
+
+{% set _workspace_items = [
+  {
+    'key': 'project',
+    'title': 'Projektinfo',
+    'text': 'Basisdaten, Beschreibung und sichtbare Projektinformationen.',
+    'published': _project_published,
+    'effective': _effective_project
+  },
+  {
+    'key': 'map',
+    'title': 'Map',
+    'text': 'Kartenansicht und geobezogene Projektansicht.',
+    'published': _map_published,
+    'effective': _effective_map
+  },
+  {
+    'key': 'editor3d',
+    'title': '3D',
+    'text': '3D-Editor oder 3D-Viewer-Einstieg für das Projekt.',
+    'published': _editor_published,
+    'effective': _effective_editor
+  },
+  {
+    'key': 'cad2d',
+    'title': '2D',
+    'text': '2D-/CAD-Ansicht, Pläne und zeichnungsbezogene Projektansicht.',
+    'published': _cad2d_published,
+    'effective': _effective_cad2d
+  },
+  {
+    'key': 'lv',
+    'title': 'LV',
+    'text': 'Leistungsverzeichnis oder spätere LV-Auswertung.',
+    'published': _lv_published,
+    'effective': _effective_lv
+  },
+  {
+    'key': 'versions',
+    'title': 'Versionen',
+    'text': 'Projektstände, Snapshots und sichtbare Versionsinformationen.',
+    'published': _versions_published,
+    'effective': _effective_versions
+  }
+] %}
+
+{# ------------------------------------------------------------------------- #}
+{# Disabled reason                                                            #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _publication_disabled_reason = '' %}
+{% if _publication_auth_unavailable %}
+  {% set _publication_disabled_reason = 'Auth-Service nicht erreichbar. Veröffentlichung kann nicht gespeichert werden.' %}
+{% elif _publication_user_blocked or _publication_access_blocked %}
+  {% set _publication_disabled_reason = 'Der Zugriff ist gesperrt. Veröffentlichung kann nicht gespeichert werden.' %}
+{% elif _publication_public_viewer %}
+  {% set _publication_disabled_reason = 'Öffentliche Ansicht ist schreibgeschützt.' %}
+{% elif _publication_read_only %}
+  {% set _publication_disabled_reason = 'Dieses Projekt ist schreibgeschützt.' %}
+{% elif _publication_is_new %}
+  {% set _publication_disabled_reason = 'Speichere das Projekt zuerst. Danach kannst du Reiter veröffentlichen.' %}
+{% elif _publication_demo_mode %}
+  {% set _publication_disabled_reason = 'Im Demo-Modus werden Veröffentlichungseinstellungen nicht dauerhaft gespeichert.' %}
+{% elif not _publication_persistent %}
+  {% set _publication_disabled_reason = 'Für Veröffentlichungseinstellungen ist ein persistenter AppUser-Kontext erforderlich.' %}
+{% elif not (_publication_can_manage or _publication_can_publish or _publication_can_mutate) %}
+  {% set _publication_disabled_reason = 'Du hast keine Berechtigung, Veröffentlichungseinstellungen zu ändern.' %}
+{% elif not _publication_url %}
+  {% set _publication_disabled_reason = 'Publication-Endpunkt fehlt.' %}
+{% endif %}
 
 <section
-  class="vp-project-card vp-project-card--publication"
+  class="vp-project-card vp-project-card--publication{% if not _publication_can_write %} is-disabled{% endif %}{% if _publication_read_only %} is-readonly{% endif %}{% if _has_effective_publication %} has-effective-publication{% endif %}"
   aria-labelledby="projectPublicationTitle"
   data-project-publication-card
   data-project-public-id="{{ _project_public_id|e }}"
+  data-publication-url="{{ _publication_url|e }}"
   data-project-visibility="{{ _publication_visibility|e }}"
   data-project-is-new="{{ 'true' if _publication_is_new else 'false' }}"
+  data-project-can-edit="{{ 'true' if _publication_can_edit else 'false' }}"
   data-project-can-manage="{{ 'true' if _publication_can_manage else 'false' }}"
+  data-project-can-publish="{{ 'true' if _publication_can_publish else 'false' }}"
+  data-project-can-mutate="{{ 'true' if _publication_can_mutate else 'false' }}"
+  data-project-publication-can-write="{{ 'true' if _publication_can_write else 'false' }}"
+  data-project-demo-mode="{{ 'true' if _publication_demo_mode else 'false' }}"
+  data-project-persistent="{{ 'true' if _publication_persistent else 'false' }}"
+  data-project-public-viewer="{{ 'true' if _publication_public_viewer else 'false' }}"
+  data-project-read-only="{{ 'true' if _publication_read_only else 'false' }}"
+  data-project-auth-unavailable="{{ 'true' if _publication_auth_unavailable else 'false' }}"
+  data-project-user-blocked="{{ 'true' if _publication_user_blocked else 'false' }}"
+  data-project-access-blocked="{{ 'true' if _publication_access_blocked else 'false' }}"
+  data-project-publication-disabled="{{ 'false' if _publication_can_write else 'true' }}"
+  data-project-publication-disabled-reason="{{ _publication_disabled_reason|e }}"
 >
   <header class="vp-project-card__header">
     <div>
@@ -126,212 +296,167 @@
       </h2>
 
       <p class="vp-project-card__text">
-        Lege fest, welche Arbeitsbereiche Besucher/Viewer sehen dürfen
+        Lege fest, welche Workspace-Reiter über öffentliche oder nicht gelistete Projektlinks sichtbar sein dürfen.
       </p>
     </div>
 
-
+    <div class="vp-project-card__meta" aria-live="polite">
+      <span
+        class="vp-project-chip {% if _publication_auth_unavailable or _publication_user_blocked or _publication_access_blocked %}vp-project-chip--error{% elif _publication_visibility == 'private' %}vp-project-chip--muted{% elif _has_effective_publication %}vp-project-chip--success{% else %}vp-project-chip--warning{% endif %}"
+        data-project-publication-status
+      >
+        {% if _publication_auth_unavailable %}
+          Auth nicht erreichbar
+        {% elif _publication_user_blocked or _publication_access_blocked %}
+          Zugriff gesperrt
+        {% elif _publication_visibility == 'private' %}
+          Privat
+        {% elif _has_effective_publication %}
+          Reiter veröffentlicht
+        {% else %}
+          Keine Reiter veröffentlicht
+        {% endif %}
+      </span>
+    </div>
   </header>
 
-  {% if _publication_is_new %}
-    <div class="vp-project-inline-note vp-project-inline-note--locked" data-project-publication-new-note>
-      Speichere das Projekt zuerst. Danach kannst du festlegen, welche Reiter veröffentlicht werden.
-    </div>
-  {% elif not _publication_can_manage %}
-    <div class="vp-project-inline-note vp-project-inline-note--locked" data-project-publication-permission-note>
-      Du hast keine Berechtigung, Veröffentlichungseinstellungen zu sehen oder zu ändern.
-    </div>
-  {% elif _publication_demo_mode %}
-    <div class="vp-project-inline-note vp-project-inline-note--demo" data-project-publication-demo-note>
-      <strong>Demo-Modus:</strong>
-      Veröffentlichungseinstellungen werden nicht dauerhaft gespeichert.
+  {% if _publication_disabled_reason %}
+    <div
+      class="vp-project-inline-note {% if _publication_auth_unavailable or _publication_user_blocked or _publication_access_blocked %}vp-project-inline-note--error{% elif _publication_demo_mode %}vp-project-inline-note--demo{% else %}vp-project-inline-note--locked{% endif %}"
+      data-project-publication-disabled-note
+    >
+      {{ _publication_disabled_reason }}
     </div>
   {% elif _publication_visibility == 'private' %}
     <div class="vp-project-inline-note vp-project-inline-note--info" data-project-publication-private-note>
       Das Projekt ist aktuell privat. Ausgewählte Reiter bleiben intern, bis die Sichtbarkeit auf „Nicht gelistet“ oder „Öffentlich“ geändert wird.
     </div>
+  {% elif _publication_visibility == 'unlisted' %}
+    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-publication-unlisted-note>
+      Nicht gelistet bedeutet: Nur Personen mit Link können die explizit veröffentlichten Reiter öffnen.
+    </div>
+  {% elif _publication_visibility == 'public' %}
+    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-publication-public-note>
+      Öffentlich bedeutet nicht automatisch, dass alle Reiter sichtbar sind. Nur aktivierte Reiter werden veröffentlicht.
+    </div>
   {% endif %}
 
+  <p class="vp-project-help" data-project-publication-summary>
+    {% if _publication_visibility == 'private' %}
+      Private Projekte veröffentlichen keine Workspaces.
+    {% elif _has_effective_publication %}
+      Ausgewählte Reiter sind für den aktuellen Veröffentlichungsmodus sichtbar.
+    {% else %}
+      Projekt ist {{ _publication_visibility }}, aber kein Workspace ist veröffentlicht.
+    {% endif %}
+  </p>
+
   <div class="vp-project-publication-grid" data-project-publication-options>
-    <label
-      class="vp-project-toggle-card {% if _project_published %}is-selected{% endif %} {% if _effective_project %}is-effective{% endif %}"
-      data-project-publication-option
-      data-workspace="project"
-    >
-      <input
-        type="checkbox"
-        name="published_workspaces[project]"
-        value="1"
-        data-project-publication-checkbox
-        data-workspace="project"
-        {% if _project_published %}checked{% endif %}
-        {% if not _publication_form_enabled %}disabled{% endif %}
+    {% for item in _workspace_items %}
+      <label
+        class="vp-project-toggle-card{% if item.published %} is-selected{% endif %}{% if item.effective %} is-effective{% endif %}{% if not _publication_can_write %} is-disabled{% endif %}"
+        data-project-publication-option
+        data-workspace="{{ item.key|e }}"
+        data-value="{{ item.key|e }}"
+        data-published="{{ 'true' if item.published else 'false' }}"
+        data-effective-published="{{ 'true' if item.effective else 'false' }}"
+        aria-disabled="{{ 'false' if _publication_can_write else 'true' }}"
+        tabindex="{{ '0' if _publication_can_write else '-1' }}"
       >
+        <input
+          type="checkbox"
+          name="published_workspaces[{{ item.key|e }}]"
+          value="1"
+          data-project-publication-checkbox
+          data-workspace="{{ item.key|e }}"
+          {% if item.published %}checked{% endif %}
+          {% if not _publication_can_write %}disabled{% endif %}
+        >
 
-      <span class="vp-project-toggle-card__body">
-        <span class="vp-project-toggle-card__title">
-          Projektinfo
+        <span class="vp-project-toggle-card__body">
+          <span class="vp-project-toggle-card__title">
+            {{ item.title }}
+          </span>
+
+          <span class="vp-project-toggle-card__text">
+            {{ item.text }}
+          </span>
+
+          <span class="vp-project-toggle-card__meta">
+            {% if item.effective %}
+              Effektiv veröffentlicht
+            {% elif item.published and _publication_visibility == 'private' %}
+              Ausgewählt, aber privat
+            {% elif item.published %}
+              Ausgewählt
+            {% else %}
+              Nicht veröffentlicht
+            {% endif %}
+          </span>
         </span>
-
-        <span class="vp-project-toggle-card__text">
-          Basisdaten, Beschreibung und sichtbare Projektinformationen.
-        </span>
-
-
-      </span>
-    </label>
-
-    <label
-      class="vp-project-toggle-card {% if _map_published %}is-selected{% endif %} {% if _effective_map %}is-effective{% endif %}"
-      data-project-publication-option
-      data-workspace="map"
-    >
-      <input
-        type="checkbox"
-        name="published_workspaces[map]"
-        value="1"
-        data-project-publication-checkbox
-        data-workspace="map"
-        {% if _map_published %}checked{% endif %}
-        {% if not _publication_form_enabled %}disabled{% endif %}
-      >
-
-      <span class="vp-project-toggle-card__body">
-        <span class="vp-project-toggle-card__title">
-          Map
-        </span>
-
-        <span class="vp-project-toggle-card__text">
-          Kartenansicht und geobezogene Projektansicht.
-        </span>
-
-
-      </span>
-    </label>
-
-    <label
-      class="vp-project-toggle-card {% if _editor_published %}is-selected{% endif %} {% if _effective_editor %}is-effective{% endif %}"
-      data-project-publication-option
-      data-workspace="editor3d"
-    >
-      <input
-        type="checkbox"
-        name="published_workspaces[editor3d]"
-        value="1"
-        data-project-publication-checkbox
-        data-workspace="editor3d"
-        {% if _editor_published %}checked{% endif %}
-        {% if not _publication_form_enabled %}disabled{% endif %}
-      >
-
-      <span class="vp-project-toggle-card__body">
-        <span class="vp-project-toggle-card__title">
-          3D
-        </span>
-
-        <span class="vp-project-toggle-card__text">
-          3D-Editor oder 3D-Viewer-Einstieg für das Projekt.
-        </span>
-
-
-      </span>
-    </label>
-
-    <label
-      class="vp-project-toggle-card {% if _cad2d_published %}is-selected{% endif %} {% if _effective_cad2d %}is-effective{% endif %}"
-      data-project-publication-option
-      data-workspace="cad2d"
-    >
-      <input
-        type="checkbox"
-        name="published_workspaces[cad2d]"
-        value="1"
-        data-project-publication-checkbox
-        data-workspace="cad2d"
-        {% if _cad2d_published %}checked{% endif %}
-        {% if not _publication_form_enabled %}disabled{% endif %}
-      >
-
-      <span class="vp-project-toggle-card__body">
-        <span class="vp-project-toggle-card__title">
-          2D
-        </span>
-
-        <span class="vp-project-toggle-card__text">
-          2D-/CAD-Ansicht, Pläne und zeichnungsbezogene Projektansicht.
-        </span>
-
-
-      </span>
-    </label>
-
-    <label
-      class="vp-project-toggle-card {% if _lv_published %}is-selected{% endif %} {% if _effective_lv %}is-effective{% endif %}"
-      data-project-publication-option
-      data-workspace="lv"
-    >
-      <input
-        type="checkbox"
-        name="published_workspaces[lv]"
-        value="1"
-        data-project-publication-checkbox
-        data-workspace="lv"
-        {% if _lv_published %}checked{% endif %}
-        {% if not _publication_form_enabled %}disabled{% endif %}
-      >
-
-      <span class="vp-project-toggle-card__body">
-        <span class="vp-project-toggle-card__title">
-          LV
-        </span>
-
-        <span class="vp-project-toggle-card__text">
-          Leistungsverzeichnis oder spätere LV-Auswertung.
-        </span>
-
-
-      </span>
-    </label>
-
-    <label
-      class="vp-project-toggle-card {% if _versions_published %}is-selected{% endif %} {% if _effective_versions %}is-effective{% endif %}"
-      data-project-publication-option
-      data-workspace="versions"
-    >
-      <input
-        type="checkbox"
-        name="published_workspaces[versions]"
-        value="1"
-        data-project-publication-checkbox
-        data-workspace="versions"
-        {% if _versions_published %}checked{% endif %}
-        {% if not _publication_form_enabled %}disabled{% endif %}
-      >
-
-      <span class="vp-project-toggle-card__body">
-        <span class="vp-project-toggle-card__title">
-          Versionen
-        </span>
-
-        <span class="vp-project-toggle-card__text">
-          Projektstände, Snapshots und sichtbare Versionsinformationen.
-        </span>
-
-
-      </span>
-    </label>
+      </label>
+    {% endfor %}
   </div>
 
+  <div class="vp-project-publication-rules" data-project-publication-rules>
+    <label class="vp-project-checkline">
+      <input
+        type="checkbox"
+        name="require_auth"
+        value="1"
+        data-project-publication-require-auth
+        {% if _require_auth %}checked{% endif %}
+        {% if not _publication_can_write or _publication_visibility == 'private' %}disabled{% endif %}
+      >
+      <span>
+        Login für veröffentlichte Reiter erforderlich
+      </span>
+    </label>
 
+    <label class="vp-project-checkline">
+      <input
+        type="checkbox"
+        name="require_project_permission"
+        value="1"
+        data-project-publication-require-permission
+        {% if _require_project_permission %}checked{% endif %}
+        {% if not _publication_can_write or _publication_visibility == 'private' %}disabled{% endif %}
+      >
+      <span>
+        Projektberechtigung zusätzlich erforderlich
+      </span>
+    </label>
+
+    {% if _publication_visibility == 'private' %}
+      <p class="vp-project-help">
+        Bei privaten Projekten bleiben Login und Projektberechtigung zwingend aktiv.
+      </p>
+    {% endif %}
+  </div>
+
+  <div class="vp-project-publication-never-public" data-project-publication-never-public>
+    <p class="vp-project-help">
+      Nie öffentlich: Admin, Team, Einstellungen, Rechte, System und Systemreferenzen.
+    </p>
+  </div>
 
   <div class="vp-project-publication-actions" data-project-publication-actions>
-
+    <button
+      type="button"
+      class="vp-project-btn vp-project-btn--secondary"
+      data-project-publication-reset
+      {% if not _publication_can_write %}disabled{% endif %}
+      {% if _publication_disabled_reason %}title="{{ _publication_disabled_reason|e }}"{% endif %}
+    >
+      Zurücksetzen
+    </button>
 
     <button
       type="button"
       class="vp-project-btn vp-project-btn--primary"
       data-project-publication-save
-      {% if not _publication_form_enabled %}disabled{% endif %}
+      {% if not _publication_can_write %}disabled{% endif %}
+      {% if _publication_disabled_reason %}title="{{ _publication_disabled_reason|e }}"{% endif %}
     >
       Veröffentlichung speichern
     </button>
@@ -348,6 +473,14 @@
         "lv": {{ _lv_published|tojson }},
         "versions": {{ _versions_published|tojson }}
       },
+      "publishedWorkspaces": {
+        "project": {{ _project_published|tojson }},
+        "map": {{ _map_published|tojson }},
+        "editor3d": {{ _editor_published|tojson }},
+        "cad2d": {{ _cad2d_published|tojson }},
+        "lv": {{ _lv_published|tojson }},
+        "versions": {{ _versions_published|tojson }}
+      },
       "effective_published_workspaces": {
         "project": {{ _effective_project|tojson }},
         "map": {{ _effective_map|tojson }},
@@ -356,11 +489,41 @@
         "lv": {{ _effective_lv|tojson }},
         "versions": {{ _effective_versions|tojson }}
       },
+      "effectivePublishedWorkspaces": {
+        "project": {{ _effective_project|tojson }},
+        "map": {{ _effective_map|tojson }},
+        "editor3d": {{ _effective_editor|tojson }},
+        "cad2d": {{ _effective_cad2d|tojson }},
+        "lv": {{ _effective_lv|tojson }},
+        "versions": {{ _effective_versions|tojson }}
+      },
       "require_auth": {{ _require_auth|tojson }},
+      "requireAuth": {{ _require_auth|tojson }},
       "require_project_permission": {{ _require_project_permission|tojson }},
+      "requireProjectPermission": {{ _require_project_permission|tojson }},
       "can_manage": {{ _publication_can_manage|tojson }},
+      "canManage": {{ _publication_can_manage|tojson }},
+      "can_publish": {{ _publication_can_publish|tojson }},
+      "canPublish": {{ _publication_can_publish|tojson }},
+      "can_write": {{ _publication_can_write|tojson }},
+      "canWrite": {{ _publication_can_write|tojson }},
       "is_new": {{ _publication_is_new|tojson }},
-      "demo_mode": {{ _publication_demo_mode|tojson }}
+      "isNew": {{ _publication_is_new|tojson }},
+      "demo_mode": {{ _publication_demo_mode|tojson }},
+      "demoMode": {{ _publication_demo_mode|tojson }},
+      "persistent": {{ _publication_persistent|tojson }},
+      "public_viewer": {{ _publication_public_viewer|tojson }},
+      "publicViewer": {{ _publication_public_viewer|tojson }},
+      "read_only": {{ _publication_read_only|tojson }},
+      "readOnly": {{ _publication_read_only|tojson }},
+      "auth_unavailable": {{ _publication_auth_unavailable|tojson }},
+      "authUnavailable": {{ _publication_auth_unavailable|tojson }},
+      "user_blocked": {{ _publication_user_blocked|tojson }},
+      "userBlocked": {{ _publication_user_blocked|tojson }},
+      "access_blocked": {{ _publication_access_blocked|tojson }},
+      "accessBlocked": {{ _publication_access_blocked|tojson }},
+      "endpoint": {{ _publication_url|tojson }},
+      "never_public_workspaces": ["admin", "team", "settings", "permissions", "system", "system_refs"]
     }
   </script>
 

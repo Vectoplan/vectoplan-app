@@ -5,95 +5,425 @@
   Zweck:
   - Team-, Mitglieder- und Einladungsbereich im Projektformular.
   - Zeigt bestehende Projektmitglieder mit Rollen und effektiven Rechten.
-  - Ermöglicht Einladungen per E-Mail.
-  - Wichtig: vectoplan-app erzeugt keine echten Useraccounts.
-  - Eine Einladung darf nur an eine im späteren Auth-/Registrierungsdienst
-    registrierte E-Mail-Adresse gehen.
+  - Ermöglicht Einladungen per registrierter E-Mail.
+  - vectoplan-app erzeugt keine echten Useraccounts.
+  - Einladungen dürfen nur an registrierte E-Mail-Adressen gehen.
   - Nicht registrierte E-Mails werden serverseitig abgelehnt.
   - Pending-Einladungen werden separat von Mitgliedschaften angezeigt.
   - Owner/Admin/Manager können Rollen ändern und Mitglieder entfernen.
-  - Unberechtigte User sehen diesen Bereich nicht oder nur als gesperrten Hinweis.
-
-  Erwartete optionale Variablen:
-  - project
-  - current_project
-  - _project
-  - current_user
-  - _current_user
-  - can_edit
-  - _can_edit
-  - can_manage
-  - _can_manage
-  - is_new
-  - _is_new
-  - demo_mode
-  - _demo_mode
-
-  Erwartete optionale Projektfelder:
-  - project.members
-  - project.invitations
-  - project.access
-  - project.public_id / project.publicId / project.id
-
-  API-Ziele:
-  - GET    /v1/projects/<project_id>/members
-  - GET    /v1/projects/<project_id>/invitations
-  - POST   /v1/projects/<project_id>/invitations
-  - PATCH  /v1/projects/<project_id>/members/<user_id>
-  - DELETE /v1/projects/<project_id>/members/<user_id>
-  - DELETE /v1/projects/<project_id>/invitations/<invitation_id>
+  - Public Viewer sehen diesen Bereich nicht.
+  - Demo-Kontext darf keine Team-/Invitation-Aktionen ausführen.
+  - Teamdaten sind nie öffentlich und nie Teil einer Publication.
 
   Robustheitsregel:
-  - Bei Dicts immer .get(...) verwenden.
+  - Keine tief verschachtelten Jinja-Ausdrücke.
+  - Bei Dicts wird Mapping geprüft.
   - Partial darf auch rendern, wenn members/invitations noch nicht vorgeladen sind.
+  - Frontend-Gating ist nur UX. Backend bleibt die Wahrheit.
 #}
 
-{% set _team_project_raw = _project|default(project|default(current_project|default({}, true), true), true) %}
+{% set _truthy_values = [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'Yes', 'YES', 'y', 'Y', 'on', 'On', 'ON', 'ja', 'Ja', 'JA', 'enabled', 'Enabled', 'ENABLED', 'ok', 'OK'] %}
+
+{# ------------------------------------------------------------------------- #}
+{# Defensive context extraction                                               #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _team_project_raw = project_view|default(none) %}
+{% if _team_project_raw is none %}
+  {% set _team_project_raw = _project|default(none) %}
+{% endif %}
+{% if _team_project_raw is none %}
+  {% set _team_project_raw = project|default(none) %}
+{% endif %}
+{% if _team_project_raw is none %}
+  {% set _team_project_raw = current_project|default({}, true) %}
+{% endif %}
 {% set _team_project = _team_project_raw if _team_project_raw is mapping else {} %}
 
-{% set _team_current_user_raw = _current_user|default(current_user|default({}, true), true) %}
+{% set _team_current_user_raw = current_user_view|default(none) %}
+{% if _team_current_user_raw is none %}
+  {% set _team_current_user_raw = _current_user|default(none) %}
+{% endif %}
+{% if _team_current_user_raw is none %}
+  {% set _team_current_user_raw = current_user|default({}, true) %}
+{% endif %}
 {% set _team_current_user = _team_current_user_raw if _team_current_user_raw is mapping else {} %}
 
-{% set _team_access_raw = _team_project.get('access', {}) %}
+{% set _team_access_raw = access_view|default(none) %}
+{% if _team_access_raw is none %}
+  {% set _team_access_raw = access|default(none) %}
+{% endif %}
+{% if _team_access_raw is none %}
+  {% set _team_access_raw = _access|default(none) %}
+{% endif %}
+{% if _team_access_raw is none %}
+  {% set _team_access_raw = _team_project.get('access', {}) %}
+{% endif %}
 {% set _team_access = _team_access_raw if _team_access_raw is mapping else {} %}
 
 {% set _team_permissions_raw = _team_access.get('permissions', {}) %}
 {% set _team_permissions = _team_permissions_raw if _team_permissions_raw is mapping else {} %}
 
-{% set _team_members_raw = _team_project.get('members', _team_project.get('team', [])) %}
+{% set _team_ui_raw = ui_flags|default(none) %}
+{% if _team_ui_raw is none %}
+  {% set _team_ui_raw = _team_project.get('ui_flags') %}
+{% endif %}
+{% if _team_ui_raw is none %}
+  {% set _team_ui_raw = _team_project.get('uiFlags', {}) %}
+{% endif %}
+{% set _team_ui = _team_ui_raw if _team_ui_raw is mapping else {} %}
+
+{% set _team_paths_raw = paths|default(none) %}
+{% if _team_paths_raw is none %}
+  {% set _team_paths_raw = _team_project.get('paths', {}) %}
+{% endif %}
+{% set _team_paths = _team_paths_raw if _team_paths_raw is mapping else {} %}
+
+{% set _team_members_raw = _team_project.get('members') %}
+{% if _team_members_raw is none %}
+  {% set _team_members_raw = _team_project.get('team', []) %}
+{% endif %}
 {% set _team_members = _team_members_raw if _team_members_raw is sequence and _team_members_raw is not string else [] %}
 
-{% set _team_invitations_raw = _team_project.get('invitations', _team_project.get('pending_invitations', _team_project.get('pendingInvitations', []))) %}
+{% set _team_invitations_raw = _team_project.get('invitations') %}
+{% if _team_invitations_raw is none %}
+  {% set _team_invitations_raw = _team_project.get('pending_invitations') %}
+{% endif %}
+{% if _team_invitations_raw is none %}
+  {% set _team_invitations_raw = _team_project.get('pendingInvitations', []) %}
+{% endif %}
 {% set _team_invitations = _team_invitations_raw if _team_invitations_raw is sequence and _team_invitations_raw is not string else [] %}
 
-{% set _team_project_id = _team_project.get('id', '') %}
-{% set _team_project_public_id = _team_project.get('public_id', _team_project.get('publicId', _team_project_id)) %}
+{# ------------------------------------------------------------------------- #}
+{# Project identity                                                           #}
+{# ------------------------------------------------------------------------- #}
 
-{% set _team_can_edit_raw = _can_edit|default(can_edit|default(_team_access.get('can_edit', _team_permissions.get('edit', true)), true), true) %}
-{% set _team_can_edit = true if _team_can_edit_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _team_project_id = _team_project.get('id') %}
+{% if not _team_project_id %}
+  {% set _team_project_id = _team_project.get('project_id') %}
+{% endif %}
+{% if not _team_project_id %}
+  {% set _team_project_id = _team_project.get('projectId', '') %}
+{% endif %}
 
-{% set _team_can_manage_raw = _can_manage|default(can_manage|default(_team_access.get('can_manage', _team_permissions.get('manage', false)), true), true) %}
-{% set _team_can_manage = true if _team_can_manage_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _team_project_public_id = _team_project.get('public_id') %}
+{% if not _team_project_public_id %}
+  {% set _team_project_public_id = _team_project.get('publicId') %}
+{% endif %}
+{% if not _team_project_public_id %}
+  {% set _team_project_public_id = _team_project.get('project_public_id') %}
+{% endif %}
+{% if not _team_project_public_id %}
+  {% set _team_project_public_id = _team_project.get('projectPublicId') %}
+{% endif %}
+{% if not _team_project_public_id %}
+  {% set _team_project_public_id = _team_project_id %}
+{% endif %}
+{% if not _team_project_public_id %}
+  {% set _team_project_public_id = 'new' %}
+{% endif %}
 
-{% set _team_is_new_raw = _is_new|default(is_new|default(_team_project.get('is_new', _team_project.get('isNew', false)), true), true) %}
-{% set _team_is_new = true if _team_is_new_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _members_path = _team_paths.get('members', '') %}
+{% if not _members_path and _team_project_public_id and _team_project_public_id != 'new' %}
+  {% set _members_path = '/v1/projects/' ~ _team_project_public_id ~ '/members' %}
+{% endif %}
 
-{% set _team_demo_raw = _demo_mode|default(demo_mode|default(_team_project.get('demo_mode', _team_project.get('demoMode', false)), true), true) %}
-{% set _team_demo_mode = true if _team_demo_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _invitations_path = _team_paths.get('invitations', '') %}
+{% if not _invitations_path and _team_project_public_id and _team_project_public_id != 'new' %}
+  {% set _invitations_path = '/v1/projects/' ~ _team_project_public_id ~ '/invitations' %}
+{% endif %}
 
-{% set _team_form_enabled = true if _team_can_edit and _team_can_manage and not _team_is_new and not _team_demo_mode else false %}
+{# ------------------------------------------------------------------------- #}
+{# Permission / mode flags                                                    #}
+{# ------------------------------------------------------------------------- #}
 
-{% set _members_path = '/v1/projects/' ~ _team_project_public_id ~ '/members' if _team_project_public_id and _team_project_public_id != 'new' else '' %}
-{% set _invitations_path = '/v1/projects/' ~ _team_project_public_id ~ '/invitations' if _team_project_public_id and _team_project_public_id != 'new' else '' %}
+{% set _team_can_edit_raw = _can_edit|default(none) %}
+{% if _team_can_edit_raw is none %}
+  {% set _team_can_edit_raw = can_edit|default(none) %}
+{% endif %}
+{% if _team_can_edit_raw is none %}
+  {% set _team_can_edit_raw = _team_ui.get('can_edit') %}
+{% endif %}
+{% if _team_can_edit_raw is none %}
+  {% set _team_can_edit_raw = _team_ui.get('canEdit') %}
+{% endif %}
+{% if _team_can_edit_raw is none %}
+  {% set _team_can_edit_raw = _team_access.get('can_edit') %}
+{% endif %}
+{% if _team_can_edit_raw is none %}
+  {% set _team_can_edit_raw = _team_access.get('canEdit') %}
+{% endif %}
+{% if _team_can_edit_raw is none %}
+  {% set _team_can_edit_raw = _team_permissions.get('edit', false) %}
+{% endif %}
+{% set _team_can_edit = true if _team_can_edit_raw in _truthy_values else false %}
+
+{% set _team_can_manage_raw = _can_manage|default(none) %}
+{% if _team_can_manage_raw is none %}
+  {% set _team_can_manage_raw = can_manage|default(none) %}
+{% endif %}
+{% if _team_can_manage_raw is none %}
+  {% set _team_can_manage_raw = _team_ui.get('can_manage') %}
+{% endif %}
+{% if _team_can_manage_raw is none %}
+  {% set _team_can_manage_raw = _team_ui.get('canManage') %}
+{% endif %}
+{% if _team_can_manage_raw is none %}
+  {% set _team_can_manage_raw = _team_access.get('can_manage') %}
+{% endif %}
+{% if _team_can_manage_raw is none %}
+  {% set _team_can_manage_raw = _team_access.get('canManage') %}
+{% endif %}
+{% if _team_can_manage_raw is none %}
+  {% set _team_can_manage_raw = _team_permissions.get('manage', false) %}
+{% endif %}
+{% set _team_can_manage = true if _team_can_manage_raw in _truthy_values else false %}
+
+{% set _team_can_manage_team_raw = _can_manage_team|default(none) %}
+{% if _team_can_manage_team_raw is none %}
+  {% set _team_can_manage_team_raw = can_manage_team|default(none) %}
+{% endif %}
+{% if _team_can_manage_team_raw is none %}
+  {% set _team_can_manage_team_raw = _team_ui.get('can_manage_team') %}
+{% endif %}
+{% if _team_can_manage_team_raw is none %}
+  {% set _team_can_manage_team_raw = _team_ui.get('canManageTeam') %}
+{% endif %}
+{% if _team_can_manage_team_raw is none %}
+  {% set _team_can_manage_team_raw = _team_access.get('can_manage_team') %}
+{% endif %}
+{% if _team_can_manage_team_raw is none %}
+  {% set _team_can_manage_team_raw = _team_access.get('canManageTeam') %}
+{% endif %}
+{% if _team_can_manage_team_raw is none %}
+  {% set _team_can_manage_team_raw = _team_permissions.get('manage_team') %}
+{% endif %}
+{% if _team_can_manage_team_raw is none %}
+  {% set _team_can_manage_team_raw = _team_permissions.get('manageTeam') %}
+{% endif %}
+{% if _team_can_manage_team_raw is none %}
+  {% set _team_can_manage_team_raw = _team_can_manage %}
+{% endif %}
+{% set _team_can_manage_team = true if _team_can_manage_team_raw in _truthy_values else false %}
+
+{% set _team_can_view_settings_raw = _can_view_settings|default(none) %}
+{% if _team_can_view_settings_raw is none %}
+  {% set _team_can_view_settings_raw = can_view_settings|default(none) %}
+{% endif %}
+{% if _team_can_view_settings_raw is none %}
+  {% set _team_can_view_settings_raw = _team_ui.get('can_view_settings') %}
+{% endif %}
+{% if _team_can_view_settings_raw is none %}
+  {% set _team_can_view_settings_raw = _team_ui.get('canViewSettings') %}
+{% endif %}
+{% if _team_can_view_settings_raw is none %}
+  {% set _team_can_view_settings_raw = _team_access.get('can_view_settings') %}
+{% endif %}
+{% if _team_can_view_settings_raw is none %}
+  {% set _team_can_view_settings_raw = _team_access.get('canViewSettings') %}
+{% endif %}
+{% if _team_can_view_settings_raw is none %}
+  {% set _team_can_view_settings_raw = _team_permissions.get('view_settings') %}
+{% endif %}
+{% if _team_can_view_settings_raw is none %}
+  {% set _team_can_view_settings_raw = _team_can_manage %}
+{% endif %}
+{% set _team_can_view_settings = true if _team_can_view_settings_raw in _truthy_values else false %}
+
+{% set _team_is_new_raw = _is_new|default(none) %}
+{% if _team_is_new_raw is none %}
+  {% set _team_is_new_raw = is_new|default(none) %}
+{% endif %}
+{% if _team_is_new_raw is none %}
+  {% set _team_is_new_raw = _team_ui.get('is_new') %}
+{% endif %}
+{% if _team_is_new_raw is none %}
+  {% set _team_is_new_raw = _team_ui.get('isNew') %}
+{% endif %}
+{% if _team_is_new_raw is none %}
+  {% set _team_is_new_raw = _team_project.get('is_new') %}
+{% endif %}
+{% if _team_is_new_raw is none %}
+  {% set _team_is_new_raw = _team_project.get('isNew', false) %}
+{% endif %}
+{% set _team_is_new = true if _team_is_new_raw in _truthy_values or _team_project_public_id == 'new' else false %}
+
+{% set _team_demo_raw = _demo_mode|default(none) %}
+{% if _team_demo_raw is none %}
+  {% set _team_demo_raw = demo_mode|default(none) %}
+{% endif %}
+{% if _team_demo_raw is none %}
+  {% set _team_demo_raw = _team_ui.get('demo_mode') %}
+{% endif %}
+{% if _team_demo_raw is none %}
+  {% set _team_demo_raw = _team_ui.get('demoMode') %}
+{% endif %}
+{% if _team_demo_raw is none %}
+  {% set _team_demo_raw = _team_project.get('demo_mode') %}
+{% endif %}
+{% if _team_demo_raw is none %}
+  {% set _team_demo_raw = _team_project.get('demoMode') %}
+{% endif %}
+{% if _team_demo_raw is none %}
+  {% set _team_demo_raw = _team_access.get('demo_mode') %}
+{% endif %}
+{% if _team_demo_raw is none %}
+  {% set _team_demo_raw = _team_access.get('demoMode', false) %}
+{% endif %}
+{% set _team_demo_mode = true if _team_demo_raw in _truthy_values else false %}
+
+{% set _team_persistent_raw = _persistent|default(none) %}
+{% if _team_persistent_raw is none %}
+  {% set _team_persistent_raw = persistent|default(none) %}
+{% endif %}
+{% if _team_persistent_raw is none %}
+  {% set _team_persistent_raw = _team_ui.get('persistent') %}
+{% endif %}
+{% if _team_persistent_raw is none %}
+  {% set _team_persistent_raw = _team_access.get('persistent', true) %}
+{% endif %}
+{% set _team_persistent = true if _team_persistent_raw in _truthy_values else false %}
+
+{% set _team_public_viewer_raw = _public_viewer|default(none) %}
+{% if _team_public_viewer_raw is none %}
+  {% set _team_public_viewer_raw = public_viewer|default(none) %}
+{% endif %}
+{% if _team_public_viewer_raw is none %}
+  {% set _team_public_viewer_raw = _team_ui.get('public_viewer') %}
+{% endif %}
+{% if _team_public_viewer_raw is none %}
+  {% set _team_public_viewer_raw = _team_ui.get('publicViewer') %}
+{% endif %}
+{% if _team_public_viewer_raw is none %}
+  {% set _team_public_viewer_raw = _team_access.get('public_viewer') %}
+{% endif %}
+{% if _team_public_viewer_raw is none %}
+  {% set _team_public_viewer_raw = _team_access.get('publicViewer', false) %}
+{% endif %}
+{% set _team_public_viewer = true if _team_public_viewer_raw in _truthy_values else false %}
+
+{% set _team_read_only_raw = _read_only|default(none) %}
+{% if _team_read_only_raw is none %}
+  {% set _team_read_only_raw = read_only|default(none) %}
+{% endif %}
+{% if _team_read_only_raw is none %}
+  {% set _team_read_only_raw = _team_ui.get('read_only') %}
+{% endif %}
+{% if _team_read_only_raw is none %}
+  {% set _team_read_only_raw = _team_ui.get('readOnly') %}
+{% endif %}
+{% if _team_read_only_raw is none %}
+  {% set _team_read_only_raw = _team_access.get('read_only') %}
+{% endif %}
+{% if _team_read_only_raw is none %}
+  {% set _team_read_only_raw = _team_access.get('readOnly', false) %}
+{% endif %}
+{% set _team_read_only = true if _team_read_only_raw in _truthy_values else false %}
+
+{% set _team_auth_unavailable_raw = _auth_unavailable|default(none) %}
+{% if _team_auth_unavailable_raw is none %}
+  {% set _team_auth_unavailable_raw = auth_unavailable|default(none) %}
+{% endif %}
+{% if _team_auth_unavailable_raw is none %}
+  {% set _team_auth_unavailable_raw = _team_ui.get('auth_unavailable') %}
+{% endif %}
+{% if _team_auth_unavailable_raw is none %}
+  {% set _team_auth_unavailable_raw = _team_ui.get('authUnavailable') %}
+{% endif %}
+{% if _team_auth_unavailable_raw is none %}
+  {% set _team_auth_unavailable_raw = _team_access.get('auth_unavailable') %}
+{% endif %}
+{% if _team_auth_unavailable_raw is none %}
+  {% set _team_auth_unavailable_raw = _team_access.get('authUnavailable', false) %}
+{% endif %}
+{% set _team_auth_unavailable = true if _team_auth_unavailable_raw in _truthy_values else false %}
+
+{% set _team_user_blocked_raw = _user_blocked|default(none) %}
+{% if _team_user_blocked_raw is none %}
+  {% set _team_user_blocked_raw = user_blocked|default(none) %}
+{% endif %}
+{% if _team_user_blocked_raw is none %}
+  {% set _team_user_blocked_raw = _team_ui.get('user_blocked') %}
+{% endif %}
+{% if _team_user_blocked_raw is none %}
+  {% set _team_user_blocked_raw = _team_ui.get('userBlocked') %}
+{% endif %}
+{% if _team_user_blocked_raw is none %}
+  {% set _team_user_blocked_raw = _team_access.get('user_blocked') %}
+{% endif %}
+{% if _team_user_blocked_raw is none %}
+  {% set _team_user_blocked_raw = _team_access.get('userBlocked', false) %}
+{% endif %}
+{% set _team_user_blocked = true if _team_user_blocked_raw in _truthy_values else false %}
+
+{% set _team_access_blocked_raw = _access_blocked|default(none) %}
+{% if _team_access_blocked_raw is none %}
+  {% set _team_access_blocked_raw = access_blocked|default(none) %}
+{% endif %}
+{% if _team_access_blocked_raw is none %}
+  {% set _team_access_blocked_raw = _team_ui.get('access_blocked') %}
+{% endif %}
+{% if _team_access_blocked_raw is none %}
+  {% set _team_access_blocked_raw = _team_ui.get('accessBlocked') %}
+{% endif %}
+{% if _team_access_blocked_raw is none %}
+  {% set _team_access_blocked_raw = _team_access.get('access_blocked') %}
+{% endif %}
+{% if _team_access_blocked_raw is none %}
+  {% set _team_access_blocked_raw = _team_access.get('accessBlocked', false) %}
+{% endif %}
+{% set _team_access_blocked = true if _team_access_blocked_raw in _truthy_values else false %}
+
+{% set _team_form_enabled = true if _team_can_manage and _team_can_manage_team and not _team_is_new and not _team_demo_mode and _team_persistent and not _team_public_viewer and not _team_read_only and not _team_auth_unavailable and not _team_user_blocked and not _team_access_blocked and _members_path and _invitations_path else false %}
+
+{# ------------------------------------------------------------------------- #}
+{# Disabled reason                                                            #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _team_disabled_reason = '' %}
+{% if _team_auth_unavailable %}
+  {% set _team_disabled_reason = 'Auth-Service nicht erreichbar. Teamverwaltung ist deaktiviert.' %}
+{% elif _team_user_blocked or _team_access_blocked %}
+  {% set _team_disabled_reason = 'Der Zugriff ist gesperrt. Teamverwaltung ist deaktiviert.' %}
+{% elif _team_public_viewer %}
+  {% set _team_disabled_reason = 'Öffentliche Ansicht: Team, Einladungen und Rechte sind nicht öffentlich verfügbar.' %}
+{% elif _team_read_only %}
+  {% set _team_disabled_reason = 'Dieses Projekt ist schreibgeschützt. Teamverwaltung ist deaktiviert.' %}
+{% elif _team_is_new %}
+  {% set _team_disabled_reason = 'Speichere das Projekt zuerst. Danach kannst du Team und Einladungen verwalten.' %}
+{% elif _team_demo_mode %}
+  {% set _team_disabled_reason = 'Demo-Projekte unterstützen keine dauerhafte Team- oder Einladungsverwaltung.' %}
+{% elif not _team_persistent %}
+  {% set _team_disabled_reason = 'Für Teamverwaltung ist ein persistenter AppUser-Kontext erforderlich.' %}
+{% elif not _team_can_manage %}
+  {% set _team_disabled_reason = 'Du hast keine Projektverwaltungsrechte.' %}
+{% elif not _team_can_manage_team %}
+  {% set _team_disabled_reason = 'Du hast keine Berechtigung, Team und Einladungen zu verwalten.' %}
+{% elif not _members_path or not _invitations_path %}
+  {% set _team_disabled_reason = 'Team-Endpunkte fehlen.' %}
+{% endif %}
 
 <section
-  class="vp-project-card vp-project-card--team"
+  class="vp-project-card vp-project-card--team{% if not _team_form_enabled %} is-disabled{% endif %}{% if _team_read_only %} is-readonly{% endif %}"
   aria-labelledby="projectTeamTitle"
   data-project-team-card
   data-project-public-id="{{ _team_project_public_id|e }}"
+  data-project-id="{{ _team_project_id|e }}"
   data-project-is-new="{{ 'true' if _team_is_new else 'false' }}"
+  data-project-can-edit="{{ 'true' if _team_can_edit else 'false' }}"
   data-project-can-manage="{{ 'true' if _team_can_manage else 'false' }}"
+  data-project-can-manage-team="{{ 'true' if _team_can_manage_team else 'false' }}"
+  data-project-can-view-settings="{{ 'true' if _team_can_view_settings else 'false' }}"
+  data-project-team-can-write="{{ 'true' if _team_form_enabled else 'false' }}"
   data-project-demo-mode="{{ 'true' if _team_demo_mode else 'false' }}"
+  data-project-persistent="{{ 'true' if _team_persistent else 'false' }}"
+  data-project-public-viewer="{{ 'true' if _team_public_viewer else 'false' }}"
+  data-project-read-only="{{ 'true' if _team_read_only else 'false' }}"
+  data-project-auth-unavailable="{{ 'true' if _team_auth_unavailable else 'false' }}"
+  data-project-user-blocked="{{ 'true' if _team_user_blocked else 'false' }}"
+  data-project-access-blocked="{{ 'true' if _team_access_blocked else 'false' }}"
+  data-project-team-disabled="{{ 'false' if _team_form_enabled else 'true' }}"
+  data-project-team-disabled-reason="{{ _team_disabled_reason|e }}"
   data-members-url="{{ _members_path|e }}"
   data-invitations-url="{{ _invitations_path|e }}"
 >
@@ -108,11 +438,49 @@
       </p>
     </div>
 
-
+    <div class="vp-project-card__meta" aria-live="polite">
+      <span
+        class="vp-project-chip {% if _team_auth_unavailable or _team_user_blocked or _team_access_blocked %}vp-project-chip--error{% elif _team_form_enabled %}vp-project-chip--success{% elif _team_is_new %}vp-project-chip--warning{% else %}vp-project-chip--muted{% endif %}"
+        data-project-team-status
+      >
+        {% if _team_auth_unavailable %}
+          Auth nicht erreichbar
+        {% elif _team_user_blocked or _team_access_blocked %}
+          Zugriff gesperrt
+        {% elif _team_form_enabled %}
+          Verwaltung aktiv
+        {% elif _team_is_new %}
+          Erst speichern
+        {% elif _team_demo_mode %}
+          Demo
+        {% else %}
+          Geschützt
+        {% endif %}
+      </span>
+    </div>
   </header>
 
+  {% if _team_disabled_reason %}
+    <div
+      class="vp-project-inline-note {% if _team_auth_unavailable or _team_user_blocked or _team_access_blocked %}vp-project-inline-note--error{% elif _team_demo_mode %}vp-project-inline-note--demo{% else %}vp-project-inline-note--locked{% endif %}"
+      data-project-team-disabled-note
+    >
+      {{ _team_disabled_reason }}
+    </div>
+  {% endif %}
 
-  {% if _team_can_manage %}
+  {% if _team_public_viewer %}
+    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-team-public-note>
+      Öffentliche Ansicht: Team, Mitglieder, Einladungen und Rechte sind nicht sichtbar.
+    </div>
+  {% elif _team_demo_mode %}
+    <div class="vp-project-inline-note vp-project-inline-note--demo" data-project-team-demo-note>
+      <strong>Demo-Modus:</strong>
+      Team- und Einladungsverwaltung ist in Demo-Projekten deaktiviert.
+    </div>
+  {% endif %}
+
+  {% if not _team_public_viewer %}
     <section
       class="vp-project-team-invite"
       aria-labelledby="projectTeamInviteTitle"
@@ -139,10 +507,11 @@
             placeholder="name@example.com"
             data-project-team-invite-email
             {% if not _team_form_enabled %}disabled{% endif %}
+            {% if _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
           >
 
           <p class="vp-project-help">
-            Die Adresse muss bereits im externen Registrierungs-/Anmeldesystem existieren.
+            Die Adresse muss bereits im externen Registrierungs-/Anmeldesystem existieren. vectoplan-app erzeugt keine Useraccounts.
           </p>
         </div>
 
@@ -157,13 +526,12 @@
             name="invite_role"
             data-project-team-invite-role
             {% if not _team_form_enabled %}disabled{% endif %}
+            {% if _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
           >
             <option value="viewer">Viewer | Ansehen</option>
             <option value="editor" selected>Editor | Bearbeiten</option>
             <option value="admin">Admin | Projekt verwalten</option>
           </select>
-
-
         </div>
 
         <div class="vp-project-field vp-project-field--actions">
@@ -172,6 +540,7 @@
             class="vp-project-btn vp-project-btn--primary"
             data-project-team-invite-submit
             {% if not _team_form_enabled %}disabled{% endif %}
+            {% if _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
           >
             Einladung senden
           </button>
@@ -186,9 +555,7 @@
         hidden
       ></div>
     </section>
-  {% endif %}
 
-  {% if _team_can_manage %}
     <section
       class="vp-project-team-members"
       aria-labelledby="projectMembersTitle"
@@ -200,10 +567,21 @@
             Mitglieder
           </h3>
 
-
+          <p class="vp-project-help">
+            Rollen bestimmen die effektiven Projektrechte. Owner können nicht über diese Oberfläche entfernt werden.
+          </p>
         </div>
 
-
+        <div class="vp-project-section-actions">
+          <button
+            type="button"
+            class="vp-project-btn vp-project-btn--secondary"
+            data-project-team-members-refresh
+            {% if not _members_path %}disabled{% endif %}
+          >
+            Aktualisieren
+          </button>
+        </div>
       </div>
 
       <div
@@ -219,24 +597,108 @@
             {% set _member_permissions_raw = _member.get('permissions', {}) %}
             {% set _member_permissions = _member_permissions_raw if _member_permissions_raw is mapping else {} %}
 
-            {% set _member_user_id = _member.get('user_id', _member.get('userId', _member_user.get('id', ''))) %}
-            {% set _member_display_name = _member_user.get('display_name', _member_user.get('displayName', _member.get('display_name', _member.get('displayName', 'Unbekannter Benutzer')))) %}
-            {% set _member_email = _member_user.get('email', _member.get('email', '')) %}
-            {% set _member_role = _member.get('role', 'viewer') %}
-            {% set _member_status = _member.get('status', 'active') %}
+            {% set _member_user_id = _member.get('user_id') %}
+            {% if not _member_user_id %}
+              {% set _member_user_id = _member.get('userId') %}
+            {% endif %}
+            {% if not _member_user_id %}
+              {% set _member_user_id = _member_user.get('id') %}
+            {% endif %}
+            {% if not _member_user_id %}
+              {% set _member_user_id = _member.get('id', '') %}
+            {% endif %}
 
-            {% set _member_can_view = true if _member.get('can_view', _member_permissions.get('view', false)) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-            {% set _member_can_edit = true if _member.get('can_edit', _member_permissions.get('edit', false)) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-            {% set _member_can_manage = true if _member.get('can_manage', _member_permissions.get('manage', false)) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-            {% set _member_can_delete = true if _member.get('can_delete', _member_permissions.get('delete', false)) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-            {% set _member_can_embed = true if _member.get('can_embed', _member_permissions.get('embed', false)) in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+            {% set _member_display_name = _member_user.get('display_name') %}
+            {% if not _member_display_name %}
+              {% set _member_display_name = _member_user.get('displayName') %}
+            {% endif %}
+            {% if not _member_display_name %}
+              {% set _member_display_name = _member.get('display_name') %}
+            {% endif %}
+            {% if not _member_display_name %}
+              {% set _member_display_name = _member.get('displayName') %}
+            {% endif %}
+            {% if not _member_display_name %}
+              {% set _member_display_name = _member.get('name', 'Unbekannter Benutzer') %}
+            {% endif %}
+
+            {% set _member_email = _member_user.get('email') %}
+            {% if not _member_email %}
+              {% set _member_email = _member.get('email', '') %}
+            {% endif %}
+
+            {% set _member_role_raw = _member.get('role') %}
+            {% if not _member_role_raw %}
+              {% set _member_role_raw = _member.get('project_role') %}
+            {% endif %}
+            {% if not _member_role_raw %}
+              {% set _member_role_raw = _member.get('projectRole', 'viewer') %}
+            {% endif %}
+            {% set _member_role = _member_role_raw|string|lower %}
+            {% set _member_status = _member.get('status', 'active') %}
+            {% set _member_is_owner = true if _member_role == 'owner' else false %}
+
+            {% set _member_can_view_raw = _member.get('can_view') %}
+            {% if _member_can_view_raw is none %}
+              {% set _member_can_view_raw = _member.get('canView') %}
+            {% endif %}
+            {% if _member_can_view_raw is none %}
+              {% set _member_can_view_raw = _member_permissions.get('view', false) %}
+            {% endif %}
+            {% set _member_can_view = true if _member_can_view_raw in _truthy_values or _member_role in ['owner', 'admin', 'editor', 'viewer'] else false %}
+
+            {% set _member_can_edit_raw = _member.get('can_edit') %}
+            {% if _member_can_edit_raw is none %}
+              {% set _member_can_edit_raw = _member.get('canEdit') %}
+            {% endif %}
+            {% if _member_can_edit_raw is none %}
+              {% set _member_can_edit_raw = _member_permissions.get('edit', false) %}
+            {% endif %}
+            {% set _member_can_edit = true if _member_can_edit_raw in _truthy_values or _member_role in ['owner', 'admin', 'editor'] else false %}
+
+            {% set _member_can_manage_raw = _member.get('can_manage') %}
+            {% if _member_can_manage_raw is none %}
+              {% set _member_can_manage_raw = _member.get('canManage') %}
+            {% endif %}
+            {% if _member_can_manage_raw is none %}
+              {% set _member_can_manage_raw = _member_permissions.get('manage', false) %}
+            {% endif %}
+            {% set _member_can_manage = true if _member_can_manage_raw in _truthy_values or _member_role in ['owner', 'admin'] else false %}
+
+            {% set _member_can_manage_team_raw = _member.get('can_manage_team') %}
+            {% if _member_can_manage_team_raw is none %}
+              {% set _member_can_manage_team_raw = _member.get('canManageTeam') %}
+            {% endif %}
+            {% if _member_can_manage_team_raw is none %}
+              {% set _member_can_manage_team_raw = _member_permissions.get('manage_team', false) %}
+            {% endif %}
+            {% set _member_can_manage_team = true if _member_can_manage_team_raw in _truthy_values or _member_role in ['owner', 'admin'] else false %}
+
+            {% set _member_can_delete_raw = _member.get('can_delete') %}
+            {% if _member_can_delete_raw is none %}
+              {% set _member_can_delete_raw = _member.get('canDelete') %}
+            {% endif %}
+            {% if _member_can_delete_raw is none %}
+              {% set _member_can_delete_raw = _member_permissions.get('delete', false) %}
+            {% endif %}
+            {% set _member_can_delete = true if _member_can_delete_raw in _truthy_values or _member_role == 'owner' else false %}
+
+            {% set _member_can_embed_raw = _member.get('can_embed') %}
+            {% if _member_can_embed_raw is none %}
+              {% set _member_can_embed_raw = _member.get('canEmbed') %}
+            {% endif %}
+            {% if _member_can_embed_raw is none %}
+              {% set _member_can_embed_raw = _member_permissions.get('embed', false) %}
+            {% endif %}
+            {% set _member_can_embed = true if _member_can_embed_raw in _truthy_values or _member_role in ['owner', 'admin'] else false %}
 
             <article
-              class="vp-project-team-row"
+              class="vp-project-team-row{% if _member_is_owner %} vp-project-team-row--owner{% endif %}"
               data-project-team-member
               data-user-id="{{ _member_user_id|e }}"
               data-role="{{ _member_role|e }}"
               data-status="{{ _member_status|e }}"
+              data-owner="{{ 'true' if _member_is_owner else 'false' }}"
             >
               <div class="vp-project-team-row__identity">
                 <div class="vp-project-avatar" aria-hidden="true">
@@ -251,8 +713,10 @@
                   <p class="vp-project-team-row__meta">
                     {% if _member_email %}
                       {{ _member_email }}
-                    {% else %}
+                    {% elif _member_user_id %}
                       User-ID: {{ _member_user_id }}
+                    {% else %}
+                      Unbekannte Benutzerreferenz
                     {% endif %}
                   </p>
                 </div>
@@ -268,12 +732,13 @@
                   class="vp-project-select vp-project-select--compact"
                   data-project-team-member-role
                   data-user-id="{{ _member_user_id|e }}"
-                  {% if not _team_form_enabled or _member_role == 'owner' %}disabled{% endif %}
+                  data-current-role="{{ _member_role|e }}"
+                  {% if not _team_form_enabled or _member_is_owner or not _member_user_id %}disabled{% endif %}
                 >
                   <option value="viewer" {% if _member_role == 'viewer' %}selected{% endif %}>Viewer</option>
                   <option value="editor" {% if _member_role == 'editor' %}selected{% endif %}>Editor</option>
                   <option value="admin" {% if _member_role == 'admin' %}selected{% endif %}>Admin</option>
-                  {% if _member_role == 'owner' %}
+                  {% if _member_is_owner %}
                     <option value="owner" selected>Owner</option>
                   {% endif %}
                 </select>
@@ -289,11 +754,17 @@
                 {% if _member_can_manage %}
                   <span class="vp-project-permission-chip">Verwalten</span>
                 {% endif %}
+                {% if _member_can_manage_team %}
+                  <span class="vp-project-permission-chip">Team</span>
+                {% endif %}
                 {% if _member_can_delete %}
                   <span class="vp-project-permission-chip">Löschen</span>
                 {% endif %}
                 {% if _member_can_embed %}
                   <span class="vp-project-permission-chip">Einbetten</span>
+                {% endif %}
+                {% if not _member_can_view and not _member_can_edit and not _member_can_manage %}
+                  <span class="vp-project-permission-chip vp-project-permission-chip--muted">Keine Rechte geladen</span>
                 {% endif %}
               </div>
 
@@ -303,7 +774,9 @@
                   class="vp-project-btn vp-project-btn--ghost"
                   data-project-team-member-save
                   data-user-id="{{ _member_user_id|e }}"
-                  {% if not _team_form_enabled or _member_role == 'owner' %}disabled{% endif %}
+                  data-current-role="{{ _member_role|e }}"
+                  {% if not _team_form_enabled or _member_is_owner or not _member_user_id %}disabled{% endif %}
+                  {% if _member_is_owner %}title="Owner können nicht über diese Oberfläche geändert werden."{% elif _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
                 >
                   Rolle speichern
                 </button>
@@ -313,7 +786,9 @@
                   class="vp-project-btn vp-project-btn--danger"
                   data-project-team-member-remove
                   data-user-id="{{ _member_user_id|e }}"
-                  {% if not _team_form_enabled or _member_role == 'owner' %}disabled{% endif %}
+                  data-current-role="{{ _member_role|e }}"
+                  {% if not _team_form_enabled or _member_is_owner or not _member_user_id %}disabled{% endif %}
+                  {% if _member_is_owner %}title="Owner können nicht über diese Oberfläche entfernt werden."{% elif _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
                 >
                   Entfernen
                 </button>
@@ -348,6 +823,17 @@
             Einladungen bleiben ausstehend, bis der eingeladene registrierte Account sie annimmt.
           </p>
         </div>
+
+        <div class="vp-project-section-actions">
+          <button
+            type="button"
+            class="vp-project-btn vp-project-btn--secondary"
+            data-project-team-invitations-refresh
+            {% if not _invitations_path %}disabled{% endif %}
+          >
+            Aktualisieren
+          </button>
+        </div>
       </div>
 
       <div
@@ -358,11 +844,39 @@
         {% if _team_invitations|length > 0 %}
           {% for invitation in _team_invitations %}
             {% set _inv = invitation if invitation is mapping else {} %}
-            {% set _inv_id = _inv.get('public_id', _inv.get('id', _inv.get('invitation_id', _inv.get('invitationId', '')))) %}
-            {% set _inv_email = _inv.get('email', '') %}
+
+            {% set _inv_id = _inv.get('public_id') %}
+            {% if not _inv_id %}
+              {% set _inv_id = _inv.get('publicId') %}
+            {% endif %}
+            {% if not _inv_id %}
+              {% set _inv_id = _inv.get('id') %}
+            {% endif %}
+            {% if not _inv_id %}
+              {% set _inv_id = _inv.get('invitation_id') %}
+            {% endif %}
+            {% if not _inv_id %}
+              {% set _inv_id = _inv.get('invitationId', '') %}
+            {% endif %}
+
+            {% set _inv_email = _inv.get('email') %}
+            {% if not _inv_email %}
+              {% set _inv_email = _inv.get('invitee_email') %}
+            {% endif %}
+            {% if not _inv_email %}
+              {% set _inv_email = _inv.get('inviteeEmail', '') %}
+            {% endif %}
+
             {% set _inv_role = _inv.get('role', 'viewer') %}
             {% set _inv_status = _inv.get('status', 'pending') %}
-            {% set _inv_expires_at = _inv.get('expires_at', _inv.get('expiresAt', '')) %}
+            {% set _inv_expires_at = _inv.get('expires_at') %}
+            {% if not _inv_expires_at %}
+              {% set _inv_expires_at = _inv.get('expiresAt', '') %}
+            {% endif %}
+            {% set _inv_created_at = _inv.get('created_at') %}
+            {% if not _inv_created_at %}
+              {% set _inv_created_at = _inv.get('createdAt', '') %}
+            {% endif %}
 
             <article
               class="vp-project-team-row vp-project-team-row--invitation"
@@ -383,6 +897,9 @@
 
                   <p class="vp-project-team-row__meta">
                     Status: {{ _inv_status }}
+                    {% if _inv_created_at %}
+                      · erstellt {{ _inv_created_at }}
+                    {% endif %}
                     {% if _inv_expires_at %}
                       · gültig bis {{ _inv_expires_at }}
                     {% endif %}
@@ -408,7 +925,9 @@
                   class="vp-project-btn vp-project-btn--danger"
                   data-project-team-invitation-revoke
                   data-invitation-id="{{ _inv_id|e }}"
-                  {% if not _team_form_enabled %}disabled{% endif %}
+                  data-status="{{ _inv_status|e }}"
+                  {% if not _team_form_enabled or not _inv_id %}disabled{% endif %}
+                  {% if _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
                 >
                   Widerrufen
                 </button>
@@ -426,21 +945,107 @@
     </section>
   {% endif %}
 
-
-
   <script type="application/json" data-project-team-initial-json>
     {
       "project_public_id": {{ _team_project_public_id|tojson }},
+      "projectPublicId": {{ _team_project_public_id|tojson }},
       "project_id": {{ _team_project_id|tojson }},
-      "can_manage": {{ _team_can_manage|tojson }},
+      "projectId": {{ _team_project_id|tojson }},
       "can_edit": {{ _team_can_edit|tojson }},
+      "canEdit": {{ _team_can_edit|tojson }},
+      "can_manage": {{ _team_can_manage|tojson }},
+      "canManage": {{ _team_can_manage|tojson }},
+      "can_manage_team": {{ _team_can_manage_team|tojson }},
+      "canManageTeam": {{ _team_can_manage_team|tojson }},
+      "can_view_settings": {{ _team_can_view_settings|tojson }},
+      "canViewSettings": {{ _team_can_view_settings|tojson }},
+      "can_write": {{ _team_form_enabled|tojson }},
+      "canWrite": {{ _team_form_enabled|tojson }},
       "is_new": {{ _team_is_new|tojson }},
+      "isNew": {{ _team_is_new|tojson }},
       "demo_mode": {{ _team_demo_mode|tojson }},
+      "demoMode": {{ _team_demo_mode|tojson }},
+      "persistent": {{ _team_persistent|tojson }},
+      "public_viewer": {{ _team_public_viewer|tojson }},
+      "publicViewer": {{ _team_public_viewer|tojson }},
+      "read_only": {{ _team_read_only|tojson }},
+      "readOnly": {{ _team_read_only|tojson }},
+      "auth_unavailable": {{ _team_auth_unavailable|tojson }},
+      "authUnavailable": {{ _team_auth_unavailable|tojson }},
+      "user_blocked": {{ _team_user_blocked|tojson }},
+      "userBlocked": {{ _team_user_blocked|tojson }},
+      "access_blocked": {{ _team_access_blocked|tojson }},
+      "accessBlocked": {{ _team_access_blocked|tojson }},
       "members_url": {{ _members_path|tojson }},
+      "membersUrl": {{ _members_path|tojson }},
       "invitations_url": {{ _invitations_path|tojson }},
-      "members": {{ _team_members|tojson }},
-      "invitations": {{ _team_invitations|tojson }},
-      "current_user": {{ _team_current_user|tojson }}
+      "invitationsUrl": {{ _invitations_path|tojson }},
+      "disabled_reason": {{ _team_disabled_reason|tojson }},
+      "members_count": {{ _team_members|length|tojson }},
+      "invitations_count": {{ _team_invitations|length|tojson }},
+      "current_user": {
+        "id": {{ _team_current_user.get('id', _team_current_user.get('user_id'))|tojson }},
+        "user_id": {{ _team_current_user.get('user_id', _team_current_user.get('id'))|tojson }},
+        "email": {{ _team_current_user.get('email')|tojson }},
+        "display_name": {{ _team_current_user.get('display_name', _team_current_user.get('displayName'))|tojson }}
+      },
+      "members": [
+        {% for member in _team_members %}
+          {% set _member = member if member is mapping else {} %}
+          {% set _member_user_raw = _member.get('user', {}) %}
+          {% set _member_user = _member_user_raw if _member_user_raw is mapping else {} %}
+          {% set _json_member_user_id = _member.get('user_id') %}
+          {% if not _json_member_user_id %}{% set _json_member_user_id = _member.get('userId') %}{% endif %}
+          {% if not _json_member_user_id %}{% set _json_member_user_id = _member_user.get('id') %}{% endif %}
+          {% if not _json_member_user_id %}{% set _json_member_user_id = _member.get('id', '') %}{% endif %}
+          {% set _json_member_name = _member_user.get('display_name') %}
+          {% if not _json_member_name %}{% set _json_member_name = _member_user.get('displayName') %}{% endif %}
+          {% if not _json_member_name %}{% set _json_member_name = _member.get('display_name') %}{% endif %}
+          {% if not _json_member_name %}{% set _json_member_name = _member.get('displayName') %}{% endif %}
+          {% if not _json_member_name %}{% set _json_member_name = _member.get('name', 'Unbekannter Benutzer') %}{% endif %}
+          {% set _json_member_email = _member_user.get('email') %}
+          {% if not _json_member_email %}{% set _json_member_email = _member.get('email', '') %}{% endif %}
+          {% set _json_member_role = _member.get('role') %}
+          {% if not _json_member_role %}{% set _json_member_role = _member.get('project_role') %}{% endif %}
+          {% if not _json_member_role %}{% set _json_member_role = _member.get('projectRole', 'viewer') %}{% endif %}
+          {% if loop.index0 > 0 %},{% endif %}
+          {
+            "user_id": {{ _json_member_user_id|tojson }},
+            "userId": {{ _json_member_user_id|tojson }},
+            "display_name": {{ _json_member_name|tojson }},
+            "displayName": {{ _json_member_name|tojson }},
+            "email": {{ _json_member_email|tojson }},
+            "role": {{ _json_member_role|tojson }},
+            "status": {{ _member.get('status', 'active')|tojson }}
+          }
+        {% endfor %}
+      ],
+      "invitations": [
+        {% for invitation in _team_invitations %}
+          {% set _inv = invitation if invitation is mapping else {} %}
+          {% set _json_inv_id = _inv.get('public_id') %}
+          {% if not _json_inv_id %}{% set _json_inv_id = _inv.get('publicId') %}{% endif %}
+          {% if not _json_inv_id %}{% set _json_inv_id = _inv.get('id') %}{% endif %}
+          {% if not _json_inv_id %}{% set _json_inv_id = _inv.get('invitation_id') %}{% endif %}
+          {% if not _json_inv_id %}{% set _json_inv_id = _inv.get('invitationId', '') %}{% endif %}
+          {% set _json_inv_email = _inv.get('email') %}
+          {% if not _json_inv_email %}{% set _json_inv_email = _inv.get('invitee_email') %}{% endif %}
+          {% if not _json_inv_email %}{% set _json_inv_email = _inv.get('inviteeEmail', '') %}{% endif %}
+          {% set _json_inv_expires_at = _inv.get('expires_at') %}
+          {% if not _json_inv_expires_at %}{% set _json_inv_expires_at = _inv.get('expiresAt', '') %}{% endif %}
+          {% if loop.index0 > 0 %},{% endif %}
+          {
+            "id": {{ _json_inv_id|tojson }},
+            "public_id": {{ _json_inv_id|tojson }},
+            "publicId": {{ _json_inv_id|tojson }},
+            "email": {{ _json_inv_email|tojson }},
+            "role": {{ _inv.get('role', 'viewer')|tojson }},
+            "status": {{ _inv.get('status', 'pending')|tojson }},
+            "expires_at": {{ _json_inv_expires_at|tojson }},
+            "expiresAt": {{ _json_inv_expires_at|tojson }}
+          }
+        {% endfor %}
+      ]
     }
   </script>
 

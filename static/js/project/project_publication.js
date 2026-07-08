@@ -4,28 +4,27 @@
   VECTOPLAN Project Publication
 
   Zweck:
-  - Speichert Veröffentlichungseinstellungen für Workspace-Reiter.
+  - Steuert und speichert Veröffentlichungseinstellungen für Projekt-Workspace-Reiter.
   - Arbeitet gegen /v1/projects/<project_id>/publication.
-  - Steuert nur:
-      published_workspaces
-      require_auth
-      require_project_permission
-  - Nutzt die aktuelle Projekt-Sichtbarkeit aus project_form.js.
-  - Speichert keine Projekt-Basisdaten.
-  - Speichert keine Team-/Einladungsdaten.
-  - Speichert keine Chunk-/Editor-/2D-/LV-Fachdaten.
+  - Sendet einen normalisierten Payload an routes/projects_api.py und project_publication_service.py.
+  - Speichert nur Sichtbarkeit/Publication-Metadaten, keine Projekt-Basisdaten,
+    keine Team-/Einladungsdaten und keine Fach-/Service-Daten.
 
-  Sicherheitsregel:
-  - Admin, Team, Rechte, Einstellungen und Systemreferenzen werden nie
-    als veröffentlichbare Workspaces gesendet.
-  - Im Demo-Modus und bei fehlendem manage-Recht wird nicht gespeichert.
+  Sicherheitsregeln:
+  - Admin, Team, Rechte, Einstellungen und Systemreferenzen werden nie als
+    veröffentlichbare Workspaces gesendet.
+  - Public/Unlisted bedeutet nicht automatisch, dass alle Workspaces öffentlich sind.
+  - Private Projekte haben effektiv keine veröffentlichten Workspaces.
+  - Demo, Public Viewer, Read-only, Auth-Ausfall, User-Block und fehlendes Manage-/Publish-Recht
+    deaktivieren das Speichern im Frontend. Backend bleibt die Wahrheit.
+  - Das Frontend ist nur UI-Gating; alle Entscheidungen werden serverseitig erneut geprüft.
 */
 
 (function initVectoplanProjectPublication(global) {
   "use strict";
 
   var EXPORT_NAME = "VectoplanProjectPublication";
-  var INTERNAL_VERSION = 1;
+  var INTERNAL_VERSION = 4;
 
   var ROOT_SELECTOR = "[data-project-workspace]";
   var CARD_SELECTOR = "[data-project-publication-card]";
@@ -33,12 +32,17 @@
   var ALERT_SELECTOR = "[data-project-alert]";
 
   var EVENT_PUBLICATION_CHANGED = "vectoplan:project:publication:changed";
-  var EVENT_ERROR = "vectoplan:project:error";
+  var EVENT_PUBLICATION_READY = "vectoplan:project-publication:ready";
+  var EVENT_PUBLICATION_ERROR = "vectoplan:project-publication:error";
+  var EVENT_PROJECT_ERROR = "vectoplan:project:error";
+  var EVENT_VISIBILITY_CHANGED = "vectoplan:project:visibility:changed";
 
   var CLASS_SELECTED = "is-selected";
   var CLASS_EFFECTIVE = "is-effective";
   var CLASS_SAVING = "is-saving";
   var CLASS_ERROR = "is-error";
+  var CLASS_DIRTY = "is-dirty";
+  var CLASS_DISABLED = "is-disabled";
 
   var WORKSPACES = [
     "project",
@@ -49,12 +53,36 @@
     "versions"
   ];
 
+  var DEFAULT_PUBLISHED_WORKSPACES = {
+    project: true,
+    map: false,
+    editor3d: false,
+    cad2d: false,
+    lv: false,
+    versions: false
+  };
+
   var FORBIDDEN_WORKSPACES = {
     admin: true,
     team: true,
     settings: true,
     permissions: true,
-    system: true
+    system: true,
+    system_refs: true,
+    systemrefs: true,
+    users: true,
+    billing: true,
+    account: true,
+    auth: true
+  };
+
+  var WORKSPACE_LABELS = {
+    project: "Projekt",
+    map: "Map",
+    editor3d: "3D",
+    cad2d: "2D",
+    lv: "LV",
+    versions: "Versionen"
   };
 
   var state = {
@@ -62,16 +90,29 @@
     initialized: false,
     destroyed: false,
     isSaving: false,
+    isLoading: false,
     isDirty: false,
     canManage: false,
+    canPublish: false,
+    canMutate: false,
+    canEdit: false,
     isNew: false,
     demoMode: false,
+    persistent: false,
+    publicViewer: false,
+    readOnly: false,
+    authUnavailable: false,
+    userBlocked: false,
+    accessBlocked: false,
     projectPublicId: "",
     endpoint: "",
     initialData: null,
     currentData: null,
+    lastResponse: null,
+    lastError: null,
     config: null,
-    refs: {}
+    refs: {},
+    listeners: []
   };
 
   function getWindow() {
@@ -84,7 +125,8 @@
 
   function getDocument() {
     try {
-      return getWindow().document || document || null;
+      var win = getWindow();
+      return win.document || document || null;
     } catch (error) {
       return null;
     }
@@ -92,6 +134,14 @@
 
   function isObject(value) {
     return !!value && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function isArray(value) {
+    try {
+      return Array.isArray(value);
+    } catch (error) {
+      return Object.prototype.toString.call(value) === "[object Array]";
+    }
   }
 
   function trimString(value, fallback) {
@@ -102,6 +152,14 @@
 
       var text = String(value).trim();
       return text || fallback || "";
+    } catch (error) {
+      return fallback || "";
+    }
+  }
+
+  function lowerString(value, fallback) {
+    try {
+      return trimString(value, fallback || "").toLowerCase();
     } catch (error) {
       return fallback || "";
     }
@@ -127,9 +185,13 @@
         if (
           normalized === "true" ||
           normalized === "yes" ||
+          normalized === "y" ||
           normalized === "on" ||
           normalized === "ja" ||
-          normalized === "enabled"
+          normalized === "enabled" ||
+          normalized === "enable" ||
+          normalized === "active" ||
+          normalized === "ok"
         ) {
           return true;
         }
@@ -137,9 +199,18 @@
         if (
           normalized === "false" ||
           normalized === "no" ||
+          normalized === "n" ||
           normalized === "off" ||
           normalized === "nein" ||
-          normalized === "disabled"
+          normalized === "disabled" ||
+          normalized === "disable" ||
+          normalized === "inactive" ||
+          normalized === "error" ||
+          normalized === "failed" ||
+          normalized === "null" ||
+          normalized === "none" ||
+          normalized === "undefined" ||
+          normalized === ""
         ) {
           return false;
         }
@@ -155,7 +226,7 @@
     try {
       return JSON.stringify(value);
     } catch (error) {
-      return "";
+      return "{}";
     }
   }
 
@@ -194,7 +265,10 @@
         return {
           name: "Error",
           message: "Unknown error",
-          stack: ""
+          stack: "",
+          code: "",
+          status: null,
+          payload: null
         };
       }
 
@@ -202,7 +276,10 @@
         return {
           name: "Error",
           message: error,
-          stack: ""
+          stack: "",
+          code: "",
+          status: null,
+          payload: null
         };
       }
 
@@ -210,15 +287,18 @@
         name: trimString(error.name, "Error"),
         message: trimString(error.message, String(error)),
         stack: trimString(error.stack, ""),
-        code: trimString(error.code, ""),
-        status: error.status || error.statusCode || null,
+        code: trimString(error.code || (error.payload && error.payload.code), ""),
+        status: error.status || error.statusCode || (error.payload && error.payload.status_code) || null,
         payload: error.payload || null
       };
     } catch (innerError) {
       return {
         name: "Error",
         message: "Unknown error",
-        stack: ""
+        stack: "",
+        code: "",
+        status: null,
+        payload: null
       };
     }
   }
@@ -272,26 +352,45 @@
       }
 
       target.addEventListener(type, handler, options || false);
+      state.listeners.push({ target: target, type: type, handler: handler, options: options || false });
       return true;
     } catch (error) {
       return false;
     }
   }
 
+  function removeAllListeners() {
+    try {
+      (state.listeners || []).forEach(function removeListener(item) {
+        try {
+          if (item && item.target && item.target.removeEventListener) {
+            item.target.removeEventListener(item.type, item.handler, item.options || false);
+          }
+        } catch (error) {}
+      });
+      state.listeners = [];
+    } catch (error) {
+      state.listeners = [];
+    }
+  }
+
   function normalizeVisibility(value, fallback) {
     try {
-      var text = trimString(value, fallback || "private").toLowerCase().replace(/-/g, "_");
+      var text = trimString(value, fallback || "private").toLowerCase().replace(/-/g, "_").replace(/\s+/g, "_");
 
-      if (text === "public" || text === "öffentlich" || text === "oeffentlich" || text === "open") {
+      if (text === "public" || text === "öffentlich" || text === "oeffentlich" || text === "open" || text === "listed") {
         return "public";
       }
 
       if (
         text === "unlisted" ||
         text === "not_listed" ||
+        text === "notlisted" ||
         text === "nicht_gelistet" ||
+        text === "hidden_link" ||
         text === "link" ||
-        text === "link_shared"
+        text === "link_shared" ||
+        text === "share_link"
       ) {
         return "unlisted";
       }
@@ -304,44 +403,64 @@
 
   function normalizeWorkspace(value) {
     try {
-      var text = trimString(value, "").toLowerCase().replace(/-/g, "_");
+      var text = trimString(value, "").toLowerCase().replace(/-/g, "_").replace(/\s+/g, "_");
 
       var aliases = {
-        "project": "project",
-        "project_info": "project",
-        "projectinfo": "project",
-        "info": "project",
+        "": "",
+        project: "project",
+        projekt: "project",
+        project_info: "project",
+        projectinfo: "project",
+        info: "project",
+        overview: "project",
+        details: "project",
+        basis: "project",
 
-        "map": "map",
-        "karte": "map",
-        "openlayer": "map",
-        "openlayers": "map",
+        map: "map",
+        maps: "map",
+        karte: "map",
+        openlayer: "map",
+        openlayers: "map",
+        gis: "map",
 
         "3d": "editor3d",
-        "editor": "editor3d",
-        "editor3d": "editor3d",
-        "editor_3d": "editor3d",
-        "viewer3d": "editor3d",
+        editor: "editor3d",
+        editor3d: "editor3d",
+        editor_3d: "editor3d",
+        viewer: "editor3d",
+        viewer3d: "editor3d",
+        viewer_3d: "editor3d",
+        world: "editor3d",
 
         "2d": "cad2d",
-        "cad": "cad2d",
-        "cad2d": "cad2d",
-        "cad_2d": "cad2d",
-        "plan": "cad2d",
+        cad: "cad2d",
+        cad2d: "cad2d",
+        cad_2d: "cad2d",
+        plan: "cad2d",
+        plan2d: "cad2d",
 
-        "lv": "lv",
-        "boq": "lv",
-        "leistungsverzeichnis": "lv",
+        lv: "lv",
+        boq: "lv",
+        leistungsverzeichnis: "lv",
+        bill_of_quantities: "lv",
 
-        "versions": "versions",
-        "versionen": "versions",
-        "history": "versions",
+        versions: "versions",
+        version: "versions",
+        versionen: "versions",
+        history: "versions",
+        snapshots: "versions",
 
-        "admin": "admin",
-        "team": "team",
-        "settings": "settings",
-        "permissions": "permissions",
-        "system": "system"
+        admin: "admin",
+        management: "admin",
+        team: "team",
+        members: "team",
+        settings: "settings",
+        einstellungen: "settings",
+        permissions: "permissions",
+        rechte: "permissions",
+        system: "system",
+        systemrefs: "system",
+        system_references: "system_refs"
       };
 
       return aliases[text] || "";
@@ -351,17 +470,146 @@
   }
 
   function isAllowedWorkspace(workspace) {
-    var normalized = normalizeWorkspace(workspace);
-    return WORKSPACES.indexOf(normalized) !== -1 && !FORBIDDEN_WORKSPACES[normalized];
+    try {
+      var normalized = normalizeWorkspace(workspace);
+      return WORKSPACES.indexOf(normalized) !== -1 && !FORBIDDEN_WORKSPACES[normalized];
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function emptyWorkspaceMap(value) {
+    var result = {};
+    try {
+      WORKSPACES.forEach(function eachWorkspace(workspace) {
+        result[workspace] = !!value;
+      });
+    } catch (error) {}
+    return result;
+  }
+
+  function normalizeWorkspaces(value, fallback) {
+    var result = emptyWorkspaceMap(false);
+
+    try {
+      if (isObject(fallback)) {
+        Object.keys(fallback).forEach(function copyFallback(key) {
+          var workspace = normalizeWorkspace(key);
+          if (isAllowedWorkspace(workspace)) {
+            result[workspace] = toBooleanSafe(fallback[key], false);
+          }
+        });
+      }
+
+      if (value === null || value === undefined || value === "") {
+        return result;
+      }
+
+      if (isObject(value)) {
+        Object.keys(value).forEach(function eachKey(key) {
+          var workspace = normalizeWorkspace(key);
+          if (isAllowedWorkspace(workspace)) {
+            result[workspace] = toBooleanSafe(value[key], false);
+          }
+        });
+        return result;
+      }
+
+      if (isArray(value)) {
+        result = emptyWorkspaceMap(false);
+        value.forEach(function eachItem(item) {
+          var workspace = normalizeWorkspace(item);
+          if (isAllowedWorkspace(workspace)) {
+            result[workspace] = true;
+          }
+        });
+        return result;
+      }
+
+      if (typeof value === "string") {
+        result = emptyWorkspaceMap(false);
+        value.replace(/;/g, ",").replace(/\|/g, ",").split(",").forEach(function eachPart(part) {
+          var workspace = normalizeWorkspace(part);
+          if (isAllowedWorkspace(workspace)) {
+            result[workspace] = true;
+          }
+        });
+        return result;
+      }
+
+      return result;
+    } catch (error) {
+      return result;
+    }
+  }
+
+  function sanitizeWorkspaceMap(value, fallback) {
+    var normalized = normalizeWorkspaces(value, fallback);
+    var result = emptyWorkspaceMap(false);
+
+    try {
+      WORKSPACES.forEach(function eachWorkspace(workspace) {
+        result[workspace] = !!normalized[workspace];
+      });
+    } catch (error) {}
+
+    return result;
+  }
+
+  function anyWorkspaceEnabled(value) {
+    try {
+      var normalized = normalizeWorkspaces(value);
+      return WORKSPACES.some(function someWorkspace(workspace) {
+        return !!normalized[workspace];
+      });
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function effectiveWorkspaces(visibility, published) {
+    try {
+      var normalizedVisibility = normalizeVisibility(visibility, "private");
+      var desired = normalizeWorkspaces(published);
+
+      if (normalizedVisibility === "private") {
+        return emptyWorkspaceMap(false);
+      }
+
+      return desired;
+    } catch (error) {
+      return emptyWorkspaceMap(false);
+    }
+  }
+
+  function workspaceLabel(workspace) {
+    try {
+      var normalized = normalizeWorkspace(workspace);
+      return WORKSPACE_LABELS[normalized] || trimString(workspace, "Workspace");
+    } catch (error) {
+      return "Workspace";
+    }
+  }
+
+  function getNestedObject(source, keys) {
+    try {
+      var current = source;
+      for (var i = 0; i < keys.length; i += 1) {
+        if (!isObject(current)) {
+          return {};
+        }
+        current = current[keys[i]];
+      }
+      return isObject(current) ? current : {};
+    } catch (error) {
+      return {};
+    }
   }
 
   function getConfig() {
     try {
       var win = getWindow();
-      var config =
-        win.VECTOPLAN_PROJECT_WORKSPACE_CONFIG ||
-        win.PROJECT_WORKSPACE_CONFIG ||
-        {};
+      var config = win.VECTOPLAN_PROJECT_WORKSPACE_CONFIG || win.PROJECT_WORKSPACE_CONFIG || {};
 
       if (!isObject(config)) {
         config = {};
@@ -370,49 +618,132 @@
       var paths = isObject(config.paths) ? config.paths : {};
       var project = isObject(config.project) ? config.project : {};
       var currentUser = isObject(config.currentUser) ? config.currentUser : {};
+      var access = isObject(config.access) ? config.access : (isObject(project.access) ? project.access : {});
+      var publication = isObject(config.publication) ? config.publication : (isObject(project.publication) ? project.publication : {});
+      var uiFlags = isObject(config.uiFlags) ? config.uiFlags : (isObject(project.ui_flags) ? project.ui_flags : {});
 
       var demoMode = toBooleanSafe(
-        config.demoMode ||
-          config.demo_mode ||
-          currentUser.demo_mode ||
-          currentUser.demoMode ||
-          currentUser.is_demo,
+        config.demoMode !== undefined ? config.demoMode :
+          config.demo_mode !== undefined ? config.demo_mode :
+            uiFlags.demo_mode !== undefined ? uiFlags.demo_mode :
+              currentUser.demo_mode !== undefined ? currentUser.demo_mode :
+                currentUser.demoMode !== undefined ? currentUser.demoMode :
+                  currentUser.is_demo,
         false
       );
 
       var persistent = toBooleanSafe(
-        config.persistent !== undefined ? config.persistent : currentUser.persistent,
+        config.persistent !== undefined ? config.persistent :
+          uiFlags.persistent !== undefined ? uiFlags.persistent :
+            currentUser.persistent,
         !demoMode
+      );
+
+      var publicViewer = toBooleanSafe(
+        config.publicViewer !== undefined ? config.publicViewer :
+          config.isPublicViewer !== undefined ? config.isPublicViewer :
+            uiFlags.public_viewer !== undefined ? uiFlags.public_viewer :
+              access.public_viewer !== undefined ? access.public_viewer :
+                access.publicViewer,
+        false
+      );
+
+      var readOnly = toBooleanSafe(
+        config.readOnly !== undefined ? config.readOnly :
+          config.readonly !== undefined ? config.readonly :
+            uiFlags.read_only !== undefined ? uiFlags.read_only :
+              access.read_only !== undefined ? access.read_only :
+                access.readOnly,
+        false
+      );
+
+      var authUnavailable = toBooleanSafe(
+        config.authUnavailable !== undefined ? config.authUnavailable :
+          uiFlags.auth_unavailable !== undefined ? uiFlags.auth_unavailable :
+            currentUser.auth_unavailable !== undefined ? currentUser.auth_unavailable :
+              currentUser.authUnavailable,
+        false
+      );
+
+      var userBlocked = toBooleanSafe(
+        config.userBlocked !== undefined ? config.userBlocked :
+          uiFlags.user_blocked !== undefined ? uiFlags.user_blocked :
+            currentUser.user_blocked !== undefined ? currentUser.user_blocked :
+              currentUser.userBlocked,
+        false
+      );
+
+      var accessBlocked = toBooleanSafe(
+        config.accessBlocked !== undefined ? config.accessBlocked :
+          uiFlags.access_blocked !== undefined ? uiFlags.access_blocked :
+            currentUser.access_blocked !== undefined ? currentUser.access_blocked :
+              currentUser.accessBlocked,
+        false
       );
 
       var publicId = trimString(
         config.projectPublicId ||
+          config.project_public_id ||
           project.public_id ||
           project.publicId ||
+          project.project_public_id ||
+          project.projectPublicId ||
           "",
         ""
       );
 
-      var endpoint = trimString(paths.publication, "");
+      var endpoint = trimString(paths.publication || paths.projectPublication || paths.project_publication, "");
       if (!endpoint && publicId && publicId !== "new") {
         endpoint = "/v1/projects/" + encodeURIComponent(publicId) + "/publication";
       }
 
+      var canManage = toBooleanSafe(
+        config.canManage !== undefined ? config.canManage :
+          uiFlags.can_manage !== undefined ? uiFlags.can_manage :
+            access.can_manage !== undefined ? access.can_manage :
+              access.canManage,
+        false
+      );
+
+      var canPublish = toBooleanSafe(
+        config.canPublish !== undefined ? config.canPublish :
+          config.canManagePublication !== undefined ? config.canManagePublication :
+            uiFlags.can_publish !== undefined ? uiFlags.can_publish :
+              access.can_publish !== undefined ? access.can_publish :
+                access.canPublish,
+        canManage
+      );
+
       return {
         project: project,
         currentUser: currentUser,
+        access: access,
+        publication: publication,
+        uiFlags: uiFlags,
         projectPublicId: publicId,
-        projectVisibility: normalizeVisibility(config.projectVisibility || project.visibility, "private"),
-        isNew: toBooleanSafe(config.isNew || project.is_new || project.isNew, !publicId || publicId === "new"),
-        canManage: toBooleanSafe(config.canManage, false),
-        canEdit: toBooleanSafe(config.canEdit, false),
+        projectVisibility: normalizeVisibility(config.projectVisibility || config.project_visibility || project.visibility || publication.visibility, "private"),
+        isNew: toBooleanSafe(config.isNew !== undefined ? config.isNew : (project.is_new !== undefined ? project.is_new : project.isNew), !publicId || publicId === "new"),
+        canManage: canManage,
+        canPublish: canPublish,
+        canEdit: toBooleanSafe(config.canEdit !== undefined ? config.canEdit : access.can_edit, false),
+        canMutate: toBooleanSafe(config.canMutate !== undefined ? config.canMutate : access.can_mutate, canPublish),
         demoMode: demoMode,
         persistent: persistent,
+        publicViewer: publicViewer,
+        readOnly: readOnly,
+        authUnavailable: authUnavailable,
+        userBlocked: userBlocked,
+        accessBlocked: accessBlocked,
         endpoint: endpoint,
+        paths: paths,
         parentEvents: {
           publicationChanged: trimString(
             config.parentEvents && config.parentEvents.publicationChanged,
             EVENT_PUBLICATION_CHANGED
+          ),
+          error: trimString(
+            config.parentEvents && config.parentEvents.error,
+            EVENT_PROJECT_ERROR
           )
         }
       };
@@ -420,16 +751,28 @@
       return {
         project: {},
         currentUser: {},
+        access: {},
+        publication: {},
+        uiFlags: {},
         projectPublicId: "",
         projectVisibility: "private",
         isNew: true,
         canManage: false,
+        canPublish: false,
         canEdit: false,
+        canMutate: false,
         demoMode: false,
-        persistent: true,
+        persistent: false,
+        publicViewer: false,
+        readOnly: true,
+        authUnavailable: false,
+        userBlocked: false,
+        accessBlocked: true,
         endpoint: "",
+        paths: {},
         parentEvents: {
-          publicationChanged: EVENT_PUBLICATION_CHANGED
+          publicationChanged: EVENT_PUBLICATION_CHANGED,
+          error: EVENT_PROJECT_ERROR
         }
       };
     }
@@ -437,18 +780,23 @@
 
   function queryRefs() {
     var card = query(CARD_SELECTOR);
+    var root = query(ROOT_SELECTOR);
 
     return {
       document: getDocument(),
-      root: query(ROOT_SELECTOR),
+      root: root,
       form: query(FORM_SELECTOR),
       card: card,
       alert: query(ALERT_SELECTOR),
 
-      visibilityInput: queryById("projectVisibility"),
+      visibilityInput: queryById("projectVisibility") || query("[data-project-visibility-input]") || query("input[name='visibility']"),
+      visibilityRadios: queryAll("input[name='visibility']"),
+      visibilityOptions: queryAll("[data-project-visibility-option], [data-project-visibility-card], [data-visibility]"),
+
       save: query("[data-project-publication-save]", card),
       reset: query("[data-project-publication-reset]", card),
       status: query("[data-project-publication-status]", card),
+      summary: query("[data-project-publication-summary]", card),
 
       checkboxes: queryAll("[data-project-publication-checkbox]", card),
       optionCards: queryAll("[data-project-publication-option]", card),
@@ -560,11 +908,13 @@
       }
 
       if (state.refs.save) {
-        state.refs.save.disabled = state.isSaving || !state.canManage || state.isNew || state.demoMode;
+        state.refs.save.disabled = state.isSaving || !canWritePublication();
         state.refs.save.setAttribute("aria-busy", state.isSaving ? "true" : "false");
 
         if (state.isSaving) {
-          state.refs.save.setAttribute("data-original-text", state.refs.save.textContent || "");
+          if (!state.refs.save.getAttribute("data-original-text")) {
+            state.refs.save.setAttribute("data-original-text", state.refs.save.textContent || "");
+          }
           state.refs.save.textContent = "Veröffentlichung wird gespeichert…";
         } else {
           var original = state.refs.save.getAttribute("data-original-text");
@@ -573,7 +923,7 @@
       }
 
       if (state.refs.reset) {
-        state.refs.reset.disabled = state.isSaving || !state.canManage || state.isNew || state.demoMode;
+        state.refs.reset.disabled = state.isSaving || !canWritePublication();
       }
     } catch (error) {}
   }
@@ -583,61 +933,68 @@
       state.isDirty = !!isDirty;
 
       if (state.refs.card) {
-        state.refs.card.classList.toggle("is-dirty", state.isDirty);
+        state.refs.card.classList.toggle(CLASS_DIRTY, state.isDirty);
         state.refs.card.setAttribute("data-project-publication-dirty", state.isDirty ? "true" : "false");
       }
     } catch (error) {}
   }
 
+  function getVisibilityFromRadios() {
+    try {
+      var radios = state.refs.visibilityRadios || [];
+      for (var i = 0; i < radios.length; i += 1) {
+        if (radios[i] && radios[i].checked) {
+          return normalizeVisibility(radios[i].value, "");
+        }
+      }
+      return "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function getVisibilityFromOptions() {
+    try {
+      var options = state.refs.visibilityOptions || [];
+      for (var i = 0; i < options.length; i += 1) {
+        var option = options[i];
+        if (!option) {
+          continue;
+        }
+
+        var selected =
+          option.classList && (option.classList.contains("is-selected") || option.classList.contains("active"));
+
+        if (!selected && option.getAttribute) {
+          selected = toBooleanSafe(option.getAttribute("aria-checked"), false) ||
+            toBooleanSafe(option.getAttribute("data-selected"), false) ||
+            toBooleanSafe(option.getAttribute("data-active"), false);
+        }
+
+        if (selected) {
+          return normalizeVisibility(option.getAttribute("data-visibility") || option.getAttribute("data-value") || option.value, "");
+        }
+      }
+
+      return "";
+    } catch (error) {
+      return "";
+    }
+  }
+
   function currentVisibility() {
     try {
-      var fromInput = getValue(state.refs.visibilityInput);
-      var fromRoot = state.refs.root ? state.refs.root.getAttribute("data-project-visibility") : "";
-      var fromCard = state.refs.card ? state.refs.card.getAttribute("data-project-visibility") : "";
-      return normalizeVisibility(fromInput || fromRoot || fromCard || state.config.projectVisibility, "private");
+      var fromInput = normalizeVisibility(getValue(state.refs.visibilityInput), "");
+      var fromRadios = getVisibilityFromRadios();
+      var fromOptions = getVisibilityFromOptions();
+      var fromRoot = state.refs.root ? normalizeVisibility(state.refs.root.getAttribute("data-project-visibility"), "") : "";
+      var fromCard = state.refs.card ? normalizeVisibility(state.refs.card.getAttribute("data-project-visibility"), "") : "";
+      var fromConfig = state.config ? normalizeVisibility(state.config.projectVisibility, "private") : "private";
+
+      return normalizeVisibility(fromInput || fromRadios || fromOptions || fromRoot || fromCard || fromConfig, "private");
     } catch (error) {
       return "private";
     }
-  }
-
-  function emptyWorkspaceMap(value) {
-    var result = {};
-    WORKSPACES.forEach(function eachWorkspace(workspace) {
-      result[workspace] = !!value;
-    });
-    return result;
-  }
-
-  function normalizeWorkspaces(value) {
-    var result = emptyWorkspaceMap(false);
-
-    try {
-      if (!isObject(value)) {
-        return result;
-      }
-
-      Object.keys(value).forEach(function eachKey(key) {
-        var workspace = normalizeWorkspace(key);
-        if (isAllowedWorkspace(workspace)) {
-          result[workspace] = toBooleanSafe(value[key], false);
-        }
-      });
-
-      return result;
-    } catch (error) {
-      return result;
-    }
-  }
-
-  function effectiveWorkspaces(visibility, published) {
-    var normalizedVisibility = normalizeVisibility(visibility, "private");
-    var desired = normalizeWorkspaces(published);
-
-    if (normalizedVisibility === "private") {
-      return emptyWorkspaceMap(false);
-    }
-
-    return desired;
   }
 
   function parseInitialData() {
@@ -652,37 +1009,68 @@
       }
 
       var project = state.config && isObject(state.config.project) ? state.config.project : {};
-      var publication = isObject(project.publication) ? project.publication : {};
+      var configPublication = state.config && isObject(state.config.publication) ? state.config.publication : {};
+      var projectPublication = isObject(project.publication) ? project.publication : {};
+      var publicationWrapper = isObject(configPublication.publication) ? configPublication.publication : {};
 
-      var source = Object.keys(fromJson).length ? fromJson : publication;
+      var source = Object.keys(fromJson).length ? fromJson :
+        Object.keys(publicationWrapper).length ? publicationWrapper :
+          Object.keys(configPublication).length ? configPublication : projectPublication;
+
+      var visibility = normalizeVisibility(source.visibility || project.visibility || state.config.projectVisibility, "private");
+
+      var published = sanitizeWorkspaceMap(
+        source.published_workspaces ||
+          source.publishedWorkspaces ||
+          source.workspaces ||
+          source.tabs ||
+          configPublication.published_workspaces ||
+          configPublication.publishedWorkspaces ||
+          projectPublication.published_workspaces ||
+          projectPublication.publishedWorkspaces ||
+          {},
+        DEFAULT_PUBLISHED_WORKSPACES
+      );
+
+      var effective = sanitizeWorkspaceMap(
+        source.effective_published_workspaces ||
+          source.effectivePublishedWorkspaces ||
+          configPublication.effective_published_workspaces ||
+          configPublication.effectivePublishedWorkspaces ||
+          projectPublication.effective_published_workspaces ||
+          projectPublication.effectivePublishedWorkspaces ||
+          effectiveWorkspaces(visibility, published),
+        effectiveWorkspaces(visibility, published)
+      );
 
       return {
-        visibility: normalizeVisibility(source.visibility || project.visibility || state.config.projectVisibility, "private"),
-        published_workspaces: normalizeWorkspaces(
-          source.published_workspaces ||
-            source.publishedWorkspaces ||
-            publication.published_workspaces ||
-            publication.publishedWorkspaces ||
-            {}
-        ),
-        effective_published_workspaces: normalizeWorkspaces(
-          source.effective_published_workspaces ||
-            source.effectivePublishedWorkspaces ||
-            {}
-        ),
-        require_auth: toBooleanSafe(source.require_auth || source.requireAuth, false),
+        visibility: visibility,
+        published_workspaces: published,
+        publishedWorkspaces: safeClone(published),
+        effective_published_workspaces: effective,
+        effectivePublishedWorkspaces: safeClone(effective),
+        require_auth: toBooleanSafe(source.require_auth !== undefined ? source.require_auth : source.requireAuth, visibility === "private"),
+        requireAuth: toBooleanSafe(source.require_auth !== undefined ? source.require_auth : source.requireAuth, visibility === "private"),
         require_project_permission: toBooleanSafe(
-          source.require_project_permission || source.requireProjectPermission,
-          false
+          source.require_project_permission !== undefined ? source.require_project_permission : source.requireProjectPermission,
+          visibility === "private"
+        ),
+        requireProjectPermission: toBooleanSafe(
+          source.require_project_permission !== undefined ? source.require_project_permission : source.requireProjectPermission,
+          visibility === "private"
         )
       };
     } catch (error) {
       return {
         visibility: "private",
         published_workspaces: emptyWorkspaceMap(false),
+        publishedWorkspaces: emptyWorkspaceMap(false),
         effective_published_workspaces: emptyWorkspaceMap(false),
-        require_auth: false,
-        require_project_permission: false
+        effectivePublishedWorkspaces: emptyWorkspaceMap(false),
+        require_auth: true,
+        requireAuth: true,
+        require_project_permission: true,
+        requireProjectPermission: true
       };
     }
   }
@@ -696,45 +1084,77 @@
         publication = publication.publication;
       }
 
-      var visibility = normalizeVisibility(
-        publication.visibility ||
-          data.visibility ||
-          currentVisibility(),
-        "private"
-      );
+      var visibility = normalizeVisibility(publication.visibility || data.visibility || currentVisibility(), "private");
 
-      var published = normalizeWorkspaces(
+      var fallbackPublished = collectData().published_workspaces;
+      var published = sanitizeWorkspaceMap(
         publication.published_workspaces ||
           publication.publishedWorkspaces ||
+          publication.workspaces ||
           data.published_workspaces ||
           data.publishedWorkspaces ||
-          collectData().published_workspaces
+          fallbackPublished,
+        fallbackPublished
       );
 
-      var effective = normalizeWorkspaces(
+      var effective = sanitizeWorkspaceMap(
         publication.effective_published_workspaces ||
           publication.effectivePublishedWorkspaces ||
           data.effective_published_workspaces ||
           data.effectivePublishedWorkspaces ||
-          effectiveWorkspaces(visibility, published)
+          effectiveWorkspaces(visibility, published),
+        effectiveWorkspaces(visibility, published)
       );
 
       return {
         visibility: visibility,
         published_workspaces: published,
+        publishedWorkspaces: safeClone(published),
         effective_published_workspaces: effective,
-        require_auth: toBooleanSafe(publication.require_auth || publication.requireAuth || data.require_auth || data.requireAuth, visibility === "private"),
+        effectivePublishedWorkspaces: safeClone(effective),
+        require_auth: toBooleanSafe(publication.require_auth !== undefined ? publication.require_auth : (publication.requireAuth !== undefined ? publication.requireAuth : data.require_auth), visibility === "private"),
+        requireAuth: toBooleanSafe(publication.require_auth !== undefined ? publication.require_auth : (publication.requireAuth !== undefined ? publication.requireAuth : data.require_auth), visibility === "private"),
         require_project_permission: toBooleanSafe(
-          publication.require_project_permission ||
-            publication.requireProjectPermission ||
-            data.require_project_permission ||
-            data.requireProjectPermission,
+          publication.require_project_permission !== undefined ? publication.require_project_permission :
+            publication.requireProjectPermission !== undefined ? publication.requireProjectPermission :
+              data.require_project_permission,
+          visibility === "private"
+        ),
+        requireProjectPermission: toBooleanSafe(
+          publication.require_project_permission !== undefined ? publication.require_project_permission :
+            publication.requireProjectPermission !== undefined ? publication.requireProjectPermission :
+              data.require_project_permission,
           visibility === "private"
         )
       };
     } catch (error) {
       return collectData();
     }
+  }
+
+  function setStatusClasses(status, visibility, hasEffective) {
+    try {
+      if (!status) {
+        return;
+      }
+
+      status.classList.remove(
+        "vp-project-chip--muted",
+        "vp-project-chip--success",
+        "vp-project-chip--warning",
+        "vp-project-chip--error"
+      );
+
+      if (state.authUnavailable || state.userBlocked || state.accessBlocked) {
+        status.classList.add("vp-project-chip--error");
+      } else if (visibility === "private") {
+        status.classList.add("vp-project-chip--muted");
+      } else if (hasEffective) {
+        status.classList.add("vp-project-chip--success");
+      } else {
+        status.classList.add("vp-project-chip--warning");
+      }
+    } catch (error) {}
   }
 
   function updateStatus(data) {
@@ -746,26 +1166,49 @@
 
       var publication = isObject(data) ? data : collectData();
       var visibility = normalizeVisibility(publication.visibility, "private");
-      var effective = normalizeWorkspaces(publication.effective_published_workspaces);
-      var hasEffective = WORKSPACES.some(function someWorkspace(workspace) {
-        return !!effective[workspace];
-      });
+      var effective = normalizeWorkspaces(publication.effective_published_workspaces || publication.effectivePublishedWorkspaces);
+      var hasEffective = anyWorkspaceEnabled(effective);
 
-      status.classList.remove(
-        "vp-project-chip--muted",
-        "vp-project-chip--success",
-        "vp-project-chip--warning"
-      );
+      setStatusClasses(status, visibility, hasEffective);
 
-      if (visibility === "private") {
-        status.classList.add("vp-project-chip--muted");
+      if (state.authUnavailable) {
+        status.textContent = "Auth nicht erreichbar";
+      } else if (state.userBlocked || state.accessBlocked) {
+        status.textContent = "Zugriff gesperrt";
+      } else if (visibility === "private") {
         status.textContent = "Privat";
       } else if (hasEffective) {
-        status.classList.add("vp-project-chip--success");
         status.textContent = "Reiter veröffentlicht";
       } else {
-        status.classList.add("vp-project-chip--warning");
         status.textContent = "Keine Reiter veröffentlicht";
+      }
+    } catch (error) {}
+  }
+
+  function updateSummary(data) {
+    try {
+      var summary = state.refs.summary;
+      if (!summary) {
+        return;
+      }
+
+      var publication = isObject(data) ? data : collectData();
+      var visibility = normalizeVisibility(publication.visibility, "private");
+      var effective = normalizeWorkspaces(publication.effective_published_workspaces || publication.effectivePublishedWorkspaces);
+      var enabledLabels = [];
+
+      WORKSPACES.forEach(function eachWorkspace(workspace) {
+        if (effective[workspace]) {
+          enabledLabels.push(workspaceLabel(workspace));
+        }
+      });
+
+      if (visibility === "private") {
+        summary.textContent = "Private Projekte veröffentlichen keine Workspaces.";
+      } else if (enabledLabels.length) {
+        summary.textContent = "Öffentlich sichtbar: " + enabledLabels.join(", ") + ".";
+      } else {
+        summary.textContent = "Projekt ist " + visibility + ", aber kein Workspace ist veröffentlicht.";
       }
     } catch (error) {}
   }
@@ -775,10 +1218,10 @@
       var opts = isObject(options) ? options : {};
       var publication = isObject(data) ? data : {};
       var visibility = normalizeVisibility(publication.visibility || currentVisibility(), "private");
-      var published = normalizeWorkspaces(publication.published_workspaces);
-      var effective = normalizeWorkspaces(
-        publication.effective_published_workspaces ||
-          effectiveWorkspaces(visibility, published)
+      var published = sanitizeWorkspaceMap(publication.published_workspaces || publication.publishedWorkspaces, emptyWorkspaceMap(false));
+      var effective = sanitizeWorkspaceMap(
+        publication.effective_published_workspaces || publication.effectivePublishedWorkspaces || effectiveWorkspaces(visibility, published),
+        effectiveWorkspaces(visibility, published)
       );
 
       if (state.refs.card) {
@@ -787,7 +1230,7 @@
 
       (state.refs.checkboxes || []).forEach(function applyCheckbox(input) {
         try {
-          var workspace = normalizeWorkspace(input.getAttribute("data-workspace") || input.name || "");
+          var workspace = normalizeWorkspace(input.getAttribute("data-workspace") || input.name || input.value || "");
           if (!isAllowedWorkspace(workspace)) {
             input.checked = false;
             input.disabled = true;
@@ -795,27 +1238,34 @@
           }
 
           input.checked = !!published[workspace];
+          input.setAttribute("data-effective-published", effective[workspace] ? "true" : "false");
         } catch (error) {}
       });
 
       (state.refs.optionCards || []).forEach(function applyCard(card) {
         try {
-          var workspace = normalizeWorkspace(card.getAttribute("data-workspace") || "");
+          var workspace = normalizeWorkspace(card.getAttribute("data-workspace") || card.getAttribute("data-value") || "");
           if (!isAllowedWorkspace(workspace)) {
             card.classList.remove(CLASS_SELECTED);
             card.classList.remove(CLASS_EFFECTIVE);
+            card.setAttribute("aria-disabled", "true");
             return;
           }
 
           card.classList.toggle(CLASS_SELECTED, !!published[workspace]);
           card.classList.toggle(CLASS_EFFECTIVE, !!effective[workspace]);
+          card.setAttribute("data-published", published[workspace] ? "true" : "false");
+          card.setAttribute("data-effective-published", effective[workspace] ? "true" : "false");
         } catch (error) {}
       });
 
-      setChecked(state.refs.requireAuth, toBooleanSafe(publication.require_auth, visibility === "private"));
+      setChecked(state.refs.requireAuth, toBooleanSafe(publication.require_auth !== undefined ? publication.require_auth : publication.requireAuth, visibility === "private"));
       setChecked(
         state.refs.requirePermission,
-        toBooleanSafe(publication.require_project_permission, visibility === "private")
+        toBooleanSafe(
+          publication.require_project_permission !== undefined ? publication.require_project_permission : publication.requireProjectPermission,
+          visibility === "private"
+        )
       );
 
       updateDisabledState();
@@ -824,13 +1274,22 @@
         published_workspaces: published,
         effective_published_workspaces: effective
       });
+      updateSummary({
+        visibility: visibility,
+        published_workspaces: published,
+        effective_published_workspaces: effective
+      });
 
       state.currentData = {
         visibility: visibility,
         published_workspaces: published,
+        publishedWorkspaces: safeClone(published),
         effective_published_workspaces: effective,
+        effectivePublishedWorkspaces: safeClone(effective),
         require_auth: getChecked(state.refs.requireAuth),
-        require_project_permission: getChecked(state.refs.requirePermission)
+        requireAuth: getChecked(state.refs.requireAuth),
+        require_project_permission: getChecked(state.refs.requirePermission),
+        requireProjectPermission: getChecked(state.refs.requirePermission)
       };
 
       if (!opts.keepDirty) {
@@ -849,7 +1308,7 @@
     try {
       (state.refs.checkboxes || []).forEach(function collectCheckbox(input) {
         try {
-          var workspace = normalizeWorkspace(input.getAttribute("data-workspace") || input.name || "");
+          var workspace = normalizeWorkspace(input.getAttribute("data-workspace") || input.name || input.value || "");
 
           if (isAllowedWorkspace(workspace)) {
             published[workspace] = !!input.checked;
@@ -866,18 +1325,70 @@
         requirePermission = true;
       }
 
+      var effective = effectiveWorkspaces(visibility, published);
+
       return {
         visibility: visibility,
-        published_workspaces: published,
+        published_workspaces: sanitizeWorkspaceMap(published),
+        publishedWorkspaces: sanitizeWorkspaceMap(published),
+        effective_published_workspaces: effective,
+        effectivePublishedWorkspaces: safeClone(effective),
         require_auth: requireAuth,
-        require_project_permission: requirePermission
+        requireAuth: requireAuth,
+        require_project_permission: requirePermission,
+        requireProjectPermission: requirePermission
       };
     } catch (error) {
       return {
         visibility: "private",
         published_workspaces: emptyWorkspaceMap(false),
+        publishedWorkspaces: emptyWorkspaceMap(false),
+        effective_published_workspaces: emptyWorkspaceMap(false),
+        effectivePublishedWorkspaces: emptyWorkspaceMap(false),
         require_auth: true,
-        require_project_permission: true
+        requireAuth: true,
+        require_project_permission: true,
+        requireProjectPermission: true
+      };
+    }
+  }
+
+  function buildPayloadForSave() {
+    try {
+      var data = collectData();
+      var published = sanitizeWorkspaceMap(data.published_workspaces);
+      var effective = effectiveWorkspaces(data.visibility, published);
+
+      return {
+        visibility: data.visibility,
+        published_workspaces: published,
+        publishedWorkspaces: safeClone(published),
+        workspaces: safeClone(published),
+        effective_published_workspaces: effective,
+        effectivePublishedWorkspaces: safeClone(effective),
+        require_auth: data.require_auth,
+        requireAuth: data.require_auth,
+        require_project_permission: data.require_project_permission,
+        requireProjectPermission: data.require_project_permission,
+        source: "vectoplan-app.project-publication",
+        client_version: INTERNAL_VERSION,
+        clientVersion: INTERNAL_VERSION
+      };
+    } catch (error) {
+      return {
+        visibility: "private",
+        published_workspaces: emptyWorkspaceMap(false),
+        publishedWorkspaces: emptyWorkspaceMap(false),
+        workspaces: emptyWorkspaceMap(false),
+        effective_published_workspaces: emptyWorkspaceMap(false),
+        effectivePublishedWorkspaces: emptyWorkspaceMap(false),
+        require_auth: true,
+        requireAuth: true,
+        require_project_permission: true,
+        requireProjectPermission: true,
+        source: "vectoplan-app.project-publication",
+        client_version: INTERNAL_VERSION,
+        clientVersion: INTERNAL_VERSION
       };
     }
   }
@@ -912,12 +1423,16 @@
       }
 
       var opts = isObject(options) ? options : {};
+      var headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-Requested-With": "fetch",
+        "X-VECTOPLAN-Client": "project_publication.js"
+      };
+
       var response = await fetch(target, {
         method: opts.method || "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json"
-        },
+        headers: headers,
         credentials: "same-origin",
         cache: "no-store",
         body: opts.body !== undefined ? opts.body : undefined
@@ -933,7 +1448,9 @@
 
         var error = new Error(message);
         error.status = response.status;
+        error.statusCode = response.status;
         error.payload = data;
+        error.code = data && data.code ? data.code : "request_failed";
         throw error;
       }
 
@@ -947,33 +1464,78 @@
     }
   }
 
-  function validateBeforeSave() {
+  function canWritePublication() {
     try {
-      if (state.isNew) {
-        return {
-          ok: false,
-          message: "Speichere das Projekt zuerst. Danach kannst du Reiter veröffentlichen."
-        };
+      return !!(
+        !state.isSaving &&
+        !state.isLoading &&
+        !state.isNew &&
+        !state.demoMode &&
+        !state.publicViewer &&
+        !state.readOnly &&
+        !state.authUnavailable &&
+        !state.userBlocked &&
+        !state.accessBlocked &&
+        state.persistent &&
+        (state.canPublish || state.canManage || state.canMutate) &&
+        buildEndpoint()
+      );
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function disabledReason() {
+    try {
+      if (state.authUnavailable) {
+        return "Auth-Service nicht erreichbar. Veröffentlichung kann nicht gespeichert werden.";
       }
 
-      if (!state.canManage) {
-        return {
-          ok: false,
-          message: "Du hast keine Berechtigung, Veröffentlichungseinstellungen zu ändern."
-        };
+      if (state.userBlocked || state.accessBlocked) {
+        return "Der Zugriff ist gesperrt. Veröffentlichung kann nicht gespeichert werden.";
+      }
+
+      if (state.publicViewer) {
+        return "Öffentliche Ansicht ist schreibgeschützt.";
+      }
+
+      if (state.readOnly) {
+        return "Dieses Projekt ist schreibgeschützt.";
+      }
+
+      if (state.isNew) {
+        return "Speichere das Projekt zuerst. Danach kannst du Reiter veröffentlichen.";
       }
 
       if (state.demoMode) {
-        return {
-          ok: false,
-          message: "Im Demo-Modus werden Veröffentlichungseinstellungen nicht dauerhaft gespeichert."
-        };
+        return "Im Demo-Modus werden Veröffentlichungseinstellungen nicht dauerhaft gespeichert.";
+      }
+
+      if (!state.persistent) {
+        return "Für Veröffentlichungseinstellungen ist ein persistenter AppUser-Kontext erforderlich.";
+      }
+
+      if (!(state.canPublish || state.canManage || state.canMutate)) {
+        return "Du hast keine Berechtigung, Veröffentlichungseinstellungen zu ändern.";
       }
 
       if (!buildEndpoint()) {
+        return "Publication-Endpunkt fehlt.";
+      }
+
+      return "";
+    } catch (error) {
+      return "Veröffentlichung kann nicht gespeichert werden.";
+    }
+  }
+
+  function validateBeforeSave() {
+    try {
+      var reason = disabledReason();
+      if (reason) {
         return {
           ok: false,
-          message: "Publication-Endpunkt fehlt."
+          message: reason
         };
       }
 
@@ -1002,7 +1564,7 @@
         return false;
       }
 
-      var payload = collectData();
+      var payload = buildPayloadForSave();
 
       setSaving(true);
       setAlert("info", "Veröffentlichung wird gespeichert…");
@@ -1018,16 +1580,22 @@
 
       var publication = extractPublicationPayload(response);
 
+      state.lastResponse = response;
+      state.lastError = null;
       state.initialData = safeClone(publication);
       applyData(publication, { keepDirty: false });
 
-      setAlert("success", "Veröffentlichung wurde gespeichert.");
+      if (state.refs.card) {
+        state.refs.card.classList.remove(CLASS_ERROR);
+      }
 
+      setAlert("success", "Veröffentlichung wurde gespeichert.");
       emitChangeEvent(response, publication);
 
       return true;
     } catch (error) {
       var normalized = normalizeError(error);
+      state.lastError = normalized;
 
       if (state.refs.card) {
         state.refs.card.classList.add(CLASS_ERROR);
@@ -1035,9 +1603,17 @@
 
       setAlert("error", normalized.message || "Veröffentlichung konnte nicht gespeichert werden.");
 
-      emitLocal(EVENT_ERROR, {
+      emitLocal(EVENT_PUBLICATION_ERROR, {
         error: normalized,
-        publication: collectData()
+        publication: collectData(),
+        endpoint: buildEndpoint()
+      });
+
+      emitLocal(EVENT_PROJECT_ERROR, {
+        error: normalized,
+        area: "publication",
+        publication: collectData(),
+        endpoint: buildEndpoint()
       });
 
       return false;
@@ -1053,6 +1629,33 @@
       return true;
     } catch (error) {
       return false;
+    }
+  }
+
+  async function refreshPublication() {
+    try {
+      var endpoint = buildEndpoint();
+      if (!endpoint) {
+        return false;
+      }
+
+      state.isLoading = true;
+      updateDisabledState();
+
+      var response = await requestJson(endpoint, { method: "GET" });
+      var publication = extractPublicationPayload(response);
+
+      state.lastResponse = response;
+      state.initialData = safeClone(publication);
+      applyData(publication, { keepDirty: false });
+
+      return true;
+    } catch (error) {
+      state.lastError = normalizeError(error);
+      return false;
+    } finally {
+      state.isLoading = false;
+      updateDisabledState();
     }
   }
 
@@ -1078,13 +1681,65 @@
     }
   }
 
+  function postParentMessage(type, detail) {
+    try {
+      if (!window.parent || window.parent === window) {
+        return false;
+      }
+
+      var message = {
+        type: type,
+        kind: type,
+        source: "vectoplan-app.project-publication",
+        version: INTERNAL_VERSION,
+        detail: detail || {},
+        ts: Date.now()
+      };
+
+      try {
+        window.parent.postMessage(message, window.location.origin);
+        return true;
+      } catch (originError) {
+        try {
+          window.parent.postMessage(message, "*");
+          return true;
+        } catch (fallbackError) {
+          return false;
+        }
+      }
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function dispatchParentEvent(type, detail) {
+    try {
+      if (
+        window.parent &&
+        window.parent !== window &&
+        window.parent.dispatchEvent &&
+        typeof window.parent.CustomEvent === "function"
+      ) {
+        window.parent.dispatchEvent(
+          new window.parent.CustomEvent(type, {
+            detail: detail || {}
+          })
+        );
+        return true;
+      }
+    } catch (error) {}
+
+    return false;
+  }
+
   function emitChangeEvent(response, publication) {
     try {
       var detail = {
         response: response || {},
         publication: publication || collectData(),
         projectPublicId: state.projectPublicId,
-        endpoint: buildEndpoint()
+        endpoint: buildEndpoint(),
+        visibility: publication && publication.visibility ? publication.visibility : currentVisibility()
       };
 
       var type = state.config && state.config.parentEvents
@@ -1092,59 +1747,14 @@
         : EVENT_PUBLICATION_CHANGED;
 
       emitLocal(type, detail);
-
-      try {
-        if (window.parent && window.parent !== window) {
-          window.parent.postMessage(
-            {
-              type: type,
-              kind: type,
-              source: "vectoplan-app.project-publication",
-              version: INTERNAL_VERSION,
-              detail: detail,
-              ts: Date.now()
-            },
-            window.location.origin
-          );
-        }
-      } catch (postError) {
-        try {
-          if (window.parent && window.parent !== window) {
-            window.parent.postMessage(
-              {
-                type: type,
-                kind: type,
-                source: "vectoplan-app.project-publication",
-                version: INTERNAL_VERSION,
-                detail: detail,
-                ts: Date.now()
-              },
-              "*"
-            );
-          }
-        } catch (_) {}
-      }
-
-      try {
-        if (
-          window.parent &&
-          window.parent !== window &&
-          window.parent.dispatchEvent &&
-          typeof window.parent.CustomEvent === "function"
-        ) {
-          window.parent.dispatchEvent(
-            new window.parent.CustomEvent(type, {
-              detail: detail
-            })
-          );
-        }
-      } catch (_) {}
+      postParentMessage(type, detail);
+      dispatchParentEvent(type, detail);
 
       try {
         if (window.parent && window.parent !== window) {
           window.parent.dispatchEvent(new window.parent.Event("project-sidebar:refresh"));
         }
-      } catch (_) {}
+      } catch (error) {}
 
       return true;
     } catch (error) {
@@ -1155,34 +1765,56 @@
   function updateDisabledState() {
     try {
       var visibility = currentVisibility();
-      var disabled = state.isSaving || !state.canManage || state.isNew || state.demoMode;
+      var disabled = !canWritePublication();
+      var reason = disabled ? disabledReason() : "";
 
       (state.refs.checkboxes || []).forEach(function disableCheckbox(input) {
         try {
-          var workspace = normalizeWorkspace(input.getAttribute("data-workspace") || input.name || "");
-          input.disabled = disabled || !isAllowedWorkspace(workspace);
+          var workspace = normalizeWorkspace(input.getAttribute("data-workspace") || input.name || input.value || "");
+          var itemDisabled = disabled || !isAllowedWorkspace(workspace);
+          input.disabled = itemDisabled;
+          input.setAttribute("aria-disabled", itemDisabled ? "true" : "false");
         } catch (error) {}
       });
 
       if (state.refs.requireAuth) {
         state.refs.requireAuth.disabled = disabled || visibility === "private";
+        state.refs.requireAuth.setAttribute("aria-disabled", state.refs.requireAuth.disabled ? "true" : "false");
       }
 
       if (state.refs.requirePermission) {
         state.refs.requirePermission.disabled = disabled || visibility === "private";
+        state.refs.requirePermission.setAttribute("aria-disabled", state.refs.requirePermission.disabled ? "true" : "false");
       }
 
       if (state.refs.save) {
         state.refs.save.disabled = disabled;
+        state.refs.save.setAttribute("aria-disabled", disabled ? "true" : "false");
+        if (reason) {
+          state.refs.save.setAttribute("title", reason);
+        } else {
+          state.refs.save.removeAttribute("title");
+        }
       }
 
       if (state.refs.reset) {
         state.refs.reset.disabled = disabled;
+        state.refs.reset.setAttribute("aria-disabled", disabled ? "true" : "false");
       }
+
+      (state.refs.optionCards || []).forEach(function disableCard(card) {
+        try {
+          var workspace = normalizeWorkspace(card.getAttribute("data-workspace") || card.getAttribute("data-value") || "");
+          var cardDisabled = disabled || !isAllowedWorkspace(workspace);
+          card.classList.toggle(CLASS_DISABLED, cardDisabled);
+          card.setAttribute("aria-disabled", cardDisabled ? "true" : "false");
+        } catch (error) {}
+      });
 
       if (state.refs.card) {
         state.refs.card.setAttribute("data-project-visibility", visibility);
         state.refs.card.setAttribute("data-project-publication-disabled", disabled ? "true" : "false");
+        state.refs.card.setAttribute("data-project-publication-disabled-reason", reason || "");
       }
     } catch (error) {}
   }
@@ -1190,21 +1822,46 @@
   function onInputChange() {
     try {
       var data = collectData();
-      var effective = effectiveWorkspaces(data.visibility, data.published_workspaces);
 
       applyData(
         {
           visibility: data.visibility,
           published_workspaces: data.published_workspaces,
-          effective_published_workspaces: effective,
+          publishedWorkspaces: data.publishedWorkspaces,
+          effective_published_workspaces: data.effective_published_workspaces,
+          effectivePublishedWorkspaces: data.effectivePublishedWorkspaces,
           require_auth: data.require_auth,
-          require_project_permission: data.require_project_permission
+          requireAuth: data.requireAuth,
+          require_project_permission: data.require_project_permission,
+          requireProjectPermission: data.requireProjectPermission
         },
         { keepDirty: true }
       );
 
       setDirty(true);
       setAlert("", "");
+    } catch (error) {}
+  }
+
+  function onWorkspaceOptionClick(event) {
+    try {
+      var target = event && event.currentTarget ? event.currentTarget : null;
+      if (!target || !canWritePublication()) {
+        return;
+      }
+
+      var workspace = normalizeWorkspace(target.getAttribute("data-workspace") || target.getAttribute("data-value") || "");
+      if (!isAllowedWorkspace(workspace)) {
+        return;
+      }
+
+      var checkbox = query("[data-project-publication-checkbox][data-workspace='" + workspace + "']", state.refs.card) ||
+        query("[data-project-publication-checkbox][name='" + workspace + "']", state.refs.card);
+
+      if (checkbox) {
+        checkbox.checked = !checkbox.checked;
+        onInputChange();
+      }
     } catch (error) {}
   }
 
@@ -1231,27 +1888,46 @@
   function onVisibilityChanged(event) {
     try {
       var detail = event && event.detail ? event.detail : {};
-      var visibility = normalizeVisibility(detail.visibility || currentVisibility(), "private");
+      var visibility = normalizeVisibility(detail.visibility || detail.value || currentVisibility(), "private");
 
       if (state.refs.card) {
         state.refs.card.setAttribute("data-project-visibility", visibility);
       }
 
+      if (state.refs.root) {
+        state.refs.root.setAttribute("data-project-visibility", visibility);
+      }
+
       var data = collectData();
       data.visibility = visibility;
+      data.effective_published_workspaces = effectiveWorkspaces(visibility, data.published_workspaces);
+      data.effectivePublishedWorkspaces = safeClone(data.effective_published_workspaces);
 
-      applyData(
-        {
-          visibility: visibility,
-          published_workspaces: data.published_workspaces,
-          effective_published_workspaces: effectiveWorkspaces(visibility, data.published_workspaces),
-          require_auth: visibility === "private" ? true : data.require_auth,
-          require_project_permission: visibility === "private" ? true : data.require_project_permission
-        },
-        { keepDirty: true }
-      );
+      if (visibility === "private") {
+        data.require_auth = true;
+        data.requireAuth = true;
+        data.require_project_permission = true;
+        data.requireProjectPermission = true;
+      }
 
+      applyData(data, { keepDirty: true });
       setDirty(true);
+    } catch (error) {}
+  }
+
+  function onMessage(event) {
+    try {
+      var data = event && event.data;
+
+      if (!data || typeof data !== "object") {
+        return;
+      }
+
+      var type = trimString(data.type || data.kind, "");
+
+      if (type === EVENT_VISIBILITY_CHANGED) {
+        onVisibilityChanged({ detail: data.detail || data });
+      }
     } catch (error) {}
   }
 
@@ -1264,28 +1940,112 @@
         addListener(input, "change", onInputChange);
       });
 
+      (state.refs.optionCards || []).forEach(function wireOption(card) {
+        addListener(card, "click", onWorkspaceOptionClick);
+        addListener(card, "keydown", function onCardKeydown(event) {
+          try {
+            if (event && (event.key === "Enter" || event.key === " ")) {
+              event.preventDefault();
+              onWorkspaceOptionClick({ currentTarget: card });
+            }
+          } catch (error) {}
+        });
+      });
+
       addListener(state.refs.requireAuth, "change", onInputChange);
       addListener(state.refs.requirePermission, "change", onInputChange);
 
       if (state.refs.root) {
-        addListener(state.refs.root, "vectoplan:project:visibility:changed", onVisibilityChanged);
+        addListener(state.refs.root, EVENT_VISIBILITY_CHANGED, onVisibilityChanged);
       }
 
-      addListener(window, "message", function onMessage(event) {
-        try {
-          var data = event && event.data;
+      if (state.refs.visibilityInput) {
+        addListener(state.refs.visibilityInput, "change", onVisibilityChanged);
+        addListener(state.refs.visibilityInput, "input", onVisibilityChanged);
+      }
 
-          if (!data || typeof data !== "object") {
-            return;
-          }
-
-          var type = trimString(data.type || data.kind, "");
-
-          if (type === "vectoplan:project:visibility:changed") {
-            onVisibilityChanged({ detail: data.detail || data });
-          }
-        } catch (error) {}
+      (state.refs.visibilityRadios || []).forEach(function wireVisibilityRadio(input) {
+        addListener(input, "change", onVisibilityChanged);
       });
+
+      addListener(window, "message", onMessage);
+    } catch (error) {}
+  }
+
+  function syncInitialStateFromRefs() {
+    try {
+      state.projectPublicId =
+        trimString(state.refs.card && state.refs.card.getAttribute("data-project-public-id"), "") ||
+        state.config.projectPublicId;
+
+      state.endpoint =
+        trimString(state.refs.card && state.refs.card.getAttribute("data-publication-url"), "") ||
+        state.config.endpoint;
+
+      state.isNew = toBooleanSafe(
+        state.refs.card && state.refs.card.getAttribute("data-project-is-new"),
+        state.config.isNew
+      );
+
+      state.canManage = toBooleanSafe(
+        state.refs.card && state.refs.card.getAttribute("data-project-can-manage"),
+        state.config.canManage
+      );
+
+      state.canPublish = toBooleanSafe(
+        state.refs.card && state.refs.card.getAttribute("data-project-can-publish"),
+        state.config.canPublish || state.config.canManage
+      );
+
+      state.canMutate = toBooleanSafe(
+        state.refs.card && state.refs.card.getAttribute("data-project-can-mutate"),
+        state.config.canMutate || state.config.canPublish || state.config.canManage
+      );
+
+      state.canEdit = toBooleanSafe(
+        state.refs.card && state.refs.card.getAttribute("data-project-can-edit"),
+        state.config.canEdit
+      );
+
+      state.demoMode = toBooleanSafe(
+        state.refs.card && state.refs.card.getAttribute("data-project-demo-mode"),
+        state.config.demoMode
+      );
+
+      state.persistent = toBooleanSafe(
+        state.refs.card && state.refs.card.getAttribute("data-project-persistent"),
+        state.config.persistent
+      );
+
+      state.publicViewer = toBooleanSafe(
+        state.refs.card && state.refs.card.getAttribute("data-project-public-viewer"),
+        state.config.publicViewer
+      );
+
+      state.readOnly = toBooleanSafe(
+        state.refs.card && state.refs.card.getAttribute("data-project-read-only"),
+        state.config.readOnly
+      );
+
+      state.authUnavailable = toBooleanSafe(
+        state.refs.card && state.refs.card.getAttribute("data-project-auth-unavailable"),
+        state.config.authUnavailable
+      );
+
+      state.userBlocked = toBooleanSafe(
+        state.refs.card && state.refs.card.getAttribute("data-project-user-blocked"),
+        state.config.userBlocked
+      );
+
+      state.accessBlocked = toBooleanSafe(
+        state.refs.card && state.refs.card.getAttribute("data-project-access-blocked"),
+        state.config.accessBlocked
+      );
+
+      if (state.refs.card) {
+        state.refs.card.setAttribute("data-project-public-id", state.projectPublicId || "");
+        state.refs.card.setAttribute("data-project-publication-version", String(INTERNAL_VERSION));
+      }
     } catch (error) {}
   }
 
@@ -1295,6 +2055,7 @@
     }
 
     try {
+      state.destroyed = false;
       state.config = getConfig();
       state.refs = queryRefs();
 
@@ -1302,28 +2063,7 @@
         return state;
       }
 
-      state.projectPublicId =
-        trimString(state.refs.card.getAttribute("data-project-public-id"), "") ||
-        state.config.projectPublicId;
-
-      state.endpoint =
-        trimString(state.refs.card.getAttribute("data-publication-url"), "") ||
-        state.config.endpoint;
-
-      state.isNew = toBooleanSafe(
-        state.refs.card.getAttribute("data-project-is-new"),
-        state.config.isNew
-      );
-
-      state.canManage = toBooleanSafe(
-        state.refs.card.getAttribute("data-project-can-manage"),
-        state.config.canManage
-      );
-
-      state.demoMode = toBooleanSafe(
-        state.refs.card.getAttribute("data-project-demo-mode"),
-        state.config.demoMode
-      );
+      syncInitialStateFromRefs();
 
       state.initialData = parseInitialData();
       state.currentData = safeClone(state.initialData);
@@ -1334,19 +2074,25 @@
 
       state.initialized = true;
 
-      emitLocal("vectoplan:project-publication:ready", {
+      emitLocal(EVENT_PUBLICATION_READY, {
         publication: state.currentData,
         canManage: state.canManage,
+        canPublish: state.canPublish,
+        canWrite: canWritePublication(),
         isNew: state.isNew,
-        demoMode: state.demoMode
+        demoMode: state.demoMode,
+        publicViewer: state.publicViewer,
+        readOnly: state.readOnly,
+        endpoint: buildEndpoint()
       });
 
       try {
         window.__VECTOPLAN_PROJECT_PUBLICATION_STATE__ = state;
-      } catch (_) {}
+      } catch (error) {}
 
       return state;
     } catch (error) {
+      state.lastError = normalizeError(error);
       setAlert("error", "Veröffentlichungseinstellungen konnten nicht initialisiert werden.");
       return state;
     }
@@ -1354,6 +2100,7 @@
 
   function destroy() {
     try {
+      removeAllListeners();
       state.destroyed = true;
       state.initialized = false;
     } catch (error) {}
@@ -1368,14 +2115,27 @@
         initialized: state.initialized,
         destroyed: state.destroyed,
         isSaving: state.isSaving,
+        isLoading: state.isLoading,
         isDirty: state.isDirty,
         canManage: state.canManage,
+        canPublish: state.canPublish,
+        canMutate: state.canMutate,
+        canWrite: canWritePublication(),
         isNew: state.isNew,
         demoMode: state.demoMode,
+        persistent: state.persistent,
+        publicViewer: state.publicViewer,
+        readOnly: state.readOnly,
+        authUnavailable: state.authUnavailable,
+        userBlocked: state.userBlocked,
+        accessBlocked: state.accessBlocked,
+        disabledReason: disabledReason(),
         projectPublicId: state.projectPublicId,
         endpoint: buildEndpoint(),
-        initialData: state.initialData,
-        currentData: collectData()
+        initialData: safeClone(state.initialData),
+        currentData: collectData(),
+        lastResponse: safeClone(state.lastResponse),
+        lastError: state.lastError
       };
     } catch (error) {
       return {
@@ -1392,18 +2152,25 @@
     destroy: destroy,
     save: savePublication,
     reset: resetPublication,
+    refresh: refreshPublication,
     collectData: collectData,
+    buildPayloadForSave: buildPayloadForSave,
     applyData: applyData,
     getSnapshot: getSnapshot,
     setAlert: setAlert,
+    canWrite: canWritePublication,
+    disabledReason: disabledReason,
     _private: {
       getConfig: getConfig,
       queryRefs: queryRefs,
       normalizeVisibility: normalizeVisibility,
       normalizeWorkspace: normalizeWorkspace,
+      normalizeWorkspaces: normalizeWorkspaces,
+      sanitizeWorkspaceMap: sanitizeWorkspaceMap,
       effectiveWorkspaces: effectiveWorkspaces,
       requestJson: requestJson,
-      normalizeError: normalizeError
+      normalizeError: normalizeError,
+      extractPublicationPayload: extractPublicationPayload
     }
   };
 

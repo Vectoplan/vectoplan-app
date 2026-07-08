@@ -25,12 +25,16 @@ Architekturregel:
 - ProjectInvitation ist App-seitiger Projektzugang, nicht Auth-Wahrheit.
 - Demo-Guests dürfen keine Einladungen oder Rollenänderungen ausführen.
 - Blocked/Banned/Auth-unavailable erhält keinen Fallback.
+- Auth-unavailable ist 503, nicht Ban/Forbidden.
 """
 
 import datetime as _dt
+import hashlib
 import json
 import logging
 import os
+import secrets
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
@@ -56,8 +60,8 @@ except Exception:  # pragma: no cover
     except Exception:
         try:
             from extensions import db  # type: ignore
-        except Exception as exc:  # pragma: no cover
-            raise RuntimeError("project_invitation_service requires SQLAlchemy db.") from exc
+        except Exception:
+            db = None  # type: ignore
 
 
 try:
@@ -75,7 +79,10 @@ except Exception:  # pragma: no cover
     try:
         from ..models.project_access import ProjectMembership  # type: ignore
     except Exception:
-        ProjectMembership = None  # type: ignore
+        try:
+            from models import ProjectMembership  # type: ignore
+        except Exception:
+            ProjectMembership = None  # type: ignore
 
 
 try:
@@ -93,7 +100,10 @@ except Exception:  # pragma: no cover
     try:
         from ..models.users import AppUser  # type: ignore
     except Exception:
-        AppUser = None  # type: ignore
+        try:
+            from models import AppUser  # type: ignore
+        except Exception:
+            AppUser = None  # type: ignore
 
 
 try:
@@ -145,8 +155,112 @@ except Exception:  # pragma: no cover
             serialize_project_invitation,
             serialize_project_invitations,
         )
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError("project_invitation_service requires models.project_invitations.") from exc
+    except Exception:
+        DEFAULT_INVITATION_EXPIRY_DAYS = 14
+        ROLE_OWNER = "owner"
+        ROLE_ADMIN = "admin"
+        ROLE_EDITOR = "editor"
+        ROLE_VIEWER = "viewer"
+        DEFAULT_INVITATION_ROLE = ROLE_VIEWER
+        INVITABLE_PROJECT_ROLES = {ROLE_VIEWER, ROLE_EDITOR, ROLE_ADMIN}
+        STATUS_PENDING = "pending"
+        STATUS_ACCEPTED = "accepted"
+        STATUS_REJECTED = "rejected"
+        STATUS_REVOKED = "revoked"
+        STATUS_EXPIRED = "expired"
+        STATUS_FAILED = "failed"
+        ProjectInvitation = None  # type: ignore
+
+        def normalize_email(value: Any) -> str:  # type: ignore
+            try:
+                return str(value or "").strip().lower()
+            except Exception:
+                return ""
+
+        def is_valid_email(value: Any) -> bool:  # type: ignore
+            try:
+                text = normalize_email(value)
+                return bool(text and len(text) <= 320 and "@" in text and "." in text.rsplit("@", 1)[-1])
+            except Exception:
+                return False
+
+        def normalize_invitation_role(value: Any, allow_owner: bool = False) -> str:  # type: ignore
+            try:
+                role = str(value or DEFAULT_INVITATION_ROLE).strip().lower()
+                aliases = {
+                    "owner": ROLE_OWNER,
+                    "admin": ROLE_ADMIN,
+                    "administrator": ROLE_ADMIN,
+                    "manager": ROLE_ADMIN,
+                    "editor": ROLE_EDITOR,
+                    "edit": ROLE_EDITOR,
+                    "writer": ROLE_EDITOR,
+                    "viewer": ROLE_VIEWER,
+                    "view": ROLE_VIEWER,
+                    "reader": ROLE_VIEWER,
+                }
+                role = aliases.get(role, role)
+                if role == ROLE_OWNER and not allow_owner:
+                    return ROLE_ADMIN
+                if role in {ROLE_OWNER, ROLE_ADMIN, ROLE_EDITOR, ROLE_VIEWER}:
+                    return role
+                return DEFAULT_INVITATION_ROLE
+            except Exception:
+                return DEFAULT_INVITATION_ROLE
+
+        def hash_invitation_token(token: Any) -> str:  # type: ignore
+            return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+        def serialize_project_invitation(invitation: Any, include_private: bool = False, include_auth: bool = False, include_raw: bool = False) -> Dict[str, Any]:  # type: ignore
+            if invitation is None:
+                return {}
+            if hasattr(invitation, "to_dict") and callable(invitation.to_dict):
+                try:
+                    return dict(invitation.to_dict(include_private=include_private, include_auth=include_auth, include_raw=include_raw))
+                except TypeError:
+                    try:
+                        return dict(invitation.to_dict())
+                    except Exception:
+                        pass
+            data: Dict[str, Any] = {}
+            for key in (
+                "id",
+                "public_id",
+                "project_id",
+                "project_public_id",
+                "email",
+                "email_normalized",
+                "role",
+                "status",
+                "invitation_url",
+                "expires_at",
+                "created_at",
+                "updated_at",
+            ):
+                try:
+                    value = getattr(invitation, key, None)
+                    if hasattr(value, "isoformat"):
+                        value = value.isoformat()
+                    data[key] = value
+                except Exception:
+                    pass
+            return data
+
+        def serialize_project_invitations(invitations: Any, include_private: bool = False, include_auth: bool = False, include_raw: bool = False) -> list:  # type: ignore
+            return [
+                serialize_project_invitation(item, include_private=include_private, include_auth=include_auth, include_raw=include_raw)
+                for item in list(invitations or [])
+            ]
+
+        def invitation_status_counts(invitations: Any) -> Dict[str, int]:  # type: ignore
+            result: Dict[str, int] = {}
+            for item in list(invitations or []):
+                try:
+                    status = str(getattr(item, "status", "") or "unknown").lower()
+                    result[status] = result.get(status, 0) + 1
+                except Exception:
+                    continue
+            return result
 
 
 try:
@@ -179,21 +293,27 @@ except Exception:  # pragma: no cover
 
 try:
     from services.project_permissions import (  # type: ignore
+        PERMISSION_MANAGE_TEAM,
         PermissionDenied,
         can_manage_project,
+        can_manage_project_team,
         get_project_permission_result,
         require_project_permission,
     )
 except Exception:  # pragma: no cover
     try:
         from .project_permissions import (  # type: ignore
+            PERMISSION_MANAGE_TEAM,
             PermissionDenied,
             can_manage_project,
+            can_manage_project_team,
             get_project_permission_result,
             require_project_permission,
         )
     except Exception:
+        PERMISSION_MANAGE_TEAM = "manage_team"  # type: ignore
         can_manage_project = None  # type: ignore
+        can_manage_project_team = None  # type: ignore
         get_project_permission_result = None  # type: ignore
         require_project_permission = None  # type: ignore
 
@@ -298,6 +418,46 @@ ROLE_PERMISSION_MATRIX = {
 DEFAULT_AUTH_IDENTITY_LOOKUP_PATH = "/auth/identity/lookup"
 DEFAULT_AUTH_INVITATION_DISPATCH_PATH = "/auth/project-invitations/dispatch"
 
+AUTH_UNAVAILABLE_CODES = {
+    "auth_unavailable",
+    "auth_service_unavailable",
+    "current_user_unavailable",
+    "current_user_service_unavailable",
+    "current_user_context_unavailable",
+    "auth_context_client_unavailable",
+    "service_unavailable",
+    "dependency_unavailable",
+    "upstream_unavailable",
+    "storage_unavailable",
+    "dns_failed",
+    "connection_refused",
+    "timeout",
+    "http_5xx",
+    "http_error",
+    "access_denied",
+    "invalid_payload",
+    "not_configured",
+    "request_failed",
+    "requests_unavailable",
+}
+
+USER_BLOCKED_CODES = {
+    "blocked",
+    "banned",
+    "user_blocked",
+    "user_banned",
+    "account_blocked",
+    "account_banned",
+    "subscription_blocked",
+    "plan_blocked",
+    "security_blocked",
+    "disabled",
+    "inactive",
+    "suspended",
+    "deleted",
+    "locked",
+}
+
 
 # ---------------------------------------------------------------------------
 # Small safe helpers
@@ -349,7 +509,7 @@ def _log_exception(message: str, **extra: Any) -> None:
 
 def _compact_json(value: Any) -> str:
     try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     except Exception:
         try:
             return str(value)
@@ -390,9 +550,9 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
         if isinstance(value, (int, float)):
             return bool(value)
         text = str(value).strip().lower()
-        if text in {"1", "true", "yes", "y", "on", "enabled"}:
+        if text in {"1", "true", "yes", "y", "on", "enabled", "active", "ok", "ja"}:
             return True
-        if text in {"0", "false", "no", "n", "off", "disabled"}:
+        if text in {"0", "false", "no", "n", "off", "disabled", "inactive", "none", "null", "nein", ""}:
             return False
         return default
     except Exception:
@@ -419,8 +579,10 @@ def _safe_list(value: Any) -> list:
         if value is None:
             return []
         if isinstance(value, list):
-            return value
+            return list(value)
         if isinstance(value, tuple):
+            return list(value)
+        if isinstance(value, set):
             return list(value)
         return []
     except Exception:
@@ -435,14 +597,12 @@ def _read_config(name: str, default: Any = None) -> Any:
                 return value
     except Exception:
         pass
-
     try:
         value = os.environ.get(name)
         if value is not None:
             return value
     except Exception:
         pass
-
     return default
 
 
@@ -468,12 +628,14 @@ def _setattr_if_present(obj: Any, name: str, value: Any) -> None:
 
 def _json_clone(value: Any) -> Dict[str, Any]:
     try:
-        return json.loads(json.dumps(_safe_dict(value), ensure_ascii=False))
+        return json.loads(json.dumps(_safe_dict(value), ensure_ascii=False, default=str))
     except Exception:
         return _safe_dict(value)
 
 
 def _commit_or_flush(commit: bool = True) -> None:
+    if db is None:
+        raise RuntimeError("database_unavailable")
     try:
         if commit:
             db.session.commit()
@@ -489,14 +651,16 @@ def _commit_or_flush(commit: bool = True) -> None:
 
 def _rollback_safely() -> None:
     try:
-        db.session.rollback()
+        if db is not None:
+            db.session.rollback()
     except Exception:
         pass
 
 
 def _session_add(obj: Any) -> None:
     try:
-        db.session.add(obj)
+        if db is not None:
+            db.session.add(obj)
     except Exception:
         pass
 
@@ -505,17 +669,13 @@ def _project_is_demo(project: Any) -> bool:
     try:
         if project is None:
             return False
-
-        if _safe_bool(getattr(project, "is_demo", False), False):
+        if _safe_bool(_getattr_any(project, ("is_demo", "isDemo", "demo", "demo_mode", "demoMode"), False), False):
             return True
-
-        if _safe_str(getattr(project, "project_scope", ""), default="", max_len=40).lower() == "demo":
+        if _safe_str(_getattr_any(project, ("project_scope", "projectScope", "scope"), ""), default="", max_len=40).lower() == "demo":
             return True
-
-        metadata = _safe_dict(getattr(project, "metadata_json", None))
-        demo_meta = _safe_dict(metadata.get("vectoplan_demo"))
-
-        return _safe_bool(demo_meta.get("enabled"), False)
+        metadata = _safe_dict(_getattr_any(project, ("metadata_json", "metadataJson", "metadata", "settings"), {}))
+        demo_meta = _safe_dict(metadata.get("vectoplan_demo") or metadata.get("demo") or metadata.get("demo_project"))
+        return _safe_bool(demo_meta.get("enabled") or demo_meta.get("is_demo") or demo_meta.get("isDemo"), False)
     except Exception:
         return False
 
@@ -538,8 +698,11 @@ def _auth_client_post(path: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
     if client is None:
         return {
             "ok": False,
+            "registered": False,
             "code": "auth_context_client_unavailable",
             "message": "vectoplan-auth client unavailable.",
+            "auth_unavailable": True,
+            "status_code": 503,
         }
 
     clean_path = _safe_str(path, default="", max_len=500)
@@ -553,7 +716,10 @@ def _auth_client_post(path: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
     ):
         try:
             response = client.post(clean_path, **kwargs)
-            return _safe_dict(response)
+            data = _safe_dict(response)
+            if data:
+                return data
+            return {"ok": True, "data": response}
         except TypeError:
             continue
         except Exception as exc:
@@ -562,17 +728,24 @@ def _auth_client_post(path: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
                 "code": "auth_client_post_failed",
                 "message": str(exc),
                 "error": str(exc),
+                "auth_unavailable": True,
+                "status_code": 503,
             }
 
     try:
         response = client.post(clean_path, clean_payload)
-        return _safe_dict(response)
+        data = _safe_dict(response)
+        if data:
+            return data
+        return {"ok": True, "data": response}
     except Exception as exc:
         return {
             "ok": False,
             "code": "auth_client_post_failed",
             "message": str(exc),
             "error": str(exc),
+            "auth_unavailable": True,
+            "status_code": 503,
         }
 
 
@@ -583,6 +756,8 @@ def _auth_client_get_status() -> Dict[str, Any]:
             "ok": False,
             "code": "auth_context_client_unavailable",
             "message": "vectoplan-auth client unavailable.",
+            "auth_unavailable": True,
+            "status_code": 503,
         }
 
     try:
@@ -598,6 +773,8 @@ def _auth_client_get_status() -> Dict[str, Any]:
             "ok": False,
             "code": "auth_ready_check_failed",
             "error": str(exc),
+            "auth_unavailable": True,
+            "status_code": 503,
         }
 
     return {
@@ -630,6 +807,20 @@ def get_auth_identity_status() -> Dict[str, Any]:
     }
 
 
+def _identity_failure_status(payload: Mapping[str, Any]) -> int:
+    code = _safe_str(payload.get("code"), "", 120)
+    if _safe_bool(payload.get("auth_unavailable"), False) or code in AUTH_UNAVAILABLE_CODES:
+        return 503
+    status = _safe_int(payload.get("status_code"), None)
+    if status:
+        return status
+    if code == "user_not_registered":
+        return 404
+    if code == "invalid_email":
+        return 400
+    return 400
+
+
 def require_registered_email_identity(email: Any) -> Dict[str, Any]:
     normalized_email = normalize_email(email)
 
@@ -640,11 +831,15 @@ def require_registered_email_identity(email: Any) -> Dict[str, Any]:
             "code": "invalid_email",
             "message": "Die E-Mail-Adresse ist ungültig.",
             "email": normalized_email,
+            "status_code": 400,
         }
 
     if legacy_require_registered_email_identity is not None:
         try:
-            return _safe_dict(legacy_require_registered_email_identity(normalized_email))
+            result = _safe_dict(legacy_require_registered_email_identity(normalized_email))
+            result.setdefault("email", normalized_email)
+            result.setdefault("status_code", _identity_failure_status(result) if not _safe_bool(result.get("ok"), False) else 200)
+            return result
         except Exception as exc:
             return {
                 "ok": False,
@@ -653,6 +848,8 @@ def require_registered_email_identity(email: Any) -> Dict[str, Any]:
                 "message": "Die Registrierungsprüfung ist fehlgeschlagen.",
                 "error": str(exc),
                 "email": normalized_email,
+                "auth_unavailable": True,
+                "status_code": 503,
             }
 
     path = _safe_str(
@@ -687,7 +884,7 @@ def require_registered_email_identity(email: Any) -> Dict[str, Any]:
         or _safe_str(identity.get("id"), default="", max_len=160)
     )
 
-    return {
+    result = {
         **payload,
         "ok": _safe_bool(payload.get("ok"), registered),
         "registered": registered,
@@ -701,6 +898,8 @@ def require_registered_email_identity(email: Any) -> Dict[str, Any]:
             500,
         ),
     }
+    result.setdefault("status_code", 200 if result["ok"] and registered else _identity_failure_status(result))
+    return result
 
 
 def dispatch_project_invitation_identity(
@@ -719,7 +918,7 @@ def dispatch_project_invitation_identity(
 
     if legacy_dispatch_project_invitation_identity is not None:
         try:
-            return _safe_dict(
+            result = _safe_dict(
                 legacy_dispatch_project_invitation_identity(
                     email=normalized_email,
                     project_public_id=project_public_id,
@@ -732,12 +931,16 @@ def dispatch_project_invitation_identity(
                     require_registered=require_registered,
                 )
             )
+            result.setdefault("status_code", 200 if _safe_bool(result.get("ok"), False) else _identity_failure_status(result))
+            return result
         except Exception as exc:
             return {
                 "ok": False,
                 "code": "auth_invitation_dispatch_failed",
                 "message": "Der externe Einladungsversand ist fehlgeschlagen.",
                 "error": str(exc),
+                "auth_unavailable": True,
+                "status_code": 503,
             }
 
     path = _safe_str(
@@ -746,7 +949,7 @@ def dispatch_project_invitation_identity(
         max_len=500,
     )
 
-    return _auth_client_post(
+    result = _auth_client_post(
         path,
         {
             "email": normalized_email,
@@ -761,6 +964,8 @@ def dispatch_project_invitation_identity(
             "source": "vectoplan-app.project_invitation_service",
         },
     )
+    result.setdefault("status_code", 200 if _safe_bool(result.get("ok"), False) else _identity_failure_status(result))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -773,7 +978,7 @@ class ProjectInvitationServiceResult:
     code: str
     message: str = ""
     project: Any = None
-    invitation: Optional[ProjectInvitation] = None
+    invitation: Optional[Any] = None
     invitations: list = field(default_factory=list)
     membership: Any = None
     identity: Dict[str, Any] = field(default_factory=dict)
@@ -783,11 +988,7 @@ class ProjectInvitationServiceResult:
     status_code: int = 200
     error: Optional[str] = None
 
-    def to_dict(
-        self,
-        include_private: bool = False,
-        include_raw: bool = False,
-    ) -> Dict[str, Any]:
+    def to_dict(self, include_private: bool = False, include_raw: bool = False) -> Dict[str, Any]:
         project_id = None
         project_public_id = None
 
@@ -827,7 +1028,13 @@ class ProjectInvitationServiceResult:
                 include_auth=True,
                 include_raw=include_raw,
             )
+            result["items"] = result["invitations"]
+            result["total"] = len(result["invitations"])
             result["invitation_counts"] = invitation_status_counts(self.invitations)
+        else:
+            result.setdefault("invitations", [])
+            result.setdefault("items", [])
+            result.setdefault("total", 0)
 
         if self.membership is not None:
             result["membership"] = _serialize_membership(self.membership)
@@ -835,20 +1042,8 @@ class ProjectInvitationServiceResult:
         return result
 
 
-def _result(
-    ok: bool,
-    code: str,
-    message: str = "",
-    status_code: int = 200,
-    **kwargs: Any,
-) -> ProjectInvitationServiceResult:
-    return ProjectInvitationServiceResult(
-        ok=ok,
-        code=code,
-        message=message,
-        status_code=status_code,
-        **kwargs,
-    )
+def _result(ok: bool, code: str, message: str = "", status_code: int = 200, **kwargs: Any) -> ProjectInvitationServiceResult:
+    return ProjectInvitationServiceResult(ok=ok, code=code, message=message, status_code=status_code, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -866,6 +1061,67 @@ def _context_to_dict(value: Any) -> Dict[str, Any]:
         return {}
 
 
+def _context_code(context: Mapping[str, Any]) -> str:
+    return _safe_str(
+        context.get("blocked_reason")
+        or context.get("blockedReason")
+        or context.get("reason_code")
+        or context.get("reasonCode")
+        or context.get("auth_state")
+        or context.get("authState")
+        or context.get("code"),
+        "",
+        160,
+    ).lower()
+
+
+def _context_auth_unavailable(context: Mapping[str, Any]) -> bool:
+    code = _context_code(context)
+    blocked_kind = _safe_str(context.get("blocked_kind") or context.get("blockedKind"), "", 80).lower()
+    status = _safe_int(context.get("denial_status_code") or context.get("denialStatusCode") or context.get("status_code"), 0)
+    return bool(
+        _safe_bool(context.get("auth_unavailable") or context.get("authUnavailable"), False)
+        or blocked_kind == "auth_unavailable"
+        or code in AUTH_UNAVAILABLE_CODES
+        or status == 503
+    )
+
+
+def _context_user_blocked(context: Mapping[str, Any]) -> bool:
+    code = _context_code(context)
+    blocked_kind = _safe_str(context.get("blocked_kind") or context.get("blockedKind"), "", 80).lower()
+    return bool(
+        not _context_auth_unavailable(context)
+        and (
+            _safe_bool(context.get("user_blocked") or context.get("userBlocked"), False)
+            or blocked_kind == "user_blocked"
+            or code in USER_BLOCKED_CODES
+        )
+    )
+
+
+def _context_access_blocked(context: Mapping[str, Any]) -> bool:
+    return bool(
+        _context_auth_unavailable(context)
+        or _context_user_blocked(context)
+        or _safe_bool(context.get("access_blocked") or context.get("accessBlocked"), False)
+        or _safe_bool(context.get("blocked"), False)
+    )
+
+
+def _context_denial_status(context: Mapping[str, Any]) -> int:
+    if _context_auth_unavailable(context):
+        return 503
+    status = _safe_int(context.get("denial_status_code") or context.get("denialStatusCode") or context.get("status_code"), 0)
+    if status:
+        return status
+    if _context_user_blocked(context) or _context_access_blocked(context):
+        return 403
+    if not _safe_bool(context.get("authenticated") or context.get("is_authenticated") or context.get("isAuthenticated"), False):
+        return 401
+    return 403
+
+
 def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
     """
     Liefert aktuellen Actor-Kontext.
@@ -875,6 +1131,21 @@ def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
     Explizites user_id wird nur als lokaler AppUser-Link verstanden.
     """
     context: Dict[str, Any] = {}
+
+    explicit_user_id = _safe_int(user_id, default=None)
+    if explicit_user_id:
+        return {
+            "user_id": explicit_user_id,
+            "id": explicit_user_id,
+            "authenticated": True,
+            "demo_mode": False,
+            "persistent": True,
+            "blocked": False,
+            "auth_unavailable": False,
+            "user_blocked": False,
+            "access_blocked": False,
+            "source": "explicit_user_id",
+        }
 
     try:
         if get_current_user_context is not None:
@@ -886,42 +1157,34 @@ def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
     except Exception:
         context = {}
 
-    explicit_user_id = _safe_int(user_id, default=None)
-    if explicit_user_id:
-        context["user_id"] = explicit_user_id
-        context["id"] = explicit_user_id
-        context.setdefault("persistent", True)
-        context.setdefault("authenticated", True)
-        context.setdefault("demo_mode", False)
+    if not context:
+        context = {
+            "user_id": None,
+            "id": None,
+            "authenticated": False,
+            "demo_mode": False,
+            "persistent": False,
+            "blocked": True,
+            "auth_unavailable": True,
+            "access_blocked": True,
+            "user_blocked": False,
+            "blocked_kind": "auth_unavailable",
+            "blocked_reason": "current_user_context_unavailable",
+            "denial_status_code": 503,
+            "source": "fallback_auth_unavailable",
+        }
 
-    actor_user_id = _safe_int(
-        context.get("user_id") or context.get("id"),
-        default=None,
-    )
+    actor_user_id = _safe_int(context.get("user_id") or context.get("userId") or context.get("id"), default=None)
+    auth_unavailable = _context_auth_unavailable(context)
+    user_blocked = _context_user_blocked(context)
+    access_blocked = _context_access_blocked(context)
 
-    blocked = _safe_bool(context.get("blocked"), default=False)
+    demo_mode = _safe_bool(context.get("demo_mode") or context.get("is_demo") or context.get("demo") or context.get("demoMode"), default=False)
+    authenticated = _safe_bool(context.get("authenticated") or context.get("is_authenticated") or context.get("isAuthenticated") or context.get("logged_in"), default=False)
+    persistent = _safe_bool(context.get("persistent"), default=bool(actor_user_id and authenticated and not demo_mode and not access_blocked))
 
-    demo_mode = _safe_bool(
-        context.get("demo_mode")
-        or context.get("is_demo")
-        or context.get("demo"),
-        default=False,
-    )
-
-    authenticated = _safe_bool(
-        context.get("authenticated")
-        or context.get("is_authenticated")
-        or context.get("logged_in"),
-        default=False,
-    )
-
-    persistent = _safe_bool(
-        context.get("persistent"),
-        default=bool(actor_user_id and authenticated and not demo_mode and not blocked),
-    )
-
-    if blocked or demo_mode or not persistent:
-        actor_user_id = None if user_id is None else actor_user_id
+    if access_blocked or demo_mode or not persistent:
+        actor_user_id = None
 
     auth_user_id = _safe_str(
         context.get("auth_user_id")
@@ -933,13 +1196,7 @@ def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
         max_len=160,
     )
 
-    email = _safe_str(
-        context.get("email")
-        or context.get("auth_email")
-        or context.get("authEmail"),
-        default="",
-        max_len=320,
-    ).lower()
+    email = _safe_str(context.get("email") or context.get("auth_email") or context.get("authEmail"), default="", max_len=320).lower()
 
     account_plan = _safe_str(
         context.get("account_plan")
@@ -956,29 +1213,33 @@ def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
         "id": actor_user_id,
         "auth_user_id": auth_user_id or None,
         "email": email or None,
-        "demo_mode": bool(demo_mode and not blocked),
-        "authenticated": bool(authenticated and not blocked),
-        "persistent": bool(persistent and actor_user_id and not blocked and not demo_mode),
-        "blocked": bool(blocked),
+        "demo_mode": bool(demo_mode and not access_blocked),
+        "authenticated": bool(authenticated and not access_blocked),
+        "persistent": bool(persistent and actor_user_id and not access_blocked and not demo_mode),
+        "blocked": bool(access_blocked),
+        "auth_unavailable": bool(auth_unavailable),
+        "user_blocked": bool(user_blocked),
+        "access_blocked": bool(access_blocked),
         "blocked_reason": context.get("blocked_reason") or context.get("blockedReason"),
+        "denial_status_code": _context_denial_status(context),
         "account_plan": account_plan or None,
     }
 
 
 def _actor_user_id(actor_context: Optional[Mapping[str, Any]]) -> Optional[int]:
     data = _safe_dict(actor_context)
-    if _safe_bool(data.get("blocked"), False):
+    if _context_access_blocked(data):
         return None
     if _safe_bool(data.get("demo_mode") or data.get("is_demo"), False):
         return None
     if not _safe_bool(data.get("persistent"), False):
         return None
-    return _safe_int(data.get("user_id") or data.get("id"), default=None)
+    return _safe_int(data.get("user_id") or data.get("userId") or data.get("id"), default=None)
 
 
 def _actor_auth_user_id(actor_context: Optional[Mapping[str, Any]]) -> Optional[str]:
     data = _safe_dict(actor_context)
-    if _safe_bool(data.get("blocked"), False):
+    if _context_access_blocked(data):
         return None
     value = _safe_str(
         data.get("auth_user_id")
@@ -994,26 +1255,22 @@ def _actor_auth_user_id(actor_context: Optional[Mapping[str, Any]]) -> Optional[
 
 def _actor_email(actor_context: Optional[Mapping[str, Any]]) -> Optional[str]:
     data = _safe_dict(actor_context)
-    if _safe_bool(data.get("blocked"), False):
+    if _context_access_blocked(data):
         return None
-    value = _safe_str(
-        data.get("email") or data.get("auth_email") or data.get("authEmail"),
-        default="",
-        max_len=320,
-    ).lower()
+    value = _safe_str(data.get("email") or data.get("auth_email") or data.get("authEmail"), default="", max_len=320).lower()
     return value or None
 
 
 def _actor_is_demo(actor_context: Optional[Mapping[str, Any]]) -> bool:
     data = _safe_dict(actor_context)
-    if _safe_bool(data.get("blocked"), False):
+    if _context_access_blocked(data):
         return False
-    return _safe_bool(data.get("demo_mode") or data.get("is_demo") or data.get("demo"), default=False)
+    return _safe_bool(data.get("demo_mode") or data.get("is_demo") or data.get("demo") or data.get("demoMode"), default=False)
 
 
 def _actor_is_blocked(actor_context: Optional[Mapping[str, Any]]) -> bool:
     data = _safe_dict(actor_context)
-    return _safe_bool(data.get("blocked"), default=False)
+    return _context_access_blocked(data)
 
 
 # ---------------------------------------------------------------------------
@@ -1076,6 +1333,21 @@ def _project_id(project: Any) -> Optional[int]:
 # Permission helpers
 # ---------------------------------------------------------------------------
 
+def _permission_exception_result(project: Any, exc: Exception, permission: str = "manage") -> ProjectInvitationServiceResult:
+    payload = _safe_dict(exc.to_dict() if hasattr(exc, "to_dict") else {})
+    code = _safe_str(payload.get("code") or getattr(exc, "code", None), default="project_permission_denied", max_len=120)
+    status = _safe_int(payload.get("status_code") or getattr(exc, "status_code", None), default=403) or 403
+    message = _safe_str(payload.get("message") or payload.get("error") or getattr(exc, "message", None) or str(exc), default="Projektberechtigung fehlt.", max_len=1000)
+    return _result(
+        ok=False,
+        code=code,
+        message=message,
+        project=project,
+        status_code=status,
+        access={**payload, "permission": permission},
+    )
+
+
 def _permission_denied_result(project: Any, permission: str = "manage") -> ProjectInvitationServiceResult:
     return _result(
         ok=False,
@@ -1093,14 +1365,34 @@ def _require_manage_permission(project: Any, actor_context: Mapping[str, Any]) -
     """
     actor_user_id = _actor_user_id(actor_context)
 
-    if _actor_is_blocked(actor_context):
+    if _context_auth_unavailable(actor_context):
         return _result(
             ok=False,
-            code=_safe_str(actor_context.get("blocked_reason"), default="auth_blocked", max_len=120),
-            message="Der Zugriff ist gesperrt.",
+            code=_context_code(actor_context) or "auth_service_unavailable",
+            message="vectoplan-auth ist nicht erreichbar.",
+            project=project,
+            status_code=503,
+            data={"blocked": True, "auth_unavailable": True},
+        )
+
+    if _context_user_blocked(actor_context):
+        return _result(
+            ok=False,
+            code=_context_code(actor_context) or "auth_blocked",
+            message="Dieser Zugang ist gesperrt.",
             project=project,
             status_code=403,
-            data={"blocked": True},
+            data={"blocked": True, "user_blocked": True},
+        )
+
+    if _context_access_blocked(actor_context):
+        return _result(
+            ok=False,
+            code=_context_code(actor_context) or "access_blocked",
+            message="Der Zugriff ist gesperrt.",
+            project=project,
+            status_code=_context_denial_status(actor_context),
+            data={"blocked": True, "access_blocked": True},
         )
 
     if _project_is_demo(project) or _actor_is_demo(actor_context):
@@ -1133,26 +1425,25 @@ def _require_manage_permission(project: Any, actor_context: Mapping[str, Any]) -
 
     try:
         if require_project_permission is not None:
-            require_project_permission(project, "manage", user_id=actor_user_id, allow_public_view=False)
+            try:
+                require_project_permission(project, PERMISSION_MANAGE_TEAM, user_id=actor_user_id, allow_public_view=False)
+            except TypeError:
+                require_project_permission(project, "manage_team", actor_user_id)
             return None
-    except PermissionDenied:
-        return _permission_denied_result(project, "manage")
-    except TypeError:
-        try:
-            require_project_permission(project, "manage", actor_user_id)
-            return None
-        except PermissionDenied:
-            return _permission_denied_result(project, "manage")
-        except Exception:
-            pass
+    except PermissionDenied as exc:
+        return _permission_exception_result(project, exc, "manage_team")
     except Exception:
         pass
 
     try:
-        if can_manage_project is not None:
-            if bool(can_manage_project(project, actor_user_id)):
-                return None
-            return _permission_denied_result(project, "manage")
+        if can_manage_project_team is not None and bool(can_manage_project_team(project, actor_user_id)):
+            return None
+    except Exception:
+        pass
+
+    try:
+        if can_manage_project is not None and bool(can_manage_project(project, actor_user_id)):
+            return None
     except Exception:
         pass
 
@@ -1162,18 +1453,16 @@ def _require_manage_permission(project: Any, actor_context: Mapping[str, Any]) -
                 perm = get_project_permission_result(project, user_id=actor_user_id, allow_public_view=False)
             except TypeError:
                 perm = get_project_permission_result(project, actor_user_id)
-
             perm_dict = _safe_dict(perm.to_dict() if hasattr(perm, "to_dict") else perm)
-
+            if _safe_bool(perm_dict.get("can_manage_team"), default=False):
+                return None
             if _safe_bool(perm_dict.get("can_manage"), default=False):
                 return None
-
             permissions = _safe_dict(perm_dict.get("permissions"))
-            if _safe_bool(permissions.get("manage"), default=False):
+            if _safe_bool(permissions.get("manage_team"), default=False) or _safe_bool(permissions.get("manage"), default=False):
                 return None
-
             if _safe_bool(perm_dict.get("ok"), default=True) is False:
-                return _permission_denied_result(project, "manage")
+                return _permission_denied_result(project, "manage_team")
     except Exception:
         pass
 
@@ -1191,17 +1480,14 @@ def _require_manage_permission(project: Any, actor_context: Mapping[str, Any]) -
     except Exception:
         pass
 
-    return _permission_denied_result(project, "manage")
+    return _permission_denied_result(project, "manage_team")
 
 
 # ---------------------------------------------------------------------------
 # AppUser lookup only, no creation
 # ---------------------------------------------------------------------------
 
-def find_linked_app_user(
-    auth_user_id: Any = None,
-    email: Any = None,
-) -> Optional[Any]:
+def find_linked_app_user(auth_user_id: Any = None, email: Any = None) -> Optional[Any]:
     """
     Sucht einen bereits existierenden lokalen AppUser-Link.
 
@@ -1271,8 +1557,10 @@ def _membership_is_active(membership: Any) -> bool:
             return False
         if _safe_bool(getattr(membership, "is_deleted", False), default=False):
             return False
+        if getattr(membership, "revoked_at", None) is not None:
+            return False
         status = _membership_status(membership).lower()
-        return status not in {"deleted", "removed", "revoked", "inactive", "disabled"}
+        return status not in {"deleted", "removed", "revoked", "inactive", "disabled", "rejected", "expired"}
     except Exception:
         return False
 
@@ -1281,18 +1569,14 @@ def _membership_has_manage(membership: Any) -> bool:
     try:
         if not _membership_is_active(membership):
             return False
-
         role = _safe_str(getattr(membership, "role", ""), default="").lower()
         if role in {ROLE_OWNER, ROLE_ADMIN}:
             return True
-
         if _safe_bool(getattr(membership, "can_manage", False), default=False):
             return True
-
         permissions = _safe_dict(getattr(membership, "permissions", None))
-        if _safe_bool(permissions.get("manage"), default=False):
+        if _safe_bool(permissions.get("manage"), default=False) or _safe_bool(permissions.get("manage_team"), default=False):
             return True
-
         return False
     except Exception:
         return False
@@ -1357,10 +1641,10 @@ def _apply_role_to_membership(membership: Any, role: Any) -> None:
         "can_embed": "embed",
     }
 
-    for attr, perm in mapping.items():
+    for attr_name, perm in mapping.items():
         try:
-            if hasattr(membership, attr):
-                setattr(membership, attr, bool(flags.get(perm, False)))
+            if hasattr(membership, attr_name):
+                setattr(membership, attr_name, bool(flags.get(perm, False)))
         except Exception:
             pass
 
@@ -1378,7 +1662,7 @@ def _apply_role_to_membership(membership: Any, role: Any) -> None:
 
 
 def _create_or_update_membership_from_invitation(
-    invitation: ProjectInvitation,
+    invitation: Any,
     local_user_id: Any,
     actor_context: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[bool, Optional[Any], str]:
@@ -1391,7 +1675,7 @@ def _create_or_update_membership_from_invitation(
     if ProjectMembership is None:
         return False, None, "project_membership_model_unavailable"
 
-    safe_project_id = _safe_int(invitation.project_id)
+    safe_project_id = _safe_int(getattr(invitation, "project_id", None))
     safe_user_id = _safe_int(local_user_id)
 
     if not safe_project_id or not safe_user_id:
@@ -1488,14 +1772,10 @@ def _write_audit_event(
 
 
 # ---------------------------------------------------------------------------
-# Invitation URL
+# Invitation helpers
 # ---------------------------------------------------------------------------
 
-def build_invitation_url(
-    invitation: ProjectInvitation,
-    plain_token: Optional[str] = None,
-    include_token: bool = False,
-) -> str:
+def build_invitation_url(invitation: Any, plain_token: Optional[str] = None, include_token: bool = False) -> str:
     """
     Baut eine vorbereitete Einladungs-URL.
 
@@ -1503,8 +1783,7 @@ def build_invitation_url(
     dispatch_response_json, Logs oder UI landen.
     """
     public_base = _safe_str(
-        _read_config("VECTOPLAN_APP_PUBLIC_URL", "")
-        or _read_config("APP_PUBLIC_URL", ""),
+        _read_config("VECTOPLAN_APP_PUBLIC_URL", "") or _read_config("APP_PUBLIC_URL", ""),
         default="",
     ).rstrip("/")
 
@@ -1529,6 +1808,128 @@ def build_invitation_url(
     return path
 
 
+def _model_unavailable_result(code: str = "project_invitation_model_unavailable") -> ProjectInvitationServiceResult:
+    return _result(
+        ok=False,
+        code=code,
+        message="ProjectInvitation-Modell oder Datenbank ist nicht verfügbar.",
+        status_code=503,
+        data={
+            "project_invitation_model_available": ProjectInvitation is not None,
+            "db_available": db is not None,
+        },
+    )
+
+
+def _manual_create_pending_invitation(
+    *,
+    project_id: Any,
+    project_public_id: Any,
+    email: str,
+    role: str,
+    invited_by_user_id: Any,
+    invited_by_auth_user_id: Any,
+    identity: Mapping[str, Any],
+    message: Any,
+    metadata: Mapping[str, Any],
+    expires_in_days: int,
+) -> Tuple[Any, str]:
+    if ProjectInvitation is None:
+        raise RuntimeError("ProjectInvitation unavailable")
+
+    plain_token = secrets.token_urlsafe(32)
+    public_id = uuid.uuid4().hex
+
+    invitation = ProjectInvitation()
+    values = {
+        "public_id": public_id,
+        "project_id": project_id,
+        "project_public_id": project_public_id,
+        "email": email,
+        "email_normalized": email,
+        "auth_user_id": _safe_str(identity.get("auth_user_id"), "", 160) or None,
+        "role": role,
+        "status": STATUS_PENDING,
+        "token_hash": hash_invitation_token(plain_token),
+        "invited_by_user_id": invited_by_user_id,
+        "invited_by_auth_user_id": invited_by_auth_user_id,
+        "message": _safe_str(message, "", 4000) or None,
+        "identity_json": _safe_dict(identity),
+        "metadata_json": _safe_dict(metadata),
+        "created_at": utcnow(),
+        "updated_at": utcnow(),
+        "expires_at": utcnow() + _dt.timedelta(days=int(expires_in_days or DEFAULT_INVITATION_EXPIRY_DAYS)),
+    }
+
+    for key, value in values.items():
+        try:
+            if hasattr(invitation, key):
+                setattr(invitation, key, value)
+        except Exception:
+            pass
+
+    return invitation, plain_token
+
+
+def _find_active_invitation_for_email(project_id: Any, email: str) -> Any:
+    if ProjectInvitation is None:
+        return None
+    try:
+        if hasattr(ProjectInvitation, "find_active_for_email"):
+            return ProjectInvitation.find_active_for_email(project_id, email)
+    except Exception:
+        pass
+    try:
+        return ProjectInvitation.query.filter(
+            ProjectInvitation.project_id == project_id,
+            ProjectInvitation.email_normalized == email,
+            ProjectInvitation.status == STATUS_PENDING,
+        ).first()
+    except Exception:
+        return None
+
+
+def _find_invitation_by_public_id(invitation_id: Any) -> Any:
+    if ProjectInvitation is None:
+        return None
+    try:
+        if hasattr(ProjectInvitation, "find_by_public_id"):
+            return ProjectInvitation.find_by_public_id(invitation_id)
+    except Exception:
+        pass
+    try:
+        return ProjectInvitation.query.filter(ProjectInvitation.public_id == _safe_str(invitation_id)).first()
+    except Exception:
+        return None
+
+
+def _invitation_can_revoke(invitation: Any) -> bool:
+    try:
+        if hasattr(invitation, "can_revoke") and callable(invitation.can_revoke):
+            return bool(invitation.can_revoke())
+        status = _safe_str(getattr(invitation, "status", ""), "", 40).lower()
+        return status == STATUS_PENDING
+    except Exception:
+        return False
+
+
+def _invitation_can_accept(invitation: Any, *, auth_user_id: Any = None, email: Any = None) -> bool:
+    try:
+        if hasattr(invitation, "can_accept") and callable(invitation.can_accept):
+            return bool(invitation.can_accept(auth_user_id=auth_user_id, email=email))
+        candidate_auth = _safe_str(auth_user_id, "", 160)
+        candidate_email = normalize_email(email)
+        inv_auth = _safe_str(getattr(invitation, "auth_user_id", ""), "", 160)
+        inv_email = normalize_email(getattr(invitation, "email_normalized", "") or getattr(invitation, "email", ""))
+        if inv_auth and candidate_auth and inv_auth == candidate_auth:
+            return True
+        if inv_email and candidate_email and inv_email == candidate_email:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Core service
 # ---------------------------------------------------------------------------
@@ -1551,26 +1952,30 @@ class ProjectInvitationService:
                 "ok": False,
                 "code": "auth_identity_status_failed",
                 "error": str(exc),
+                "status_code": 503,
             }
 
         return {
             "ok": True,
             "service": "project_invitation_service",
-            "phase": "vectoplan-auth-no-default-user",
+            "phase": "vectoplan-auth-invitation-safe-no-default-user",
             "default_user_removed": True,
             "project_model_available": Project is not None,
             "membership_model_available": ProjectMembership is not None,
             "audit_model_available": ProjectAuditEvent is not None,
             "app_user_model_available": AppUser is not None,
             "project_invitation_model_available": ProjectInvitation is not None,
+            "db_available": db is not None,
             "auth_identity": auth_status,
-            "invitable_roles": sorted(INVITABLE_PROJECT_ROLES),
+            "invitable_roles": sorted(list(INVITABLE_PROJECT_ROLES)),
+            "auth_unavailable_returns_503": True,
             "rules": {
                 "creates_app_user": False,
                 "allows_demo": False,
                 "requires_manage_permission": True,
                 "requires_registered_email": True,
                 "accept_requires_local_app_user_link": True,
+                "default_user": False,
             },
         }
 
@@ -1581,14 +1986,12 @@ class ProjectInvitationService:
         include_terminal: bool = True,
         include_private: bool = False,
     ) -> ProjectInvitationServiceResult:
+        if ProjectInvitation is None or db is None:
+            return _model_unavailable_result()
+
         project = resolve_project(project_or_id)
         if project is None:
-            return _result(
-                ok=False,
-                code="project_not_found",
-                message="Projekt nicht gefunden.",
-                status_code=404,
-            )
+            return _result(ok=False, code="project_not_found", message="Projekt nicht gefunden.", status_code=404)
 
         actor_context = get_actor_context(actor_user_id)
         denied = _require_manage_permission(project, actor_context)
@@ -1596,25 +1999,31 @@ class ProjectInvitationService:
             return denied
 
         try:
-            ProjectInvitation.expire_old_pending(_project_id(project))
-            invitations = ProjectInvitation.list_for_project(
-                _project_id(project),
-                include_terminal=include_terminal,
-                include_deleted=False,
-            )
+            try:
+                ProjectInvitation.expire_old_pending(_project_id(project))
+            except Exception:
+                pass
+
+            if hasattr(ProjectInvitation, "list_for_project"):
+                invitations = ProjectInvitation.list_for_project(
+                    _project_id(project),
+                    include_terminal=include_terminal,
+                    include_deleted=False,
+                )
+            else:
+                query = ProjectInvitation.query.filter(ProjectInvitation.project_id == _project_id(project))
+                if not include_terminal:
+                    query = query.filter(ProjectInvitation.status == STATUS_PENDING)
+                invitations = query.all()
 
             return _result(
                 ok=True,
                 code="project_invitations_loaded",
                 message="Einladungen wurden geladen.",
                 project=project,
-                invitations=invitations,
-                access={"can_manage": True},
-                data={
-                    "include_terminal": bool(include_terminal),
-                    "include_private": bool(include_private),
-                    "total": len(invitations),
-                },
+                invitations=list(invitations or []),
+                access={"can_manage": True, "can_manage_team": True},
+                data={"include_terminal": bool(include_terminal), "include_private": bool(include_private), "total": len(list(invitations or []))},
             )
         except Exception as exc:
             _log_exception("list_invitations failed", project_id=_project_id(project))
@@ -1641,23 +2050,12 @@ class ProjectInvitationService:
         include_token_in_result: bool = False,
         include_token_in_dispatch_url: bool = False,
     ) -> ProjectInvitationServiceResult:
-        """
-        Erstellt eine pending ProjectInvitation für eine registrierte E-Mail.
+        if ProjectInvitation is None or db is None:
+            return _model_unavailable_result()
 
-        Wichtig:
-        - Erzeugt keinen AppUser.
-        - Lehnt nicht registrierte E-Mails ab.
-        - Lehnt Demo-Modus ab.
-        - Schreibt ProjectInvitation und optional Audit.
-        """
         project = resolve_project(project_or_id)
         if project is None:
-            return _result(
-                ok=False,
-                code="project_not_found",
-                message="Projekt nicht gefunden.",
-                status_code=404,
-            )
+            return _result(ok=False, code="project_not_found", message="Projekt nicht gefunden.", status_code=404)
 
         actor_context = get_actor_context(actor_user_id)
         actor_id = _actor_user_id(actor_context)
@@ -1681,30 +2079,26 @@ class ProjectInvitationService:
         normalized_role = normalize_invitation_role(role, allow_owner=False)
         if normalized_role == ROLE_OWNER:
             normalized_role = ROLE_ADMIN
-
         if normalized_role not in INVITABLE_PROJECT_ROLES:
             normalized_role = DEFAULT_INVITATION_ROLE
 
         identity = require_registered_email_identity(normalized_email)
 
         if not _safe_bool(identity.get("ok"), default=False) or not _safe_bool(identity.get("registered"), default=False):
-            code = _safe_str(identity.get("code"), default="user_not_registered")
+            code = _safe_str(identity.get("code"), default="user_not_registered", max_len=120)
             message_text = _safe_str(
                 identity.get("message"),
                 default="Einladungen sind nur an bereits registrierte Accounts möglich.",
+                max_len=1000,
             )
+            status = _safe_int(identity.get("status_code"), default=None) or (404 if code == "user_not_registered" else 503 if code in AUTH_UNAVAILABLE_CODES else 400)
 
             _write_audit_event(
                 project,
                 ACTION_INVITATION_FAILED,
                 actor_user_id=actor_id,
                 message="Project invitation rejected.",
-                metadata={
-                    "email": normalized_email,
-                    "role": normalized_role,
-                    "code": code,
-                    "identity": identity,
-                },
+                metadata={"email": normalized_email, "role": normalized_role, "code": code, "identity": identity},
             )
 
             try:
@@ -1718,14 +2112,10 @@ class ProjectInvitationService:
                 message=message_text,
                 project=project,
                 identity=identity,
-                status_code=404 if code == "user_not_registered" else 400,
+                status_code=status,
             )
 
-        existing_pending = ProjectInvitation.find_active_for_email(
-            _project_id(project),
-            normalized_email,
-        )
-
+        existing_pending = _find_active_invitation_for_email(_project_id(project), normalized_email)
         if existing_pending is not None:
             return _result(
                 ok=True,
@@ -1737,11 +2127,7 @@ class ProjectInvitationService:
                 status_code=200,
             )
 
-        linked_user = find_linked_app_user(
-            auth_user_id=identity.get("auth_user_id"),
-            email=normalized_email,
-        )
-
+        linked_user = find_linked_app_user(auth_user_id=identity.get("auth_user_id"), email=normalized_email)
         if linked_user is not None:
             linked_user_id = _safe_int(getattr(linked_user, "id", None))
             existing_membership = _find_membership(_project_id(project), linked_user_id)
@@ -1756,42 +2142,49 @@ class ProjectInvitationService:
                     status_code=200,
                 )
 
-        invitation: Optional[ProjectInvitation] = None
+        invitation: Optional[Any] = None
         plain_token: Optional[str] = None
 
         try:
-            invitation, plain_token = ProjectInvitation.create_pending(
-                project_id=_project_id(project),
-                project_public_id=_project_public_id(project),
-                email=normalized_email,
-                role=normalized_role,
-                invited_by_user_id=actor_id,
-                invited_by_auth_user_id=actor_auth_user_id,
-                identity=identity,
-                message=message,
-                metadata={
-                    **_safe_dict(metadata),
-                    "created_by_service": "project_invitation_service",
-                    "default_user_removed": True,
-                },
-                expires_in_days=expires_in_days,
-                generate_token=True,
-            )
+            if hasattr(ProjectInvitation, "create_pending"):
+                invitation, plain_token = ProjectInvitation.create_pending(
+                    project_id=_project_id(project),
+                    project_public_id=_project_public_id(project),
+                    email=normalized_email,
+                    role=normalized_role,
+                    invited_by_user_id=actor_id,
+                    invited_by_auth_user_id=actor_auth_user_id,
+                    identity=identity,
+                    message=message,
+                    metadata={
+                        **_safe_dict(metadata),
+                        "created_by_service": "project_invitation_service",
+                        "default_user_removed": True,
+                    },
+                    expires_in_days=expires_in_days,
+                    generate_token=True,
+                )
+            else:
+                invitation, plain_token = _manual_create_pending_invitation(
+                    project_id=_project_id(project),
+                    project_public_id=_project_public_id(project),
+                    email=normalized_email,
+                    role=normalized_role,
+                    invited_by_user_id=actor_id,
+                    invited_by_auth_user_id=actor_auth_user_id,
+                    identity=identity,
+                    message=message,
+                    metadata={**_safe_dict(metadata), "created_by_service": "project_invitation_service", "default_user_removed": True},
+                    expires_in_days=expires_in_days,
+                )
 
             if linked_user is not None:
-                invitation.target_user_id = _safe_int(getattr(linked_user, "id", None))
+                _setattr_if_present(invitation, "target_user_id", _safe_int(getattr(linked_user, "id", None)))
 
-            invitation_url = build_invitation_url(
-                invitation,
-                plain_token=plain_token,
-                include_token=include_token_in_dispatch_url,
-            )
-            if invitation_url:
-                invitation.invitation_url = build_invitation_url(
-                    invitation,
-                    plain_token=None,
-                    include_token=False,
-                )
+            invitation_url = build_invitation_url(invitation, plain_token=plain_token, include_token=include_token_in_dispatch_url)
+            safe_public_url = build_invitation_url(invitation, plain_token=None, include_token=False)
+            if safe_public_url:
+                _setattr_if_present(invitation, "invitation_url", safe_public_url)
 
             _session_add(invitation)
 
@@ -1803,19 +2196,22 @@ class ProjectInvitationService:
                     project_public_id=_project_public_id(project),
                     role=normalized_role,
                     invited_by_auth_user_id=actor_auth_user_id,
-                    invitation_id=invitation.public_id,
+                    invitation_id=getattr(invitation, "public_id", None),
                     invitation_url=invitation_url,
-                    message=_safe_str(message, default=None),  # type: ignore[arg-type]
+                    message=_safe_str(message, default="", max_len=4000) or None,
                     metadata={
                         "project_id": _project_id(project),
                         "project_public_id": _project_public_id(project),
-                        "invitation_public_id": invitation.public_id,
+                        "invitation_public_id": getattr(invitation, "public_id", None),
                     },
                     require_registered=False,
                 )
 
-                invitation.apply_dispatch_result(dispatch_result)
-
+                if hasattr(invitation, "apply_dispatch_result"):
+                    try:
+                        invitation.apply_dispatch_result(dispatch_result)
+                    except Exception:
+                        pass
             else:
                 dispatch_result = {
                     "ok": True,
@@ -1823,19 +2219,23 @@ class ProjectInvitationService:
                     "message": "Einladungsversand wurde übersprungen.",
                     "external_sent": False,
                     "placeholder": False,
+                    "status_code": 200,
                 }
 
             if dispatch and not _safe_bool(dispatch_result.get("ok"), default=False):
-                invitation.mark_failed(dispatch_result.get("message") or dispatch_result.get("error"))
+                if hasattr(invitation, "mark_failed"):
+                    try:
+                        invitation.mark_failed(dispatch_result.get("message") or dispatch_result.get("error"))
+                    except Exception:
+                        _setattr_if_present(invitation, "status", STATUS_FAILED)
+                else:
+                    _setattr_if_present(invitation, "status", STATUS_FAILED)
                 audit_action = ACTION_INVITATION_FAILED
                 audit_message = "Project invitation created but dispatch failed."
                 result_ok = False
-                result_code = _safe_str(dispatch_result.get("code"), default="invitation_dispatch_failed")
-                result_status = 502
-                result_message = _safe_str(
-                    dispatch_result.get("message"),
-                    default="Die Einladung konnte nicht versendet werden.",
-                )
+                result_code = _safe_str(dispatch_result.get("code"), default="invitation_dispatch_failed", max_len=120)
+                result_status = _safe_int(dispatch_result.get("status_code"), default=None) or 503 if _safe_bool(dispatch_result.get("auth_unavailable"), False) else 502
+                result_message = _safe_str(dispatch_result.get("message"), default="Die Einladung konnte nicht versendet werden.", max_len=1000)
             else:
                 audit_action = ACTION_INVITATION_CREATED
                 audit_message = "Project invitation created."
@@ -1850,7 +2250,7 @@ class ProjectInvitationService:
                 actor_user_id=actor_id,
                 message=audit_message,
                 metadata={
-                    "invitation_id": invitation.public_id,
+                    "invitation_id": getattr(invitation, "public_id", None),
                     "email": normalized_email,
                     "role": normalized_role,
                     "identity": identity,
@@ -1865,15 +2265,12 @@ class ProjectInvitationService:
                 "role": normalized_role,
                 "dispatch_requested": bool(dispatch),
                 "linked_app_user_found": linked_user is not None,
+                "no_user_created": True,
             }
 
             if include_token_in_result and plain_token:
                 data["invitation_token"] = plain_token
-                data["invitation_url_with_token"] = build_invitation_url(
-                    invitation,
-                    plain_token=plain_token,
-                    include_token=True,
-                )
+                data["invitation_url_with_token"] = build_invitation_url(invitation, plain_token=plain_token, include_token=True)
 
             return _result(
                 ok=result_ok,
@@ -1889,12 +2286,7 @@ class ProjectInvitationService:
 
         except Exception as exc:
             _rollback_safely()
-            _log_exception(
-                "invite_by_email failed",
-                project_id=_project_id(project),
-                email=normalized_email,
-                role=normalized_role,
-            )
+            _log_exception("invite_by_email failed", project_id=_project_id(project), email=normalized_email, role=normalized_role)
             return _result(
                 ok=False,
                 code="project_invitation_create_failed",
@@ -1914,14 +2306,12 @@ class ProjectInvitationService:
         reason: Any = None,
         commit: bool = True,
     ) -> ProjectInvitationServiceResult:
+        if ProjectInvitation is None or db is None:
+            return _model_unavailable_result()
+
         project = resolve_project(project_or_id)
         if project is None:
-            return _result(
-                ok=False,
-                code="project_not_found",
-                message="Projekt nicht gefunden.",
-                status_code=404,
-            )
+            return _result(ok=False, code="project_not_found", message="Projekt nicht gefunden.", status_code=404)
 
         actor_context = get_actor_context(actor_user_id)
         actor_id = _actor_user_id(actor_context)
@@ -1931,17 +2321,11 @@ class ProjectInvitationService:
         if denied is not None:
             return denied
 
-        invitation = ProjectInvitation.find_by_public_id(invitation_id)
+        invitation = _find_invitation_by_public_id(invitation_id)
         if invitation is None:
-            return _result(
-                ok=False,
-                code="project_invitation_not_found",
-                message="Einladung nicht gefunden.",
-                project=project,
-                status_code=404,
-            )
+            return _result(ok=False, code="project_invitation_not_found", message="Einladung nicht gefunden.", project=project, status_code=404)
 
-        if _safe_int(invitation.project_id) != _project_id(project):
+        if _safe_int(getattr(invitation, "project_id", None)) != _project_id(project):
             return _result(
                 ok=False,
                 code="project_invitation_project_mismatch",
@@ -1951,7 +2335,7 @@ class ProjectInvitationService:
                 status_code=409,
             )
 
-        if not invitation.can_revoke():
+        if not _invitation_can_revoke(invitation):
             return _result(
                 ok=False,
                 code="project_invitation_not_revokable",
@@ -1962,11 +2346,14 @@ class ProjectInvitationService:
             )
 
         try:
-            invitation.mark_revoked(
-                revoked_by_user_id=actor_id,
-                revoked_by_auth_user_id=actor_auth_user_id,
-                reason=reason,
-            )
+            if hasattr(invitation, "mark_revoked"):
+                invitation.mark_revoked(revoked_by_user_id=actor_id, revoked_by_auth_user_id=actor_auth_user_id, reason=reason)
+            else:
+                _setattr_if_present(invitation, "status", STATUS_REVOKED)
+                _setattr_if_present(invitation, "revoked_at", utcnow())
+                _setattr_if_present(invitation, "revoked_by_user_id", actor_id)
+                _setattr_if_present(invitation, "revoked_by_auth_user_id", actor_auth_user_id)
+                _setattr_if_present(invitation, "revoke_reason", _safe_str(reason, "", 1000) or None)
 
             _write_audit_event(
                 project,
@@ -1974,31 +2361,20 @@ class ProjectInvitationService:
                 actor_user_id=actor_id,
                 message="Project invitation revoked.",
                 metadata={
-                    "invitation_id": invitation.public_id,
-                    "email": invitation.email_normalized,
-                    "role": invitation.role,
+                    "invitation_id": getattr(invitation, "public_id", None),
+                    "email": getattr(invitation, "email_normalized", None),
+                    "role": getattr(invitation, "role", None),
                     "reason": _safe_str(reason),
                 },
             )
 
             _commit_or_flush(commit=commit)
 
-            return _result(
-                ok=True,
-                code="project_invitation_revoked",
-                message="Einladung wurde widerrufen.",
-                project=project,
-                invitation=invitation,
-                status_code=200,
-            )
+            return _result(ok=True, code="project_invitation_revoked", message="Einladung wurde widerrufen.", project=project, invitation=invitation, status_code=200)
 
         except Exception as exc:
             _rollback_safely()
-            _log_exception(
-                "revoke_invitation failed",
-                project_id=_project_id(project),
-                invitation_id=_safe_str(invitation_id),
-            )
+            _log_exception("revoke_invitation failed", project_id=_project_id(project), invitation_id=_safe_str(invitation_id))
             return _result(
                 ok=False,
                 code="project_invitation_revoke_failed",
@@ -2017,27 +2393,22 @@ class ProjectInvitationService:
         reason: Any = None,
         commit: bool = True,
     ) -> ProjectInvitationServiceResult:
+        if ProjectInvitation is None or db is None:
+            return _model_unavailable_result()
+
         actor_context = get_actor_context(None)
 
+        if _context_auth_unavailable(actor_context):
+            return _result(ok=False, code=_context_code(actor_context) or "auth_service_unavailable", message="vectoplan-auth ist nicht erreichbar.", status_code=503, data={"auth_unavailable": True})
+
         if _actor_is_blocked(actor_context):
-            return _result(
-                ok=False,
-                code=_safe_str(actor_context.get("blocked_reason"), default="auth_blocked", max_len=120),
-                message="Der Zugriff ist gesperrt.",
-                status_code=403,
-                data={"blocked": True},
-            )
+            return _result(ok=False, code=_context_code(actor_context) or "auth_blocked", message="Der Zugriff ist gesperrt.", status_code=_context_denial_status(actor_context), data={"blocked": True})
 
-        invitation = ProjectInvitation.find_by_public_id(invitation_id)
+        invitation = _find_invitation_by_public_id(invitation_id)
         if invitation is None:
-            return _result(
-                ok=False,
-                code="project_invitation_not_found",
-                message="Einladung nicht gefunden.",
-                status_code=404,
-            )
+            return _result(ok=False, code="project_invitation_not_found", message="Einladung nicht gefunden.", status_code=404)
 
-        project = resolve_project(invitation.project_id)
+        project = resolve_project(getattr(invitation, "project_id", None))
 
         effective_auth_user_id = auth_user_id or _actor_auth_user_id(actor_context)
         effective_email = email or _actor_email(actor_context)
@@ -2052,7 +2423,7 @@ class ProjectInvitationService:
                 status_code=401,
             )
 
-        if not invitation.can_accept(auth_user_id=effective_auth_user_id, email=effective_email):
+        if not _invitation_can_accept(invitation, auth_user_id=effective_auth_user_id, email=effective_email):
             return _result(
                 ok=False,
                 code="project_invitation_not_rejectable",
@@ -2063,7 +2434,12 @@ class ProjectInvitationService:
             )
 
         try:
-            invitation.mark_rejected(reason=reason)
+            if hasattr(invitation, "mark_rejected"):
+                invitation.mark_rejected(reason=reason)
+            else:
+                _setattr_if_present(invitation, "status", STATUS_REJECTED)
+                _setattr_if_present(invitation, "rejected_at", utcnow())
+                _setattr_if_present(invitation, "reject_reason", _safe_str(reason, "", 1000) or None)
 
             _write_audit_event(
                 project,
@@ -2071,8 +2447,8 @@ class ProjectInvitationService:
                 actor_user_id=None,
                 message="Project invitation rejected.",
                 metadata={
-                    "invitation_id": invitation.public_id,
-                    "email": invitation.email_normalized,
+                    "invitation_id": getattr(invitation, "public_id", None),
+                    "email": getattr(invitation, "email_normalized", None),
                     "auth_user_id": _safe_str(effective_auth_user_id),
                     "reason": _safe_str(reason),
                 },
@@ -2080,14 +2456,7 @@ class ProjectInvitationService:
 
             _commit_or_flush(commit=commit)
 
-            return _result(
-                ok=True,
-                code="project_invitation_rejected",
-                message="Einladung wurde abgelehnt.",
-                project=project,
-                invitation=invitation,
-                status_code=200,
-            )
+            return _result(ok=True, code="project_invitation_rejected", message="Einladung wurde abgelehnt.", project=project, invitation=invitation, status_code=200)
 
         except Exception as exc:
             _rollback_safely()
@@ -2120,75 +2489,52 @@ class ProjectInvitationService:
           oder über auth_user_id/email auffindbar sein.
         - Erst dann wird ProjectMembership erzeugt/aktiviert.
         """
-        actor_context = get_actor_context(actor_user_id or local_user_id)
+        if ProjectInvitation is None or db is None:
+            return _model_unavailable_result()
+
+        actor_context = get_actor_context(actor_user_id)
+
+        if _context_auth_unavailable(actor_context):
+            return _result(ok=False, code=_context_code(actor_context) or "auth_service_unavailable", message="vectoplan-auth ist nicht erreichbar.", status_code=503, data={"auth_unavailable": True})
 
         if _actor_is_blocked(actor_context):
-            return _result(
-                ok=False,
-                code=_safe_str(actor_context.get("blocked_reason"), default="auth_blocked", max_len=120),
-                message="Der Zugriff ist gesperrt.",
-                status_code=403,
-                data={"blocked": True},
-            )
+            return _result(ok=False, code=_context_code(actor_context) or "auth_blocked", message="Der Zugriff ist gesperrt.", status_code=_context_denial_status(actor_context), data={"blocked": True})
 
         if _actor_is_demo(actor_context):
-            return _result(
-                ok=False,
-                code="demo_mode_not_allowed",
-                message="Im Demo-Modus können keine Projekteinladungen angenommen werden.",
-                status_code=403,
-                data={"demo_mode": True},
-            )
+            return _result(ok=False, code="demo_mode_not_allowed", message="Im Demo-Modus können keine Projekteinladungen angenommen werden.", status_code=403, data={"demo_mode": True})
 
-        invitation = ProjectInvitation.find_by_public_id(invitation_id)
+        if not _safe_bool(actor_context.get("authenticated"), False):
+            return _result(ok=False, code="authentication_required", message="Zum Annehmen der Einladung ist Login erforderlich.", status_code=401)
+
+        invitation = _find_invitation_by_public_id(invitation_id)
         if invitation is None:
-            return _result(
-                ok=False,
-                code="project_invitation_not_found",
-                message="Einladung nicht gefunden.",
-                status_code=404,
-            )
+            return _result(ok=False, code="project_invitation_not_found", message="Einladung nicht gefunden.", status_code=404)
 
-        project = resolve_project(invitation.project_id)
+        project = resolve_project(getattr(invitation, "project_id", None))
 
         try:
-            if invitation.ensure_not_expired():
+            if hasattr(invitation, "ensure_not_expired") and invitation.ensure_not_expired():
                 _write_audit_event(
                     project,
                     ACTION_INVITATION_EXPIRED,
                     actor_user_id=None,
                     message="Project invitation expired.",
-                    metadata={
-                        "invitation_id": invitation.public_id,
-                        "email": invitation.email_normalized,
-                    },
+                    metadata={"invitation_id": getattr(invitation, "public_id", None), "email": getattr(invitation, "email_normalized", None)},
                 )
                 _commit_or_flush(commit=commit)
-
-                return _result(
-                    ok=False,
-                    code="project_invitation_expired",
-                    message="Diese Einladung ist abgelaufen.",
-                    project=project,
-                    invitation=invitation,
-                    status_code=410,
-                )
+                return _result(ok=False, code="project_invitation_expired", message="Diese Einladung ist abgelaufen.", project=project, invitation=invitation, status_code=410)
         except Exception:
             pass
 
         if plain_token:
-            if not invitation.verify_plain_token(plain_token):
-                return _result(
-                    ok=False,
-                    code="invalid_invitation_token",
-                    message="Der Einladungstoken ist ungültig.",
-                    project=project,
-                    invitation=invitation,
-                    status_code=403,
-                )
+            try:
+                if hasattr(invitation, "verify_plain_token") and not invitation.verify_plain_token(plain_token):
+                    return _result(ok=False, code="invalid_invitation_token", message="Der Einladungstoken ist ungültig.", project=project, invitation=invitation, status_code=403)
+            except Exception:
+                return _result(ok=False, code="invalid_invitation_token", message="Der Einladungstoken konnte nicht geprüft werden.", project=project, invitation=invitation, status_code=403)
 
-        effective_auth_user_id = auth_user_id or _actor_auth_user_id(actor_context) or invitation.auth_user_id
-        effective_email = email or _actor_email(actor_context) or invitation.email_normalized
+        effective_auth_user_id = _actor_auth_user_id(actor_context) or auth_user_id or getattr(invitation, "auth_user_id", None)
+        effective_email = _actor_email(actor_context) or email or getattr(invitation, "email_normalized", None)
 
         if not effective_auth_user_id and not effective_email:
             return _result(
@@ -2200,7 +2546,7 @@ class ProjectInvitationService:
                 status_code=401,
             )
 
-        if not invitation.can_accept(auth_user_id=effective_auth_user_id, email=effective_email):
+        if not _invitation_can_accept(invitation, auth_user_id=effective_auth_user_id, email=effective_email):
             return _result(
                 ok=False,
                 code="project_invitation_identity_mismatch",
@@ -2210,18 +2556,19 @@ class ProjectInvitationService:
                 status_code=403,
             )
 
-        resolved_local_user_id = _safe_int(local_user_id)
+        resolved_local_user_id = _actor_user_id(actor_context)
 
         if not resolved_local_user_id:
-            resolved_local_user_id = _actor_user_id(actor_context)
-
-        if not resolved_local_user_id:
-            linked_user = find_linked_app_user(
-                auth_user_id=effective_auth_user_id,
-                email=effective_email,
-            )
+            linked_user = find_linked_app_user(auth_user_id=effective_auth_user_id, email=effective_email)
             if linked_user is not None:
                 resolved_local_user_id = _safe_int(getattr(linked_user, "id", None))
+
+        if not resolved_local_user_id and local_user_id:
+            linked_user = find_linked_app_user(auth_user_id=effective_auth_user_id, email=effective_email)
+            linked_user_id = _safe_int(getattr(linked_user, "id", None)) if linked_user is not None else None
+            requested_local_user_id = _safe_int(local_user_id)
+            if linked_user_id and requested_local_user_id == linked_user_id:
+                resolved_local_user_id = requested_local_user_id
 
         if not resolved_local_user_id:
             return _result(
@@ -2235,34 +2582,26 @@ class ProjectInvitationService:
                 project=project,
                 invitation=invitation,
                 status_code=409,
-                data={
-                    "auth_user_id": effective_auth_user_id,
-                    "email": effective_email,
-                    "no_user_created": True,
-                },
+                data={"auth_user_id": effective_auth_user_id, "email": effective_email, "no_user_created": True},
             )
 
-        if not _safe_bool(actor_context.get("persistent"), False):
-            refreshed_context = get_actor_context(resolved_local_user_id)
-            if not _safe_bool(refreshed_context.get("persistent"), False):
-                return _result(
-                    ok=False,
-                    code="persistent_user_required",
-                    message="Zum Annehmen der Einladung ist ein persistenter AppUser-Link erforderlich.",
-                    project=project,
-                    invitation=invitation,
-                    status_code=403,
-                    data={
-                        "local_user_id": resolved_local_user_id,
-                    },
-                )
-            actor_context = refreshed_context
+        refreshed_context = get_actor_context(resolved_local_user_id)
+        if not _safe_bool(refreshed_context.get("persistent"), False):
+            return _result(
+                ok=False,
+                code="persistent_user_required",
+                message="Zum Annehmen der Einladung ist ein persistenter AppUser-Link erforderlich.",
+                project=project,
+                invitation=invitation,
+                status_code=403,
+                data={"local_user_id": resolved_local_user_id},
+            )
 
         try:
             ok, membership, membership_code = _create_or_update_membership_from_invitation(
                 invitation,
                 local_user_id=resolved_local_user_id,
-                actor_context=actor_context,
+                actor_context=refreshed_context,
             )
 
             if not ok or membership is None:
@@ -2275,11 +2614,18 @@ class ProjectInvitationService:
                     status_code=500,
                 )
 
-            invitation.mark_accepted(
-                accepted_by_user_id=resolved_local_user_id,
-                accepted_by_auth_user_id=effective_auth_user_id,
-                membership_id=getattr(membership, "id", None),
-            )
+            if hasattr(invitation, "mark_accepted"):
+                invitation.mark_accepted(
+                    accepted_by_user_id=resolved_local_user_id,
+                    accepted_by_auth_user_id=effective_auth_user_id,
+                    membership_id=getattr(membership, "id", None),
+                )
+            else:
+                _setattr_if_present(invitation, "status", STATUS_ACCEPTED)
+                _setattr_if_present(invitation, "accepted_at", utcnow())
+                _setattr_if_present(invitation, "accepted_by_user_id", resolved_local_user_id)
+                _setattr_if_present(invitation, "accepted_by_auth_user_id", effective_auth_user_id)
+                _setattr_if_present(invitation, "membership_id", getattr(membership, "id", None))
 
             _write_audit_event(
                 project,
@@ -2287,9 +2633,9 @@ class ProjectInvitationService:
                 actor_user_id=resolved_local_user_id,
                 message="Project invitation accepted.",
                 metadata={
-                    "invitation_id": invitation.public_id,
-                    "email": invitation.email_normalized,
-                    "role": invitation.role,
+                    "invitation_id": getattr(invitation, "public_id", None),
+                    "email": getattr(invitation, "email_normalized", None),
+                    "role": getattr(invitation, "role", None),
                     "membership_code": membership_code,
                     "membership_id": getattr(membership, "id", None),
                 },
@@ -2309,12 +2655,7 @@ class ProjectInvitationService:
 
         except Exception as exc:
             _rollback_safely()
-            _log_exception(
-                "accept_invitation failed",
-                invitation_id=_safe_str(invitation_id),
-                auth_user_id=_safe_str(effective_auth_user_id),
-                local_user_id=resolved_local_user_id,
-            )
+            _log_exception("accept_invitation failed", invitation_id=_safe_str(invitation_id), auth_user_id=_safe_str(effective_auth_user_id), local_user_id=resolved_local_user_id)
             return _result(
                 ok=False,
                 code="project_invitation_accept_failed",
@@ -2325,28 +2666,21 @@ class ProjectInvitationService:
                 error=str(exc),
             )
 
-    def expire_pending(
-        self,
-        project_or_id: Any = None,
-        commit: bool = True,
-    ) -> ProjectInvitationServiceResult:
+    def expire_pending(self, project_or_id: Any = None, commit: bool = True) -> ProjectInvitationServiceResult:
+        if ProjectInvitation is None or db is None:
+            return _model_unavailable_result()
+
         project = resolve_project(project_or_id) if project_or_id is not None else None
 
         try:
-            changed = ProjectInvitation.expire_old_pending(
-                _project_id(project) if project is not None else None
-            )
+            if hasattr(ProjectInvitation, "expire_old_pending"):
+                changed = ProjectInvitation.expire_old_pending(_project_id(project) if project is not None else None)
+            else:
+                changed = 0
 
             if changed:
                 if project is not None:
-                    _write_audit_event(
-                        project,
-                        ACTION_INVITATION_EXPIRED,
-                        actor_user_id=None,
-                        message="Expired project invitations marked.",
-                        metadata={"changed": changed},
-                    )
-
+                    _write_audit_event(project, ACTION_INVITATION_EXPIRED, actor_user_id=None, message="Expired project invitations marked.", metadata={"changed": changed})
                 _commit_or_flush(commit=commit)
 
             return _result(
@@ -2378,7 +2712,6 @@ _SERVICE_SINGLETON: Optional[ProjectInvitationService] = None
 
 def get_project_invitation_service(refresh: bool = False) -> ProjectInvitationService:
     global _SERVICE_SINGLETON
-
     try:
         if refresh or _SERVICE_SINGLETON is None:
             _SERVICE_SINGLETON = ProjectInvitationService()
@@ -2391,19 +2724,10 @@ def get_project_invitation_service_status() -> Dict[str, Any]:
     try:
         return get_project_invitation_service().status()
     except Exception as exc:
-        return {
-            "ok": False,
-            "code": "project_invitation_service_status_failed",
-            "error": str(exc),
-        }
+        return {"ok": False, "code": "project_invitation_service_status_failed", "error": str(exc)}
 
 
-def list_project_invitations(
-    project_or_id: Any,
-    actor_user_id: Any = None,
-    include_terminal: bool = True,
-    include_private: bool = False,
-) -> Dict[str, Any]:
+def list_project_invitations(project_or_id: Any, actor_user_id: Any = None, include_terminal: bool = True, include_private: bool = False) -> Dict[str, Any]:
     result = get_project_invitation_service().list_invitations(
         project_or_id=project_or_id,
         actor_user_id=actor_user_id,
@@ -2437,19 +2761,10 @@ def invite_registered_email_to_project(
         commit=commit,
         include_token_in_result=include_token_in_result,
     )
-    return result.to_dict(
-        include_private=include_token_in_result,
-        include_raw=include_token_in_result,
-    )
+    return result.to_dict(include_private=include_token_in_result, include_raw=include_token_in_result)
 
 
-def revoke_project_invitation(
-    project_or_id: Any,
-    invitation_id: Any,
-    actor_user_id: Any = None,
-    reason: Any = None,
-    commit: bool = True,
-) -> Dict[str, Any]:
+def revoke_project_invitation(project_or_id: Any, invitation_id: Any, actor_user_id: Any = None, reason: Any = None, commit: bool = True) -> Dict[str, Any]:
     result = get_project_invitation_service().revoke_invitation(
         project_or_id=project_or_id,
         invitation_id=invitation_id,
@@ -2460,20 +2775,8 @@ def revoke_project_invitation(
     return result.to_dict(include_private=True, include_raw=False)
 
 
-def reject_project_invitation(
-    invitation_id: Any,
-    auth_user_id: Any = None,
-    email: Any = None,
-    reason: Any = None,
-    commit: bool = True,
-) -> Dict[str, Any]:
-    result = get_project_invitation_service().reject_invitation(
-        invitation_id=invitation_id,
-        auth_user_id=auth_user_id,
-        email=email,
-        reason=reason,
-        commit=commit,
-    )
+def reject_project_invitation(invitation_id: Any, auth_user_id: Any = None, email: Any = None, reason: Any = None, commit: bool = True) -> Dict[str, Any]:
+    result = get_project_invitation_service().reject_invitation(invitation_id=invitation_id, auth_user_id=auth_user_id, email=email, reason=reason, commit=commit)
     return result.to_dict(include_private=False, include_raw=False)
 
 
@@ -2498,14 +2801,8 @@ def accept_project_invitation(
     return result.to_dict(include_private=True, include_raw=False)
 
 
-def expire_project_invitations(
-    project_or_id: Any = None,
-    commit: bool = True,
-) -> Dict[str, Any]:
-    result = get_project_invitation_service().expire_pending(
-        project_or_id=project_or_id,
-        commit=commit,
-    )
+def expire_project_invitations(project_or_id: Any = None, commit: bool = True) -> Dict[str, Any]:
+    result = get_project_invitation_service().expire_pending(project_or_id=project_or_id, commit=commit)
     return result.to_dict(include_private=True, include_raw=False)
 
 

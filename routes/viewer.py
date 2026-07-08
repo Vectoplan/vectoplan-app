@@ -31,7 +31,7 @@ from html import escape
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from flask import Blueprint, current_app, jsonify, make_response, redirect, render_template, request
-from jinja2 import TemplateNotFound
+from jinja2 import TemplateNotFound, TemplateSyntaxError
 from werkzeug.wrappers import Response
 
 
@@ -181,6 +181,27 @@ except Exception:  # pragma: no cover
 
 
 try:
+    from services.project_access_context import (
+        ProjectAccessContext,
+        apply_project_access_context,
+        get_project_access_context_status,
+        normalize_workspace as normalize_access_workspace,
+        resolve_project_workspace_access,
+    )
+except Exception:  # pragma: no cover
+    ProjectAccessContext = None  # type: ignore
+    apply_project_access_context = None  # type: ignore
+    get_project_access_context_status = None  # type: ignore
+    resolve_project_workspace_access = None  # type: ignore
+
+    def normalize_access_workspace(value: Any) -> str:  # type: ignore
+        try:
+            return normalize_workspace_key(value, "project")
+        except Exception:
+            return "project"
+
+
+try:
     from services.demo_project_service import (
         demo_project_public_payload,
         ensure_demo_project_for_context,
@@ -218,6 +239,18 @@ except Exception:  # pragma: no cover
             "karte",
             "openlayer",
         }
+
+
+try:
+    from services.project_workspace_context import (
+        build_project_workspace_context,
+        build_project_workspace_context_result,
+        get_project_workspace_context_status,
+    )
+except Exception:  # pragma: no cover
+    build_project_workspace_context = None  # type: ignore
+    build_project_workspace_context_result = None  # type: ignore
+    get_project_workspace_context_status = None  # type: ignore
 
 
 bp = Blueprint("viewer", __name__)
@@ -742,7 +775,14 @@ def _is_demo_context(current_user: Optional[Mapping[str, Any]] = None) -> bool:
         return False
 
     return bool(
-        _safe_bool(data.get("demo_mode") or data.get("is_demo") or data.get("demo"), False)
+        _safe_bool(
+            data.get("demo_mode")
+            or data.get("demoMode")
+            or data.get("is_demo")
+            or data.get("isDemo")
+            or data.get("demo"),
+            False,
+        )
         and _safe_bool(data.get("can_demo") or data.get("canDemo"), True)
     )
 
@@ -1134,6 +1174,284 @@ def _serialize_access(project: Any, user_id: Optional[int]) -> Dict[str, Any]:
     }
 
 
+
+def _access_context_to_dict(access_context: Any) -> Dict[str, Any]:
+    try:
+        if access_context is None:
+            return {}
+
+        if hasattr(access_context, "to_dict") and callable(access_context.to_dict):
+            return _safe_dict(access_context.to_dict())
+
+        return _safe_dict(access_context)
+
+    except Exception:
+        return {}
+
+
+def _access_context_allowed(access_context: Any) -> bool:
+    try:
+        if access_context is None:
+            return False
+
+        if hasattr(access_context, "allowed"):
+            return bool(getattr(access_context, "allowed"))
+
+        data = _access_context_to_dict(access_context)
+        return _safe_bool(data.get("allowed") or data.get("ok"), False)
+
+    except Exception:
+        return False
+
+
+def _access_context_status(access_context: Any, default: int = 403) -> int:
+    try:
+        if access_context is None:
+            return default
+
+        if hasattr(access_context, "status_code"):
+            return _safe_int(getattr(access_context, "status_code"), default)
+
+        data = _access_context_to_dict(access_context)
+        return _safe_int(data.get("status_code") or data.get("statusCode"), default)
+
+    except Exception:
+        return default
+
+
+def _access_context_code(access_context: Any, default: str = "workspace_permission_denied") -> str:
+    try:
+        data = _access_context_to_dict(access_context)
+        return _safe_str(data.get("code") or data.get("reason"), default, 160)
+    except Exception:
+        return default
+
+
+def _access_context_message(access_context: Any, default: str = "Dieser Workspace ist für dich nicht verfügbar.") -> str:
+    try:
+        data = _access_context_to_dict(access_context)
+        return _safe_str(data.get("message") or data.get("error"), default, 500)
+    except Exception:
+        return default
+
+
+def _access_context_read_only(access_context: Any) -> bool:
+    try:
+        data = _access_context_to_dict(access_context)
+        return _safe_bool(data.get("read_only") or data.get("readOnly"), True)
+    except Exception:
+        return True
+
+
+def _access_context_public_viewer(access_context: Any) -> bool:
+    try:
+        data = _access_context_to_dict(access_context)
+        return _safe_bool(
+            data.get("public_viewer")
+            or data.get("publicViewer")
+            or data.get("is_public_viewer")
+            or data.get("isPublicViewer"),
+            False,
+        )
+    except Exception:
+        return False
+
+
+def _access_context_access_mode(access_context: Any) -> str:
+    try:
+        data = _access_context_to_dict(access_context)
+        return _safe_str(data.get("access_mode") or data.get("accessMode"), "", 80)
+    except Exception:
+        return ""
+
+
+def _resolve_workspace_access_context(
+    *,
+    project: Any,
+    workspace: str,
+    current_user: Mapping[str, Any],
+    action: str = "view",
+) -> Any:
+    try:
+        normalized_workspace = _normalize_workspace(workspace)
+
+        if callable(resolve_project_workspace_access):
+            return resolve_project_workspace_access(
+                project,
+                workspace=normalized_workspace,
+                current_user_context=current_user,
+                action=action,
+                use_cache=False,
+            )
+
+    except Exception as exc:
+        _log_warning("project access context resolver failed: %s", exc.__class__.__name__)
+
+    return None
+
+
+def _apply_access_context_to_project_payload(
+    project_payload: Dict[str, Any],
+    access_context: Any,
+    *,
+    current_user: Mapping[str, Any],
+) -> Dict[str, Any]:
+    try:
+        payload = dict(project_payload or {})
+        ctx = _access_context_to_dict(access_context)
+
+        if not ctx:
+            return payload
+
+        if callable(apply_project_access_context):
+            try:
+                payload = _safe_dict(apply_project_access_context(payload, access_context))
+            except Exception as exc:
+                _log_warning("apply_project_access_context failed, using local merge: %s", exc.__class__.__name__)
+
+        access = _safe_dict(payload.get("access"))
+        permissions = _safe_dict(access.get("permissions"))
+        ctx_permissions = _safe_dict(ctx.get("permissions"))
+
+        for key, value in ctx_permissions.items():
+            permissions[key] = _safe_bool(value, False)
+
+        access_mode = _safe_str(ctx.get("access_mode") or ctx.get("accessMode"), "", 80)
+        public_viewer = _safe_bool(
+            ctx.get("public_viewer")
+            or ctx.get("publicViewer")
+            or ctx.get("is_public_viewer")
+            or ctx.get("isPublicViewer"),
+            False,
+        )
+        read_only = _safe_bool(ctx.get("read_only") or ctx.get("readOnly"), public_viewer)
+
+        if public_viewer:
+            permissions.update(
+                {
+                    "view": True,
+                    "edit": False,
+                    "manage": False,
+                    "delete": False,
+                    "transfer": False,
+                    "embed": True,
+                    "view_settings": False,
+                    "manage_settings": False,
+                    "view_team": False,
+                    "manage_team": False,
+                    "view_admin": False,
+                }
+            )
+
+        access.update(
+            {
+                "role": ctx.get("role") or access.get("role") or ("public_viewer" if public_viewer else "viewer"),
+                "source": ctx.get("source") or access.get("source") or "project_access_context",
+                "access_mode": access_mode,
+                "accessMode": access_mode,
+                "read_only": read_only,
+                "readOnly": read_only,
+                "public_viewer": public_viewer,
+                "publicViewer": public_viewer,
+                "is_public_viewer": public_viewer,
+                "isPublicViewer": public_viewer,
+                "demo_mode": False if public_viewer else _is_demo_context(current_user),
+                "demoMode": False if public_viewer else _is_demo_context(current_user),
+                "permissions": permissions,
+                "can_view": _safe_bool(permissions.get("view"), False),
+                "canView": _safe_bool(permissions.get("view"), False),
+                "can_edit": _safe_bool(permissions.get("edit"), False),
+                "canEdit": _safe_bool(permissions.get("edit"), False),
+                "can_manage": _safe_bool(permissions.get("manage"), False),
+                "canManage": _safe_bool(permissions.get("manage"), False),
+                "can_delete": _safe_bool(permissions.get("delete"), False),
+                "canDelete": _safe_bool(permissions.get("delete"), False),
+                "can_transfer": _safe_bool(permissions.get("transfer"), False),
+                "canTransfer": _safe_bool(permissions.get("transfer"), False),
+                "can_embed": _safe_bool(permissions.get("embed"), False),
+                "canEmbed": _safe_bool(permissions.get("embed"), False),
+                "can_view_settings": _safe_bool(permissions.get("view_settings"), False),
+                "canViewSettings": _safe_bool(permissions.get("view_settings"), False),
+                "can_manage_settings": _safe_bool(permissions.get("manage_settings"), False),
+                "canManageSettings": _safe_bool(permissions.get("manage_settings"), False),
+                "can_view_team": _safe_bool(permissions.get("view_team"), False),
+                "canViewTeam": _safe_bool(permissions.get("view_team"), False),
+                "can_manage_team": _safe_bool(permissions.get("manage_team"), False),
+                "canManageTeam": _safe_bool(permissions.get("manage_team"), False),
+                "can_view_admin": _safe_bool(permissions.get("view_admin"), False),
+                "canViewAdmin": _safe_bool(permissions.get("view_admin"), False),
+            }
+        )
+
+        payload["access"] = access
+        payload["access_mode"] = access_mode
+        payload["accessMode"] = access_mode
+        payload["read_only"] = read_only
+        payload["readOnly"] = read_only
+        payload["public_viewer"] = public_viewer
+        payload["publicViewer"] = public_viewer
+
+        if public_viewer:
+            payload["demo_mode"] = False
+            payload["demoMode"] = False
+
+        publication = _safe_dict(ctx.get("publication"))
+        if publication:
+            payload["publication"] = publication
+
+        return payload
+
+    except Exception as exc:
+        _log_warning("local access context merge failed: %s", exc.__class__.__name__)
+        return dict(project_payload or {})
+
+
+def _effective_current_user_for_access(
+    current_user: Mapping[str, Any],
+    access_context: Any,
+) -> Dict[str, Any]:
+    try:
+        user = _safe_dict(current_user)
+        ctx = _access_context_to_dict(access_context)
+
+        if _safe_bool(
+            ctx.get("public_viewer")
+            or ctx.get("publicViewer")
+            or ctx.get("is_public_viewer")
+            or ctx.get("isPublicViewer"),
+            False,
+        ):
+            user["demo_mode"] = False
+            user["demoMode"] = False
+            user["is_demo"] = False
+            user["isDemo"] = False
+            user["public_viewer"] = True
+            user["publicViewer"] = True
+            user["read_only"] = True
+            user["readOnly"] = True
+            user["access_mode"] = "public"
+            user["accessMode"] = "public"
+            user["persistent"] = False
+            user["authenticated"] = _safe_bool(user.get("authenticated") or user.get("is_authenticated"), False)
+
+        return user
+
+    except Exception:
+        return _safe_dict(current_user)
+
+
+def _project_public_id_from_payload(project_payload: Mapping[str, Any]) -> str:
+    return _safe_str(
+        project_payload.get("public_id")
+        or project_payload.get("publicId")
+        or project_payload.get("project_public_id")
+        or project_payload.get("projectPublicId"),
+        "",
+        160,
+    )
+
+
+
 def _can_manage(project: Any, user_id: Optional[int]) -> bool:
     try:
         if project is None or not user_id:
@@ -1356,8 +1674,31 @@ def _load_project_payload(
             extra={"project_id": _safe_str(project_id, "", 160)},
         )
 
+    shell_access_context = _resolve_workspace_access_context(
+        project=project,
+        workspace=WORKSPACE_PROJECT,
+        current_user=current_user,
+        action="view",
+    )
+    shell_access = _access_context_to_dict(shell_access_context)
+    shell_public_viewer = _access_context_public_viewer(shell_access_context)
+    effective_user = _effective_current_user_for_access(current_user, shell_access_context)
+
+    if shell_access_context is not None and not _access_context_allowed(shell_access_context):
+        status = _access_context_status(shell_access_context, 403)
+        return project, None, _error_response(
+            _access_context_message(shell_access_context, "Projektzugriff nicht erlaubt."),
+            status,
+            code=_access_context_code(shell_access_context, "project_permission_denied"),
+            extra={
+                "project_id": _safe_str(project_id, "", 160),
+                "project_access": shell_access,
+                "auth": _safe_dict(current_user),
+            },
+        )
+
     try:
-        if get_project_result is not None:
+        if get_project_result is not None and not shell_public_viewer:
             result = get_project_result(
                 _safe_str(project_id, "", 160),
                 user_id=user_id,
@@ -1378,13 +1719,19 @@ def _load_project_payload(
             if project_payload:
                 project_payload["is_new"] = False
                 project_payload["isNew"] = False
-                project_payload["demo_mode"] = _is_demo_context(current_user)
-                project_payload["demoMode"] = _is_demo_context(current_user)
+                project_payload["demo_mode"] = _is_demo_context(effective_user)
+                project_payload["demoMode"] = _is_demo_context(effective_user)
                 project_payload = _attach_demo_project_payload(
                     project=project,
                     project_payload=project_payload,
-                    current_user=current_user,
+                    current_user=effective_user,
                 )
+                if shell_access_context is not None:
+                    project_payload = _apply_access_context_to_project_payload(
+                        project_payload,
+                        shell_access_context,
+                        current_user=effective_user,
+                    )
                 return project, project_payload, None
     except Exception as exc:
         _log_warning("get_project_result failed; falling back to serialize_project: %s", exc.__class__.__name__)
@@ -1407,10 +1754,17 @@ def _load_project_payload(
         if not project_payload.get("access"):
             project_payload["access"] = _serialize_access(project, user_id)
 
+        if shell_access_context is not None:
+            project_payload = _apply_access_context_to_project_payload(
+                project_payload,
+                shell_access_context,
+                current_user=effective_user,
+            )
+
         project_payload = _attach_demo_project_payload(
             project=project,
             project_payload=project_payload,
-            current_user=current_user,
+            current_user=effective_user,
         )
 
         access = _safe_dict(project_payload.get("access"))
@@ -1420,13 +1774,21 @@ def _load_project_payload(
                 "Du hast keine Berechtigung, dieses Projekt zu sehen.",
                 403,
                 code="project_permission_denied",
-                extra={"project": project_payload, "access": access},
+                extra={"project": project_payload, "access": access, "project_access": shell_access},
             )
 
         project_payload["is_new"] = False
         project_payload["isNew"] = False
-        project_payload["demo_mode"] = _is_demo_context(current_user)
-        project_payload["demoMode"] = _is_demo_context(current_user)
+        project_payload["demo_mode"] = _is_demo_context(effective_user)
+        project_payload["demoMode"] = _is_demo_context(effective_user)
+
+        if shell_public_viewer:
+            project_payload["demo_mode"] = False
+            project_payload["demoMode"] = False
+            project_payload["public_viewer"] = True
+            project_payload["publicViewer"] = True
+            project_payload["read_only"] = True
+            project_payload["readOnly"] = True
 
         return project, project_payload, None
 
@@ -1489,6 +1851,7 @@ def _check_workspace_access(
     if _is_auth_unavailable_context(current_user):
         return False, {
             "ok": False,
+            "allowed": False,
             "code": _context_code(current_user) or "auth_service_unavailable",
             "workspace": normalized_workspace,
             "status_code": 503,
@@ -1500,6 +1863,7 @@ def _check_workspace_access(
     if _is_user_blocked_context(current_user):
         return False, {
             "ok": False,
+            "allowed": False,
             "code": _context_code(current_user) or "auth_blocked",
             "workspace": normalized_workspace,
             "status_code": 403,
@@ -1511,6 +1875,7 @@ def _check_workspace_access(
     if _is_access_blocked_context(current_user):
         return False, {
             "ok": False,
+            "allowed": False,
             "code": _context_code(current_user) or "access_blocked",
             "workspace": normalized_workspace,
             "status_code": _context_status_code(current_user),
@@ -1521,15 +1886,47 @@ def _check_workspace_access(
     if _is_new_identifier(project_payload.get("public_id") or project_payload.get("publicId")):
         return normalized_workspace == WORKSPACE_PROJECT, {
             "ok": normalized_workspace == WORKSPACE_PROJECT,
+            "allowed": normalized_workspace == WORKSPACE_PROJECT,
             "code": "new_project_workspace",
             "workspace": normalized_workspace,
             "status_code": 200 if normalized_workspace == WORKSPACE_PROJECT else 409,
         }
 
+    if normalized_workspace not in {WORKSPACE_PROJECT, WORKSPACE_ADMIN} and not _is_project_configured(project_payload):
+        return False, {
+            "ok": False,
+            "allowed": False,
+            "code": "project_not_configured",
+            "workspace": normalized_workspace,
+            "status_code": 409,
+            "message": "Projekt muss zuerst konfiguriert werden.",
+            "access": access,
+        }
+
+    access_context = _resolve_workspace_access_context(
+        project=project,
+        workspace=normalized_workspace,
+        current_user=current_user,
+        action="view",
+    )
+
+    if access_context is not None:
+        access_payload = _access_context_to_dict(access_context)
+        access_payload.setdefault("workspace", normalized_workspace)
+        access_payload.setdefault("status_code", _access_context_status(access_context, 403))
+        access_payload.setdefault("code", _access_context_code(access_context, "workspace_permission_denied"))
+        access_payload.setdefault("message", _access_context_message(access_context, "Dieser Workspace ist für dich nicht verfügbar."))
+        access_payload.setdefault("access", access)
+        access_payload.setdefault("ok", _access_context_allowed(access_context))
+        access_payload.setdefault("allowed", _access_context_allowed(access_context))
+
+        return _access_context_allowed(access_context), access_payload
+
     if is_demo_project:
         allowed = bool(_is_demo_context(current_user) and normalized_workspace in DEMO_WORKSPACES)
         return allowed, {
             "ok": allowed,
+            "allowed": allowed,
             "code": "demo_workspace_allowed" if allowed else "demo_workspace_not_allowed",
             "workspace": normalized_workspace,
             "status_code": 200 if allowed else 403,
@@ -1538,20 +1935,12 @@ def _check_workspace_access(
             "demo": True,
         }
 
-    if normalized_workspace not in {WORKSPACE_PROJECT, WORKSPACE_ADMIN} and not _is_project_configured(project_payload):
-        return False, {
-            "ok": False,
-            "code": "project_not_configured",
-            "workspace": normalized_workspace,
-            "status_code": 409,
-            "message": "Projekt muss zuerst konfiguriert werden.",
-        }
-
     if normalized_workspace in ADMIN_WORKSPACES:
         can_manage = _safe_bool(access.get("can_manage"), False) or bool(project is not None and user_id and _can_manage(project, user_id))
         allowed = bool(can_manage and not _is_demo_context(current_user))
         return allowed, {
             "ok": allowed,
+            "allowed": allowed,
             "code": "admin_requires_manage" if not allowed else "admin_allowed",
             "workspace": normalized_workspace,
             "status_code": 200 if allowed else 403,
@@ -1561,6 +1950,7 @@ def _check_workspace_access(
     if _safe_bool(access.get("can_view"), False):
         return True, {
             "ok": True,
+            "allowed": True,
             "code": "project_permission",
             "workspace": normalized_workspace,
             "status_code": 200,
@@ -1578,10 +1968,12 @@ def _check_workspace_access(
             result_payload = _safe_dict(result)
             result_payload.setdefault("workspace", normalized_workspace)
             result_payload.setdefault("status_code", 200 if _safe_bool(result_payload.get("ok"), False) else 403)
+            result_payload.setdefault("allowed", _safe_bool(result_payload.get("ok"), False))
             return _safe_bool(result_payload.get("ok"), False), result_payload
         except Exception as exc:
             return False, {
                 "ok": False,
+                "allowed": False,
                 "code": "workspace_access_check_failed",
                 "error": str(exc),
                 "workspace": normalized_workspace,
@@ -1590,6 +1982,7 @@ def _check_workspace_access(
 
     return False, {
         "ok": False,
+        "allowed": False,
         "code": "workspace_permission_denied",
         "workspace": normalized_workspace,
         "status_code": 403,
@@ -1620,6 +2013,158 @@ def _routes_payload(project_payload: Mapping[str, Any], workspace: str) -> Dict[
         "api": f"/v1/projects/{public_id}" if public_id != "new" else "/v1/projects",
         "public": f"/project={public_id}",
     }
+
+
+def _context_result_to_dict(result: Any) -> Dict[str, Any]:
+    try:
+        if hasattr(result, "to_dict") and callable(result.to_dict):
+            payload = _safe_dict(result.to_dict())
+            return _safe_dict(payload.get("context") or payload)
+
+        if hasattr(result, "context"):
+            return _safe_dict(getattr(result, "context"))
+
+        return _safe_dict(result)
+    except Exception:
+        return {}
+
+
+def _build_project_workspace_context_safe(
+    *,
+    project: Any,
+    project_payload: Mapping[str, Any],
+    current_user: Mapping[str, Any],
+    workspace_access: Mapping[str, Any],
+    normalized_workspace: str,
+    is_new: bool,
+) -> Dict[str, Any]:
+    """
+    Normalize the template context through services.project_workspace_context.
+
+    This keeps Jinja templates simple and provides a defensive fallback when the
+    new service is temporarily unavailable. The fallback preserves all fields
+    expected by older templates and frontend modules.
+    """
+    base_project_payload = dict(project_payload or {})
+    base_access = _safe_dict(base_project_payload.get("access"))
+    base_publication = _safe_dict(base_project_payload.get("publication"))
+
+    fallback_context: Dict[str, Any] = {
+        "ok": True,
+        "project": base_project_payload,
+        "current_project": base_project_payload,
+        "project_view": base_project_payload,
+        "current_user": dict(current_user or {}),
+        "current_user_view": dict(current_user or {}),
+        "auth": dict(current_user or {}),
+        "auth_context": dict(current_user or {}),
+        "access": base_access,
+        "access_view": base_access,
+        "workspace_access": dict(workspace_access or {}),
+        "workspace_access_view": dict(workspace_access or {}),
+        "publication": base_publication,
+        "publication_view": base_publication,
+        "ui_flags": {},
+        "is_new": bool(is_new),
+        "is_demo": _is_demo_project(project, base_project_payload),
+        "workspace": normalized_workspace,
+        "workspace_label": _workspace_label(normalized_workspace),
+        "access_mode": _safe_str((workspace_access or {}).get("access_mode") or (workspace_access or {}).get("accessMode"), "", 80),
+        "read_only": _safe_bool((workspace_access or {}).get("read_only") or (workspace_access or {}).get("readOnly"), _safe_bool(base_access.get("read_only"), False)),
+        "public_viewer": _safe_bool((workspace_access or {}).get("public_viewer") or (workspace_access or {}).get("publicViewer"), False),
+        "can_edit": _safe_bool(base_access.get("can_edit") or base_access.get("canEdit"), False),
+        "can_manage": _safe_bool(base_access.get("can_manage") or base_access.get("canManage"), False),
+        "demo_mode": _is_demo_context(current_user),
+        "demo_ttl_seconds": (current_user or {}).get("ttl_seconds") or (current_user or {}).get("ttlSeconds"),
+        "demo_expires_at": (current_user or {}).get("expires_at") or (current_user or {}).get("expiresAt"),
+        "auth_unavailable": _is_auth_unavailable_context(current_user),
+        "routes": base_project_payload.get("routes") or _routes_payload(base_project_payload, normalized_workspace),
+        "paths": {},
+        "_project_obj": project,
+        "project_workspace_context": {
+            "ok": False,
+            "code": "project_workspace_context_service_unavailable",
+            "service": "project_workspace_context",
+            "fallback": True,
+            "workspace": normalized_workspace,
+            "project_public_id": base_project_payload.get("public_id") or base_project_payload.get("publicId"),
+        },
+    }
+
+    try:
+        if callable(build_project_workspace_context):
+            context = build_project_workspace_context(
+                project=project,
+                project_payload=base_project_payload,
+                current_user=current_user,
+                auth_context=current_user,
+                access=base_access,
+                workspace_access=workspace_access,
+                publication=base_publication,
+                is_new=is_new,
+                workspace=normalized_workspace,
+                request_obj=request,
+                extra_context={
+                    "ok": True,
+                    "is_demo": _is_demo_project(project, base_project_payload),
+                    "workspace_label": _workspace_label(normalized_workspace),
+                    "demo_ttl_seconds": (current_user or {}).get("ttl_seconds") or (current_user or {}).get("ttlSeconds"),
+                    "demo_expires_at": (current_user or {}).get("expires_at") or (current_user or {}).get("expiresAt"),
+                    "routes": base_project_payload.get("routes") or _routes_payload(base_project_payload, normalized_workspace),
+                    "_project_obj": project,
+                },
+                use_cache=False,
+            )
+            normalized = _safe_dict(context)
+            if normalized:
+                normalized.setdefault("_project_obj", project)
+                normalized.setdefault("routes", base_project_payload.get("routes") or _routes_payload(base_project_payload, normalized_workspace))
+                normalized.setdefault("workspace_label", _workspace_label(normalized_workspace))
+                normalized.setdefault("ok", True)
+                return normalized
+
+        if callable(build_project_workspace_context_result):
+            result = build_project_workspace_context_result(
+                project=project,
+                project_payload=base_project_payload,
+                current_user=current_user,
+                auth_context=current_user,
+                access=base_access,
+                workspace_access=workspace_access,
+                publication=base_publication,
+                is_new=is_new,
+                workspace=normalized_workspace,
+                request_obj=request,
+                extra_context={
+                    "ok": True,
+                    "is_demo": _is_demo_project(project, base_project_payload),
+                    "workspace_label": _workspace_label(normalized_workspace),
+                    "routes": base_project_payload.get("routes") or _routes_payload(base_project_payload, normalized_workspace),
+                    "_project_obj": project,
+                },
+                use_cache=False,
+            )
+            normalized = _context_result_to_dict(result)
+            if normalized:
+                normalized.setdefault("_project_obj", project)
+                normalized.setdefault("routes", base_project_payload.get("routes") or _routes_payload(base_project_payload, normalized_workspace))
+                normalized.setdefault("workspace_label", _workspace_label(normalized_workspace))
+                normalized.setdefault("ok", True)
+                return normalized
+
+    except Exception as exc:
+        _log_exception("project workspace context normalization failed", exc)
+        fallback_context["project_workspace_context"] = {
+            "ok": False,
+            "code": "project_workspace_context_failed",
+            "service": "project_workspace_context",
+            "fallback": True,
+            "error_type": exc.__class__.__name__,
+            "workspace": normalized_workspace,
+            "project_public_id": base_project_payload.get("public_id") or base_project_payload.get("publicId"),
+        }
+
+    return fallback_context
 
 
 def _build_template_context(
@@ -1682,6 +2227,14 @@ def _build_template_context(
             },
         )
 
+    project_payload = _apply_access_context_to_project_payload(
+        dict(project_payload),
+        workspace_access,
+        current_user=current_user,
+    )
+
+    current_user = _effective_current_user_for_access(current_user, workspace_access)
+
     project_payload["current_workspace"] = normalized_workspace
     project_payload["currentWorkspace"] = normalized_workspace
     project_payload["routes"] = {
@@ -1689,29 +2242,25 @@ def _build_template_context(
         **_routes_payload(project_payload, normalized_workspace),
     }
 
-    access_payload = _safe_dict(project_payload.get("access"))
+    is_new = _is_new_identifier(project_payload.get("public_id") or project_payload.get("publicId"))
 
-    context: Dict[str, Any] = {
-        "ok": True,
-        "project": project_payload,
-        "current_project": project_payload,
-        "current_user": current_user,
-        "auth": current_user,
-        "auth_context": current_user,
-        "is_new": _is_new_identifier(project_payload.get("public_id") or project_payload.get("publicId")),
-        "is_demo": _is_demo_project(project, project_payload),
-        "workspace": normalized_workspace,
-        "workspace_label": _workspace_label(normalized_workspace),
-        "workspace_access": workspace_access,
-        "can_edit": _safe_bool(access_payload.get("can_edit"), False),
-        "can_manage": _safe_bool(access_payload.get("can_manage"), False),
-        "demo_mode": _is_demo_context(current_user),
-        "demo_ttl_seconds": current_user.get("ttl_seconds") or current_user.get("ttlSeconds"),
-        "demo_expires_at": current_user.get("expires_at") or current_user.get("expiresAt"),
-        "auth_unavailable": _is_auth_unavailable_context(current_user),
-        "routes": project_payload["routes"],
-        "_project_obj": project,
+    context = _build_project_workspace_context_safe(
+        project=project,
+        project_payload=project_payload,
+        current_user=current_user,
+        workspace_access=workspace_access,
+        normalized_workspace=normalized_workspace,
+        is_new=is_new,
+    )
+
+    context["_project_obj"] = project
+    context["workspace"] = normalized_workspace
+    context["workspace_label"] = _workspace_label(normalized_workspace)
+    context["routes"] = {
+        **_safe_dict(project_payload.get("routes")),
+        **_safe_dict(context.get("routes")),
     }
+    context.setdefault("ok", True)
 
     return context, None
 
@@ -1836,6 +2385,30 @@ def _build_external_workspace_result(context: Mapping[str, Any]) -> Any:
     current_user = _safe_dict(context.get("current_user") or context.get("auth") or context.get("auth_context"))
     project_obj = context.get("_project_obj")
     extra_params = _request_extra_embed_params()
+    workspace_access = _safe_dict(context.get("workspace_access"))
+    access_payload = _safe_dict(project_payload.get("access"))
+
+    read_only = bool(
+        _safe_bool(context.get("read_only"), False)
+        or _safe_bool(workspace_access.get("read_only") or workspace_access.get("readOnly"), False)
+        or _safe_bool(project_payload.get("read_only") or project_payload.get("readOnly"), False)
+        or _safe_bool(access_payload.get("read_only") or access_payload.get("readOnly"), False)
+    )
+
+    public_viewer = bool(
+        _safe_bool(context.get("public_viewer"), False)
+        or _safe_bool(workspace_access.get("public_viewer") or workspace_access.get("publicViewer"), False)
+        or _safe_bool(project_payload.get("public_viewer") or project_payload.get("publicViewer"), False)
+        or _safe_bool(access_payload.get("public_viewer") or access_payload.get("publicViewer"), False)
+    )
+
+    if read_only:
+        extra_params.setdefault("read_only", "1")
+        extra_params.setdefault("readonly", "1")
+
+    if public_viewer:
+        extra_params.setdefault("public_viewer", "1")
+        extra_params.setdefault("access_mode", "public")
 
     if _is_auth_unavailable_context(current_user):
         return {
@@ -1962,24 +2535,93 @@ def _render_external_workspace_redirect(context: Mapping[str, Any]) -> Response:
 # ─────────────────────────────────────────────────────────────
 
 def _render_project_workspace(context: Mapping[str, Any]) -> Response:
+    template_name = "viewer/project.html"
+    context_dict = _safe_dict(context)
+    project_payload = _safe_dict(context_dict.get("project") or context_dict.get("current_project") or context_dict.get("project_view"))
+    workspace = _safe_str(context_dict.get("workspace"), WORKSPACE_PROJECT, 80)
+    project_public_id = _safe_str(project_payload.get("public_id") or project_payload.get("publicId"), "", 160)
+
     try:
-        html = render_template("viewer/project.html", **dict(context))
-        return _html_response(html, status=200)
+        if "project_workspace_context" not in context_dict and callable(build_project_workspace_context):
+            try:
+                normalized = build_project_workspace_context(
+                    project=context_dict.get("_project_obj"),
+                    project_payload=project_payload,
+                    current_user=_safe_dict(context_dict.get("current_user") or context_dict.get("auth") or context_dict.get("auth_context")),
+                    auth_context=_safe_dict(context_dict.get("auth_context") or context_dict.get("auth") or context_dict.get("current_user")),
+                    access=_safe_dict(context_dict.get("access") or project_payload.get("access")),
+                    workspace_access=_safe_dict(context_dict.get("workspace_access") or context_dict.get("workspace_access_view")),
+                    publication=_safe_dict(context_dict.get("publication") or project_payload.get("publication")),
+                    is_new=context_dict.get("is_new"),
+                    workspace=workspace,
+                    request_obj=request,
+                    extra_context={
+                        **context_dict,
+                        "_project_obj": context_dict.get("_project_obj"),
+                    },
+                    use_cache=False,
+                )
+                normalized_dict = _safe_dict(normalized)
+                if normalized_dict:
+                    context_dict = normalized_dict
+            except Exception as context_exc:
+                _log_warning(
+                    "project workspace context pre-render normalization skipped: %s",
+                    context_exc.__class__.__name__,
+                )
+
+        html = render_template(template_name, **dict(context_dict))
+        response = _html_response(html, status=200)
+        try:
+            response.headers["X-VECTOPLAN-Workspace"] = workspace
+            response.headers["X-VECTOPLAN-Template"] = template_name
+            if project_public_id:
+                response.headers["X-VECTOPLAN-Project"] = project_public_id
+        except Exception:
+            pass
+        return response
+
     except TemplateNotFound:
         return _error_response(
             "Template viewer/project.html wurde nicht gefunden.",
             500,
             code="template_missing",
+            extra={
+                "template": template_name,
+                "workspace": workspace,
+                "project_public_id": project_public_id,
+            },
         )
+
+    except TemplateSyntaxError as exc:
+        _log_exception("render project workspace template syntax failed", exc)
+        return _error_response(
+            "Projekt-Workspace-Template enthält einen Syntaxfehler.",
+            500,
+            code="project_workspace_template_syntax_failed",
+            extra={
+                "template": template_name,
+                "workspace": workspace,
+                "project_public_id": project_public_id,
+                "error_type": exc.__class__.__name__,
+                "template_line": getattr(exc, "lineno", None),
+                "template_message": _safe_str(getattr(exc, "message", ""), "", 500),
+            },
+        )
+
     except Exception as exc:
         _log_exception("render project workspace failed", exc)
         return _error_response(
             "Projekt-Workspace konnte nicht gerendert werden.",
             500,
             code="project_workspace_render_failed",
-            extra={"error_type": exc.__class__.__name__},
+            extra={
+                "template": template_name,
+                "workspace": workspace,
+                "project_public_id": project_public_id,
+                "error_type": exc.__class__.__name__,
+            },
         )
-
 
 def _render_generic_workspace(context: Mapping[str, Any]) -> Response:
     project = _safe_dict(context.get("project"))
@@ -2053,7 +2695,7 @@ def viewer_status() -> Response:
         "ok": True,
         "service": "viewer",
         "blueprint": "viewer",
-        "phase": "vectoplan-auth-no-default-user-auth-unavailable-503",
+        "phase": "project-workspace-context-normalized-auth-safe",
         "default_user_removed": True,
         "auth_unavailable_returns_503": True,
         "routes": {
@@ -2097,6 +2739,18 @@ def viewer_status() -> Response:
     try:
         if callable(get_workspace_embed_status):
             payload["workspace_embed"] = get_workspace_embed_status()
+    except Exception:
+        pass
+
+    try:
+        if callable(get_project_access_context_status):
+            payload["project_access_context"] = get_project_access_context_status()
+    except Exception:
+        pass
+
+    try:
+        if callable(get_project_workspace_context_status):
+            payload["project_workspace_context"] = get_project_workspace_context_status()
     except Exception:
         pass
 
