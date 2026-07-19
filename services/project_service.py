@@ -50,6 +50,7 @@ Wichtig:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import uuid
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set
 
 
@@ -282,6 +283,34 @@ except Exception:  # pragma: no cover
     preview_chunk_project_for_app_project_id = None  # type: ignore
 
 
+try:
+    from services.project_chunk_provisioning_service import (
+        ProjectChunkProvisioningError,
+        ProjectChunkProvisioningResult,
+        provision_project_chunk_graph,
+        retry_project_chunk_provisioning,
+        serialize_project_chunk_provisioning_status,
+    )
+except Exception:  # pragma: no cover
+    ProjectChunkProvisioningError = RuntimeError  # type: ignore
+    ProjectChunkProvisioningResult = None  # type: ignore
+    provision_project_chunk_graph = None  # type: ignore
+    retry_project_chunk_provisioning = None  # type: ignore
+    serialize_project_chunk_provisioning_status = None  # type: ignore
+
+
+try:
+    from services.project_chunk_access_sync_service import (
+        ProjectChunkAccessSyncError,
+        serialize_project_chunk_access_sync_status,
+        sync_project_chunk_access,
+    )
+except Exception:  # pragma: no cover
+    ProjectChunkAccessSyncError = RuntimeError  # type: ignore
+    serialize_project_chunk_access_sync_status = None  # type: ignore
+    sync_project_chunk_access = None  # type: ignore
+
+
 # ─────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────
@@ -339,6 +368,24 @@ CHUNK_STATUS_DISABLED = "disabled"
 CHUNK_STATUS_PENDING = "pending"
 CHUNK_STATUS_READY = "ready"
 CHUNK_STATUS_ERROR = "error"
+
+CHUNK_PROVISIONING_PENDING = "pending"
+CHUNK_PROVISIONING_PROVISIONING = "provisioning"
+CHUNK_PROVISIONING_READY = "ready"
+CHUNK_PROVISIONING_FALLBACK_READY = "fallback_ready"
+CHUNK_PROVISIONING_FAILED = "failed"
+CHUNK_PROVISIONING_REPAIR_REQUIRED = "repair_required"
+CHUNK_PROVISIONING_DISABLED = "disabled"
+
+CHUNK_ACCESS_SYNC_PENDING = "pending"
+CHUNK_ACCESS_SYNC_SYNCING = "syncing"
+CHUNK_ACCESS_SYNC_READY = "ready"
+CHUNK_ACCESS_SYNC_FAILED = "failed"
+CHUNK_ACCESS_SYNC_REPAIR_REQUIRED = "repair_required"
+CHUNK_ACCESS_SYNC_DISABLED = "disabled"
+
+CHUNK_WORLD_TEMPLATE_EARTH = "earth"
+CHUNK_WORLD_TEMPLATE_FLAT = "flat"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -761,12 +808,70 @@ def _project_is_demo(project: Any) -> bool:
 # Auth / current user helpers
 # ─────────────────────────────────────────────────────────────
 
-def get_current_user_id(user_id: Optional[int] = None) -> int:
-    """
-    Legacy-compatible resolver.
+def _app_user_by_local_id(local_user_id: Any) -> Optional[Any]:
+    try:
+        uid = _safe_int(local_user_id, 0)
+        if uid <= 0:
+            return None
+        return AppUser.query.get(uid)
+    except Exception:
+        return None
 
-    No default user exists. Returns 0 when no persistent local AppUser exists.
-    """
+
+def _app_user_by_auth_user_id(auth_user_id: Any) -> Optional[Any]:
+    try:
+        value = _safe_str(auth_user_id, "", 160)
+        if not value:
+            return None
+
+        for field_name in ("auth_user_id", "platform_user_id", "external_user_id"):
+            try:
+                field = getattr(AppUser, field_name, None)
+                if field is not None:
+                    row = AppUser.query.filter(field == value).one_or_none()
+                    if row is not None:
+                        return row
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
+
+
+def _app_user_auth_user_id(app_user: Any) -> Optional[str]:
+    try:
+        if app_user is None:
+            return None
+        for field_name in ("auth_user_id", "platform_user_id", "external_user_id"):
+            value = _safe_str(getattr(app_user, field_name, None), "", 160)
+            if value:
+                return value
+        return None
+    except Exception:
+        return None
+
+
+def _context_to_dict(context: Any) -> Dict[str, Any]:
+    try:
+        data = _safe_dict(context)
+        if data:
+            return data
+        if hasattr(context, "to_dict") and callable(context.to_dict):
+            return _safe_dict(context.to_dict())
+    except Exception:
+        pass
+    return {}
+
+
+def _live_actor_context() -> Dict[str, Any]:
+    try:
+        return _context_to_dict(get_current_user_context(ensure=False))
+    except Exception:
+        return {}
+
+
+def get_current_user_id(user_id: Optional[int] = None) -> int:
+    """Resolve the local AppUser id. No default or placeholder user exists."""
     try:
         parsed = _safe_int(user_id, 0)
         if parsed > 0:
@@ -777,34 +882,119 @@ def get_current_user_id(user_id: Optional[int] = None) -> int:
             return _safe_int(optional, 0)
 
         return 0
-
     except Exception:
         return 0
 
 
 def get_actor_context(user_id: Optional[int] = None) -> Dict[str, Any]:
-    if user_id is not None:
-        uid = _safe_int(user_id, 0) or None
-        return {
-            "user_id": uid,
-            "id": uid,
-            "authenticated": bool(uid),
-            "demo_mode": False,
-            "persistent": bool(uid),
-            "blocked": False,
-            "source": "explicit_user_id",
-        }
+    """Build a fail-closed actor context without converting a raw local id into auth truth.
+
+    A supplied ``user_id`` is only a local AppUser selector. Authentication remains
+    sourced from ``services.current_user``. For explicit trusted maintenance calls,
+    local-id-only operation can be enabled deliberately through
+    ``VECTOPLAN_PROJECT_ALLOW_TRUSTED_LOCAL_ACTOR_IDS``; it still requires an
+    AppUser row carrying a canonical ``auth_user_id``.
+    """
+
+    explicit_uid = _safe_int(user_id, 0) or None
+    live = _live_actor_context()
 
     try:
-        context = get_current_user_context(ensure=False)
-        data = _safe_dict(context)
-        if not data and hasattr(context, "to_dict"):
-            data = _safe_dict(context.to_dict())
-        return data
+        if _safe_bool(live.get("blocked"), False):
+            return live
+
+        live_uid = _safe_int(live.get("user_id") or live.get("id"), 0) or None
+        if explicit_uid and live_uid and explicit_uid != live_uid:
+            return {
+                **live,
+                "blocked": True,
+                "blocked_reason": "actor_user_mismatch",
+                "persistent": False,
+                "authenticated": False,
+                "source": "actor_user_mismatch",
+            }
+
+        uid = explicit_uid or live_uid
+        app_user = _app_user_by_local_id(uid)
+        app_auth_user_id = _app_user_auth_user_id(app_user)
+        auth_user_id = (
+            _safe_str(live.get("auth_user_id") or live.get("authUserId"), "", 160)
+            or (
+                _safe_str(_safe_dict(live.get("user")).get("id"), "", 160)
+                if live.get("user") is not None
+                else ""
+            )
+            or app_auth_user_id
+            or None
+        )
+
+        authenticated = _safe_bool(
+            live.get("authenticated") or live.get("is_authenticated"),
+            False,
+        )
+        persistent = bool(
+            _safe_bool(live.get("persistent"), False)
+            and uid
+            and auth_user_id
+            and authenticated
+        )
+
+        if live:
+            result = dict(live)
+            result.update(
+                {
+                    "user_id": uid,
+                    "id": uid,
+                    "auth_user_id": auth_user_id,
+                    "authUserId": auth_user_id,
+                    "authenticated": authenticated,
+                    "persistent": persistent,
+                    "demo_mode": _safe_bool(
+                        live.get("demo_mode") or live.get("is_demo"),
+                        False,
+                    ),
+                    "blocked": False,
+                    "source": _safe_str(live.get("source"), "current_user", 120),
+                }
+            )
+            return result
+
+        # Explicit local ids without a request auth context are denied by default.
+        trusted_local = _config_bool(
+            "VECTOPLAN_PROJECT_ALLOW_TRUSTED_LOCAL_ACTOR_IDS",
+            False,
+        )
+        if explicit_uid and trusted_local and app_auth_user_id:
+            return {
+                "user_id": explicit_uid,
+                "id": explicit_uid,
+                "auth_user_id": app_auth_user_id,
+                "authUserId": app_auth_user_id,
+                "authenticated": True,
+                "persistent": True,
+                "demo_mode": False,
+                "blocked": False,
+                "service_actor": True,
+                "source": "trusted_local_app_user",
+            }
+
+        return {
+            "user_id": explicit_uid,
+            "id": explicit_uid,
+            "auth_user_id": app_auth_user_id,
+            "authUserId": app_auth_user_id,
+            "authenticated": False,
+            "demo_mode": False,
+            "persistent": False,
+            "blocked": True,
+            "blocked_reason": "auth_context_unavailable",
+            "source": "fallback_blocked",
+        }
+
     except Exception:
         return {
-            "user_id": None,
-            "id": None,
+            "user_id": explicit_uid,
+            "id": explicit_uid,
             "authenticated": False,
             "demo_mode": False,
             "persistent": False,
@@ -816,21 +1006,13 @@ def get_actor_context(user_id: Optional[int] = None) -> Dict[str, Any]:
 
 def get_actor_user_id_optional(user_id: Optional[int] = None) -> Optional[int]:
     try:
-        if user_id is not None:
-            parsed = _safe_int(user_id, 0)
-            return parsed if parsed > 0 else None
-
-        context = get_actor_context()
-
+        context = get_actor_context(user_id)
         if _safe_bool(context.get("blocked"), False):
             return None
-
         if _safe_bool(context.get("demo_mode") or context.get("is_demo"), False):
             return None
-
         if not _safe_bool(context.get("persistent"), False):
             return None
-
         parsed = _safe_int(context.get("user_id") or context.get("id"), 0)
         return parsed if parsed > 0 else None
     except Exception:
@@ -842,7 +1024,13 @@ def get_actor_auth_user_id(user_id: Optional[int] = None) -> Optional[str]:
         context = get_actor_context(user_id)
         if _safe_bool(context.get("blocked"), False):
             return None
-        return _safe_str(context.get("auth_user_id") or context.get("authUserId"), "", 160) or None
+        if not _safe_bool(context.get("authenticated"), False):
+            return None
+        return _safe_str(
+            context.get("auth_user_id") or context.get("authUserId"),
+            "",
+            160,
+        ) or None
     except Exception:
         return None
 
@@ -852,7 +1040,11 @@ def get_actor_account_id(user_id: Optional[int] = None) -> Optional[str]:
         context = get_actor_context(user_id)
         if _safe_bool(context.get("blocked"), False):
             return None
-        return _safe_str(context.get("account_id") or context.get("accountId"), "", 160) or None
+        return _safe_str(
+            context.get("account_id") or context.get("accountId"),
+            "",
+            160,
+        ) or None
     except Exception:
         return None
 
@@ -866,9 +1058,7 @@ def actor_is_blocked(user_id: Optional[int] = None) -> bool:
 
 def actor_is_demo(user_id: Optional[int] = None) -> bool:
     try:
-        if user_id is not None:
-            return False
-        context = get_actor_context()
+        context = get_actor_context(user_id)
         if _safe_bool(context.get("blocked"), False):
             return False
         return _safe_bool(context.get("demo_mode") or context.get("is_demo"), False)
@@ -878,126 +1068,109 @@ def actor_is_demo(user_id: Optional[int] = None) -> bool:
 
 def actor_can_persist(user_id: Optional[int] = None) -> bool:
     try:
-        if user_id is not None:
-            return bool(_safe_int(user_id, 0) > 0)
-
-        context = get_actor_context()
-
-        if _safe_bool(context.get("blocked"), False):
-            return False
-
+        context = get_actor_context(user_id)
         return bool(
-            _safe_bool(context.get("persistent"), False)
-            and get_actor_user_id_optional()
-            and not actor_is_demo()
+            not _safe_bool(context.get("blocked"), False)
+            and _safe_bool(context.get("authenticated"), False)
+            and _safe_bool(context.get("persistent"), False)
+            and not _safe_bool(context.get("demo_mode") or context.get("is_demo"), False)
+            and _safe_int(context.get("user_id") or context.get("id"), 0) > 0
+            and _safe_str(context.get("auth_user_id") or context.get("authUserId"), "", 160)
         )
     except Exception:
         return False
 
 
 def require_persistent_actor(user_id: Optional[int] = None) -> int:
-    """
-    Erzwingt einen persistenten lokalen User-Kontext.
+    """Require authenticated, unblocked, persistent AppUser-linked actor."""
+    context = get_actor_context(user_id)
 
-    Demo-Modus:
-      abgelehnt.
-
-    Externer Auth-User ohne lokalen AppUser-Link:
-      abgelehnt.
-
-    Blocked/Banned/Auth unavailable:
-      abgelehnt.
-
-    Kein Fallback auf Default-User.
-    """
-    try:
-        if user_id is not None:
-            parsed = _safe_int(user_id, 0)
-            if parsed > 0:
-                context = get_actor_context()
-                if _safe_bool(context.get("blocked"), False):
-                    raise PermissionDenied(
-                        "Der Zugriff ist gesperrt.",
-                        code="auth_blocked",
-                        status_code=403,
-                        permission=PERMISSION_EDIT,
-                    )
-                return parsed
-
-        context = get_actor_context()
-
-        if _safe_bool(context.get("blocked"), False):
-            raise PermissionDenied(
-                "Der Zugriff ist gesperrt.",
-                code=_safe_str(context.get("blocked_reason"), "auth_blocked", 120),
-                status_code=403,
-                permission=PERMISSION_EDIT,
-            )
-
-        if _safe_bool(context.get("demo_mode") or context.get("is_demo"), False):
-            raise PermissionDenied(
-                "Im Demo-Modus können Projekte nicht dauerhaft gespeichert werden.",
-                code="demo_mode_not_allowed",
-                status_code=403,
-                permission=PERMISSION_EDIT,
-            )
-
-        if not _safe_bool(context.get("authenticated") or context.get("is_authenticated"), False):
-            raise PermissionDenied(
-                "Für diese Projektaktion ist Login erforderlich.",
-                code="authentication_required",
-                status_code=401,
-                permission=PERMISSION_EDIT,
-            )
-
-        if not _safe_bool(context.get("persistent"), False):
-            raise PermissionDenied(
-                "Für diese Projektaktion ist eine lokale AppUser-Verknüpfung erforderlich.",
-                code="persistent_user_required",
-                status_code=403,
-                permission=PERMISSION_EDIT,
-            )
-
-        uid = _safe_int(context.get("user_id") or context.get("id"), 0)
-        if uid <= 0:
-            raise PermissionDenied(
-                "Für diese Projektaktion ist ein lokaler AppUser erforderlich.",
-                code="local_user_link_required",
-                status_code=403,
-                permission=PERMISSION_EDIT,
-            )
-
-        return uid
-
-    except PermissionDenied:
-        raise
-    except Exception as exc:
+    if _safe_bool(context.get("blocked"), False):
         raise PermissionDenied(
-            str(exc),
-            code="current_user_unavailable",
+            "Der Zugriff ist gesperrt oder der Auth-Kontext ist nicht verfügbar.",
+            code=_safe_str(context.get("blocked_reason"), "auth_blocked", 120),
+            status_code=503
+            if _safe_str(context.get("blocked_reason"), "", 120) in {
+                "auth_context_unavailable",
+                "actor_context_unavailable",
+                "auth_unavailable",
+            }
+            else 403,
+            permission=PERMISSION_EDIT,
+        )
+
+    if _safe_bool(context.get("demo_mode") or context.get("is_demo"), False):
+        raise PermissionDenied(
+            "Im Demo-Modus können Projekte nicht dauerhaft gespeichert werden.",
+            code="demo_mode_not_allowed",
             status_code=403,
             permission=PERMISSION_EDIT,
         )
 
+    if not _safe_bool(context.get("authenticated") or context.get("is_authenticated"), False):
+        raise PermissionDenied(
+            "Für diese Projektaktion ist Login erforderlich.",
+            code="authentication_required",
+            status_code=401,
+            permission=PERMISSION_EDIT,
+        )
+
+    if not _safe_bool(context.get("persistent"), False):
+        raise PermissionDenied(
+            "Für diese Projektaktion ist eine lokale AppUser-Verknüpfung erforderlich.",
+            code="persistent_user_required",
+            status_code=403,
+            permission=PERMISSION_EDIT,
+        )
+
+    uid = _safe_int(context.get("user_id") or context.get("id"), 0)
+    if uid <= 0:
+        raise PermissionDenied(
+            "Für diese Projektaktion ist ein lokaler AppUser erforderlich.",
+            code="local_user_link_required",
+            status_code=403,
+            permission=PERMISSION_EDIT,
+        )
+
+    auth_user_id = _safe_str(
+        context.get("auth_user_id") or context.get("authUserId"),
+        "",
+        160,
+    )
+    if not auth_user_id:
+        raise PermissionDenied(
+            "Der lokale AppUser besitzt keine kanonische Auth-User-ID.",
+            code="auth_user_link_required",
+            status_code=409,
+            permission=PERMISSION_EDIT,
+        )
+
+    return uid
+
+
+def require_actor_auth_user_id(user_id: Optional[int] = None) -> str:
+    uid = require_persistent_actor(user_id)
+    value = get_actor_auth_user_id(uid)
+    if not value:
+        raise PermissionDenied(
+            "Der lokale AppUser besitzt keine kanonische Auth-User-ID.",
+            code="auth_user_link_required",
+            status_code=409,
+            permission=PERMISSION_EDIT,
+            user_id=uid,
+        )
+    return value
+
 
 def ensure_project_user() -> Any:
-    """
-    Liefert den aktuellen lokalen AppUser-Link, falls persistent vorhanden.
-
-    Erzeugt keinen Default-User.
-    """
-    if actor_is_demo():
-        return None
-
+    """Return the current local AppUser link without creating a fallback user."""
     if not actor_can_persist():
         return None
-
     try:
         if callable(get_current_user):
             return get_current_user(ensure=True)
     except Exception:
         return None
-
     return None
 
 
@@ -1442,60 +1615,142 @@ def _structured_address_payload_from_geocoder(source: Mapping[str, Any]) -> Dict
 # ─────────────────────────────────────────────────────────────
 
 def _project_chunk_refs(project: Any) -> Dict[str, Any]:
+    """Return normalized references plus provisioning and access-sync state."""
     try:
+        direct = _safe_dict(getattr(project, "chunk_refs", {}))
         service_refs = _safe_dict(getattr(project, "service_refs", {}))
-        chunk_refs = _safe_dict(service_refs.get(SERVICE_CHUNK))
-
+        service_chunk = _safe_dict(service_refs.get(SERVICE_CHUNK))
         metadata = _get_project_metadata(project)
-        chunk_metadata = _safe_dict(metadata.get("chunk"))
+        metadata_chunk = _safe_dict(metadata.get("chunk"))
 
         chunk_project_id = (
             _safe_str(getattr(project, "chunk_project_id", None), "", 160)
-            or _safe_str(chunk_refs.get("chunk_project_id"), "", 160)
-            or _safe_str(chunk_refs.get("chunkProjectId"), "", 160)
-            or _safe_str(chunk_metadata.get("chunk_project_id"), "", 160)
-            or _safe_str(chunk_metadata.get("chunkProjectId"), "", 160)
+            or _safe_str(direct.get("chunk_project_id") or direct.get("chunkProjectId"), "", 160)
+            or _safe_str(service_chunk.get("chunk_project_id") or service_chunk.get("chunkProjectId"), "", 160)
+            or _safe_str(metadata_chunk.get("chunk_project_id") or metadata_chunk.get("chunkProjectId"), "", 160)
         )
-
         chunk_universe_id = (
             _safe_str(getattr(project, "chunk_universe_id", None), "", 160)
-            or _safe_str(chunk_refs.get("chunk_universe_id"), "", 160)
-            or _safe_str(chunk_refs.get("chunkUniverseId"), "", 160)
-            or _safe_str(chunk_metadata.get("chunk_universe_id"), "", 160)
-            or _safe_str(chunk_metadata.get("chunkUniverseId"), "", 160)
+            or _safe_str(direct.get("chunk_universe_id") or direct.get("chunkUniverseId"), "", 160)
+            or _safe_str(service_chunk.get("chunk_universe_id") or service_chunk.get("chunkUniverseId"), "", 160)
+            or _safe_str(metadata_chunk.get("chunk_universe_id") or metadata_chunk.get("chunkUniverseId"), "", 160)
         )
-
         chunk_world_id = (
             _safe_str(getattr(project, "chunk_world_id", None), "", 160)
-            or _safe_str(chunk_refs.get("chunk_world_id"), "", 160)
-            or _safe_str(chunk_refs.get("chunkWorldId"), "", 160)
-            or _safe_str(chunk_metadata.get("chunk_world_id"), "", 160)
-            or _safe_str(chunk_metadata.get("chunkWorldId"), "", 160)
+            or _safe_str(direct.get("chunk_world_id") or direct.get("chunkWorldId"), "", 160)
+            or _safe_str(service_chunk.get("chunk_world_id") or service_chunk.get("chunkWorldId"), "", 160)
+            or _safe_str(metadata_chunk.get("chunk_world_id") or metadata_chunk.get("chunkWorldId"), "", 160)
         )
-
         route_hints = (
-            _safe_dict(chunk_refs.get("route_hints"))
-            or _safe_dict(chunk_refs.get("routeHints"))
-            or _safe_dict(chunk_metadata.get("route_hints"))
-            or _safe_dict(chunk_metadata.get("routeHints"))
+            _safe_dict(getattr(project, "chunk_route_hints", {}))
+            or _safe_dict(direct.get("route_hints") or direct.get("routeHints"))
+            or _safe_dict(service_chunk.get("route_hints") or service_chunk.get("routeHints"))
+            or _safe_dict(metadata_chunk.get("route_hints") or metadata_chunk.get("routeHints"))
         )
 
-        status = (
-            _safe_str(chunk_refs.get("status"), "", 40)
-            or _safe_str(chunk_metadata.get("status"), "", 40)
-            or _safe_str(getattr(project, "chunk_status", None), "", 40)
+        if callable(serialize_project_chunk_provisioning_status):
+            try:
+                provisioning = _safe_dict(serialize_project_chunk_provisioning_status(project))
+            except Exception:
+                provisioning = {}
+        else:
+            provisioning = _safe_dict(getattr(project, "chunk_provisioning", {}))
+
+        if not provisioning:
+            provisioning = (
+                _safe_dict(service_chunk.get("provisioning"))
+                or _safe_dict(metadata_chunk.get("provisioning"))
+            )
+
+        if callable(serialize_project_chunk_access_sync_status):
+            try:
+                access_sync = _safe_dict(serialize_project_chunk_access_sync_status(project))
+            except Exception:
+                access_sync = {}
+        else:
+            access_sync = _safe_dict(getattr(project, "chunk_access_sync", {}))
+
+        if not access_sync:
+            access_sync = (
+                _safe_dict(service_chunk.get("accessSync"))
+                or _safe_dict(metadata_chunk.get("accessSync"))
+            )
+
+        provisioning_status = _safe_str(
+            provisioning.get("status")
+            or getattr(project, "chunk_provisioning_status", None),
+            CHUNK_PROVISIONING_PENDING,
+            40,
+        )
+        legacy_status = _safe_str(
+            getattr(project, "chunk_status", None)
+            or direct.get("status")
+            or service_chunk.get("status")
+            or metadata_chunk.get("status"),
+            CHUNK_STATUS_READY if chunk_project_id and chunk_world_id else CHUNK_STATUS_PENDING,
+            40,
+        )
+        ready = bool(
+            chunk_project_id
+            and chunk_world_id
+            and (
+                provisioning_status in {
+                    CHUNK_PROVISIONING_READY,
+                    CHUNK_PROVISIONING_FALLBACK_READY,
+                }
+                or legacy_status == CHUNK_STATUS_READY
+            )
         )
 
-        if not status:
-            status = CHUNK_STATUS_READY if chunk_project_id and chunk_world_id else CHUNK_STATUS_PENDING
+        requested = _safe_str(
+            provisioning.get("requestedWorldTemplate")
+            or provisioning.get("requested_world_template")
+            or getattr(project, "chunk_world_template_requested", None),
+            CHUNK_WORLD_TEMPLATE_EARTH,
+            40,
+        )
+        effective = _safe_str(
+            provisioning.get("effectiveWorldTemplate")
+            or provisioning.get("effective_world_template")
+            or getattr(project, "chunk_world_template_effective", None),
+            "",
+            40,
+        ) or None
+        fallback = _safe_str(
+            provisioning.get("fallbackWorldTemplate")
+            or provisioning.get("fallback_world_template")
+            or getattr(project, "chunk_world_template_fallback", None),
+            CHUNK_WORLD_TEMPLATE_FLAT,
+            40,
+        )
+        fallback_reason = _safe_str(
+            provisioning.get("fallbackReason")
+            or provisioning.get("fallback_reason")
+            or getattr(project, "chunk_world_fallback_reason", None),
+            "",
+            160,
+        ) or None
 
         return {
-            "status": status,
-            "ready": bool(chunk_project_id and chunk_world_id and status == CHUNK_STATUS_READY),
+            "status": legacy_status,
+            "ready": ready,
             "chunk_project_id": chunk_project_id or None,
             "chunk_universe_id": chunk_universe_id or None,
             "chunk_world_id": chunk_world_id or None,
             "route_hints": route_hints,
+            "provisioning_status": provisioning_status,
+            "requested_world_template": requested,
+            "fallback_world_template": fallback,
+            "effective_world_template": effective,
+            "fallback_used": bool(requested and effective and requested != effective),
+            "fallback_reason": fallback_reason,
+            "earth_reference_fingerprint": (
+                provisioning.get("earthReferenceFingerprint")
+                or provisioning.get("earth_reference_fingerprint")
+                or getattr(project, "earth_reference_fingerprint", None)
+            ),
+            "provisioning": provisioning,
+            "access_sync": access_sync,
         }
 
     except Exception:
@@ -1506,6 +1761,15 @@ def _project_chunk_refs(project: Any) -> Dict[str, Any]:
             "chunk_universe_id": None,
             "chunk_world_id": None,
             "route_hints": {},
+            "provisioning_status": CHUNK_PROVISIONING_FAILED,
+            "requested_world_template": CHUNK_WORLD_TEMPLATE_EARTH,
+            "fallback_world_template": CHUNK_WORLD_TEMPLATE_FLAT,
+            "effective_world_template": None,
+            "fallback_used": False,
+            "fallback_reason": None,
+            "earth_reference_fingerprint": None,
+            "provisioning": {},
+            "access_sync": {},
         }
 
 
@@ -1518,65 +1782,70 @@ def _set_project_chunk_refs(
     route_hints: Optional[Dict[str, Any]] = None,
     status: str = CHUNK_STATUS_READY,
     error: Optional[Dict[str, Any]] = None,
+    requested_world_template: Optional[str] = None,
+    fallback_world_template: Optional[str] = None,
+    effective_world_template: Optional[str] = None,
+    fallback_reason: Optional[str] = None,
+    earth_reference_fingerprint: Optional[str] = None,
 ) -> None:
     try:
+        if hasattr(project, "set_chunk_refs") and callable(project.set_chunk_refs):
+            project.set_chunk_refs(
+                chunk_project_id=chunk_project_id,
+                chunk_universe_id=chunk_universe_id,
+                chunk_world_id=chunk_world_id,
+                route_hints=_safe_dict(route_hints),
+                status=status,
+                error=_safe_dict(error),
+                requested_world_template=requested_world_template,
+                fallback_world_template=fallback_world_template,
+                effective_world_template=effective_world_template,
+                fallback_reason=fallback_reason,
+                earth_reference_fingerprint=earth_reference_fingerprint,
+            )
+            return
+
         clean_chunk_project_id = _safe_str(chunk_project_id, "", 160) or None
         clean_chunk_universe_id = _safe_str(chunk_universe_id, "", 160) or None
         clean_chunk_world_id = _safe_str(chunk_world_id, "", 160) or None
-        clean_status = _normalize_status(status, CHUNK_STATUS_PENDING)
 
-        if hasattr(project, "chunk_project_id"):
-            project.chunk_project_id = clean_chunk_project_id
-
-        if hasattr(project, "chunk_universe_id"):
-            project.chunk_universe_id = clean_chunk_universe_id
-
-        if hasattr(project, "chunk_world_id"):
-            project.chunk_world_id = clean_chunk_world_id
-
-        if hasattr(project, "chunk_status"):
-            project.chunk_status = clean_status
+        for key, value in (
+            ("chunk_project_id", clean_chunk_project_id),
+            ("chunk_universe_id", clean_chunk_universe_id),
+            ("chunk_world_id", clean_chunk_world_id),
+            ("chunk_status", status),
+            ("chunk_route_hints", _safe_dict(route_hints)),
+            ("chunk_last_error", _safe_dict(error) or None),
+            ("chunk_world_template_requested", requested_world_template),
+            ("chunk_world_template_fallback", fallback_world_template),
+            ("chunk_world_template_effective", effective_world_template),
+            ("chunk_world_fallback_reason", fallback_reason),
+            ("earth_reference_fingerprint", earth_reference_fingerprint),
+        ):
+            if value is not None and hasattr(project, key):
+                setattr(project, key, value)
 
         if hasattr(project, "chunk_ready"):
-            project.chunk_ready = bool(clean_chunk_project_id and clean_chunk_world_id and clean_status == CHUNK_STATUS_READY)
-
-        service_refs = _safe_dict(getattr(project, "service_refs", {}))
-        service_refs[SERVICE_CHUNK] = {
-            **_safe_dict(service_refs.get(SERVICE_CHUNK)),
-            "status": clean_status,
-            "ready": bool(clean_chunk_project_id and clean_chunk_world_id and clean_status == CHUNK_STATUS_READY),
-            "chunk_project_id": clean_chunk_project_id,
-            "chunk_universe_id": clean_chunk_universe_id,
-            "chunk_world_id": clean_chunk_world_id,
-            "route_hints": _safe_dict(route_hints),
-            "updated_at": _iso(_utcnow()),
-        }
-
-        if error:
-            service_refs[SERVICE_CHUNK]["error"] = _safe_dict(error)
-
-        if hasattr(project, "service_refs"):
-            project.service_refs = service_refs
+            project.chunk_ready = bool(
+                clean_chunk_project_id
+                and clean_chunk_world_id
+                and status == CHUNK_STATUS_READY
+            )
 
         metadata = _get_project_metadata(project)
         metadata["chunk"] = {
             **_safe_dict(metadata.get("chunk")),
-            "status": clean_status,
-            "ready": bool(clean_chunk_project_id and clean_chunk_world_id and clean_status == CHUNK_STATUS_READY),
+            "status": status,
+            "ready": bool(clean_chunk_project_id and clean_chunk_world_id and status == CHUNK_STATUS_READY),
             "chunk_project_id": clean_chunk_project_id,
             "chunk_universe_id": clean_chunk_universe_id,
             "chunk_world_id": clean_chunk_world_id,
             "route_hints": _safe_dict(route_hints),
             "updated_at": _iso(_utcnow()),
         }
-
         if error:
             metadata["chunk"]["error"] = _safe_dict(error)
-
         _set_project_metadata(project, metadata)
-
-        if hasattr(project, "updated_at"):
-            project.updated_at = _utcnow()
 
     except Exception as exc:
         _log_warning("set project chunk refs failed: %s", exc.__class__.__name__)
@@ -1588,16 +1857,70 @@ def _set_project_chunk_status(
     status: str,
     error: Optional[Dict[str, Any]] = None,
 ) -> None:
-    refs = _project_chunk_refs(project)
-    _set_project_chunk_refs(
-        project,
-        chunk_project_id=refs.get("chunk_project_id"),
-        chunk_universe_id=refs.get("chunk_universe_id"),
-        chunk_world_id=refs.get("chunk_world_id"),
-        route_hints=_safe_dict(refs.get("route_hints")),
-        status=status,
-        error=error,
-    )
+    try:
+        if status == CHUNK_STATUS_DISABLED and hasattr(project, "mark_chunk_disabled"):
+            project.mark_chunk_disabled()
+            return
+        if status == CHUNK_STATUS_PENDING and hasattr(project, "mark_chunk_pending"):
+            project.mark_chunk_pending()
+            return
+        if status == CHUNK_STATUS_ERROR and hasattr(project, "mark_chunk_error"):
+            project.mark_chunk_error(_safe_dict(error))
+            return
+
+        refs = _project_chunk_refs(project)
+        _set_project_chunk_refs(
+            project,
+            chunk_project_id=refs.get("chunk_project_id"),
+            chunk_universe_id=refs.get("chunk_universe_id"),
+            chunk_world_id=refs.get("chunk_world_id"),
+            route_hints=_safe_dict(refs.get("route_hints")),
+            status=status,
+            error=error,
+        )
+    except Exception:
+        pass
+
+
+def _mark_chunk_access_sync_pending(project: Any) -> None:
+    try:
+        if hasattr(project, "chunk_access_sync_status"):
+            project.chunk_access_sync_status = CHUNK_ACCESS_SYNC_PENDING
+        if hasattr(project, "chunk_access_sync_error_code"):
+            project.chunk_access_sync_error_code = None
+        if hasattr(project, "chunk_access_sync_error_message"):
+            project.chunk_access_sync_error_message = None
+    except Exception:
+        pass
+
+
+def _mark_chunk_access_sync_failed(
+    project: Any,
+    *,
+    code: str,
+    message: str,
+    repair_required: bool = True,
+) -> None:
+    try:
+        if hasattr(project, "mark_chunk_access_sync_failed"):
+            project.mark_chunk_access_sync_failed(
+                code=code,
+                message=message,
+                repair_required=repair_required,
+            )
+            return
+        if hasattr(project, "chunk_access_sync_status"):
+            project.chunk_access_sync_status = (
+                CHUNK_ACCESS_SYNC_REPAIR_REQUIRED
+                if repair_required
+                else CHUNK_ACCESS_SYNC_FAILED
+            )
+        if hasattr(project, "chunk_access_sync_error_code"):
+            project.chunk_access_sync_error_code = code
+        if hasattr(project, "chunk_access_sync_error_message"):
+            project.chunk_access_sync_error_message = message
+    except Exception:
+        pass
 
 
 def _internal_upsert_project_service_link(
@@ -1733,7 +2056,11 @@ def _upsert_chunk_service_links_from_refs(
 
 
 def _chunk_client_available() -> bool:
-    return callable(ensure_chunk_project_for_project) and callable(extract_chunk_refs)
+    return callable(provision_project_chunk_graph)
+
+
+def _chunk_access_sync_available() -> bool:
+    return callable(sync_project_chunk_access)
 
 
 def _chunk_provisioning_enabled() -> bool:
@@ -1742,7 +2069,6 @@ def _chunk_provisioning_enabled() -> bool:
             return bool(is_chunk_provisioning_enabled())
     except Exception:
         pass
-
     return _config_bool("VECTOPLAN_CHUNK_PROVISION_ON_PROJECT_CREATE", True)
 
 
@@ -1752,28 +2078,182 @@ def _chunk_provisioning_required() -> bool:
             return bool(is_chunk_provisioning_required())
     except Exception:
         pass
-
     return _config_bool("VECTOPLAN_CHUNK_PROVISION_REQUIRED", False)
 
 
-def _should_attempt_chunk_provision(project: Any, *, force: bool = False) -> bool:
-    if project is None:
-        return False
+def _chunk_access_sync_enabled() -> bool:
+    return _config_bool("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ENABLED", True)
 
+
+def _should_attempt_chunk_provision(project: Any, *, force: bool = False) -> bool:
+    if project is None or _project_is_demo(project):
+        return False
     if not _chunk_provisioning_enabled():
         return False
-
     if bool(getattr(project, "is_deleted", False)):
         return False
-
-    if _safe_str(getattr(project, "status", ""), "", 40) in {PROJECT_STATUS_DELETED, PROJECT_STATUS_EXPIRED}:
+    if _safe_str(getattr(project, "status", ""), "", 40) in {
+        PROJECT_STATUS_DELETED,
+        PROJECT_STATUS_EXPIRED,
+    }:
         return False
-
     if force:
         return True
+    refs = _project_chunk_refs(project)
+    return not bool(refs.get("ready"))
+
+
+def _local_user_id_for_auth_user_id(auth_user_id: Any) -> Optional[int]:
+    row = _app_user_by_auth_user_id(auth_user_id)
+    return _safe_int(getattr(row, "id", None), 0) or None
+
+
+def _chunk_provisioning_audit_writer(**kwargs: Any) -> Optional[Any]:
+    project = kwargs.get("project")
+    action = _safe_str(kwargs.get("action"), "chunk_provisioning", 160)
+    auth_user_id = _safe_str(
+        kwargs.get("actor_auth_user_id") or kwargs.get("actor_user_id"),
+        "",
+        160,
+    )
+    return _record_project_event(
+        project,
+        action=action,
+        category="service_link",
+        actor_user_id=_local_user_id_for_auth_user_id(auth_user_id),
+        payload={
+            **_safe_dict(kwargs.get("payload") or kwargs.get("metadata")),
+            "actor_auth_user_id": auth_user_id or None,
+            "service": SERVICE_CHUNK,
+        },
+        commit=False,
+    )
+
+
+def _sync_project_chunk_access_best_effort(
+    project: Any,
+    *,
+    actor_user_id: Optional[int],
+    actor_auth_user_id: Optional[str],
+    force: bool = False,
+    commit: bool = True,
+) -> Dict[str, Any]:
+    """Synchronize app memberships after the local transaction is durable.
+
+    Until ``project_chunk_access_sync_service.py`` is installed, the project is
+    marked pending/repair-required instead of pretending synchronization worked.
+    """
+    if project is None or _project_is_demo(project):
+        return {"ok": True, "code": "chunk_access_sync_not_applicable"}
+    if not _chunk_access_sync_enabled():
+        try:
+            if hasattr(project, "chunk_access_sync_status"):
+                project.chunk_access_sync_status = CHUNK_ACCESS_SYNC_DISABLED
+            db.session.add(project)
+            _db_flush_or_commit(commit)
+        except Exception:
+            if commit:
+                _db_rollback_safely()
+        return {"ok": True, "code": "chunk_access_sync_disabled"}
 
     refs = _project_chunk_refs(project)
-    return not bool(refs.get("chunk_project_id") and refs.get("chunk_world_id"))
+
+    # A caller-owned transaction must not trigger a remote mutation. The local
+    # project is marked pending and the synchronization can run after commit.
+    if not commit:
+        _mark_chunk_access_sync_pending(project)
+        try:
+            db.session.add(project)
+            db.session.flush()
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "code": "chunk_access_sync_deferred_until_commit",
+            "retryable": True,
+        }
+
+    if not refs.get("chunk_project_id"):
+        _mark_chunk_access_sync_pending(project)
+        try:
+            db.session.add(project)
+            _db_flush_or_commit(commit)
+        except Exception:
+            if commit:
+                _db_rollback_safely()
+        return {"ok": False, "code": "chunk_project_not_ready", "retryable": True}
+
+    if not callable(sync_project_chunk_access):
+        _mark_chunk_access_sync_failed(
+            project,
+            code="chunk_access_sync_service_unavailable",
+            message="project_chunk_access_sync_service is not available.",
+            repair_required=True,
+        )
+        try:
+            db.session.add(project)
+            _record_project_event(
+                project,
+                action="chunk_access_sync_failed",
+                category="access",
+                actor_user_id=actor_user_id,
+                payload={
+                    "code": "chunk_access_sync_service_unavailable",
+                    "actor_auth_user_id": actor_auth_user_id,
+                },
+                commit=False,
+            )
+            _db_flush_or_commit(commit)
+        except Exception:
+            if commit:
+                _db_rollback_safely()
+        return {
+            "ok": False,
+            "code": "chunk_access_sync_service_unavailable",
+            "retryable": True,
+        }
+
+    try:
+        raw = sync_project_chunk_access(
+            project,
+            actor_auth_user_id=actor_auth_user_id,
+            force=force,
+            commit=commit,
+        )
+        if hasattr(raw, "to_dict"):
+            return _safe_dict(raw.to_dict())
+        return _safe_dict(raw) or {"ok": bool(getattr(raw, "ok", False))}
+    except Exception as exc:
+        _db_rollback_safely()
+        _mark_chunk_access_sync_failed(
+            project,
+            code=_safe_str(getattr(exc, "code", None), "chunk_access_sync_failed", 160),
+            message=_safe_str(getattr(exc, "message", None) or str(exc), "Chunk access synchronization failed.", 2000),
+            repair_required=True,
+        )
+        try:
+            db.session.add(project)
+            _record_project_event(
+                project,
+                action="chunk_access_sync_failed",
+                category="access",
+                actor_user_id=actor_user_id,
+                payload={
+                    "code": _safe_str(getattr(exc, "code", None), "chunk_access_sync_failed", 160),
+                    "message": _safe_str(str(exc), "", 1000),
+                    "actor_auth_user_id": actor_auth_user_id,
+                },
+                commit=False,
+            )
+            db.session.commit()
+        except Exception:
+            _db_rollback_safely()
+        return {
+            "ok": False,
+            "code": _safe_str(getattr(exc, "code", None), "chunk_access_sync_failed", 160),
+            "message": _safe_str(str(exc), "", 1000),
+            "retryable": bool(getattr(exc, "retryable", True)),
+        }
 
 
 def ensure_project_chunk_link(
@@ -1783,266 +2263,226 @@ def ensure_project_chunk_link(
     force: bool = False,
     commit: bool = True,
 ) -> ProjectOperationResult:
-    try:
-        if project is None:
-            return ProjectOperationResult(
-                ok=False,
-                status_code=400,
-                code="project_required",
-                error="project required",
-            )
-
-        if _project_is_demo(project):
-            permissions = get_project_permission_result(project, user_id=user_id, allow_public_view=False)
-            if not permissions.can_view and not permissions.can_edit:
-                raise PermissionDenied(
-                    "Demo-Projekt ist für diesen Guest nicht zugänglich.",
-                    code="demo_project_permission_denied",
-                    status_code=403,
-                    permission=PERMISSION_VIEW,
-                    project_id=_project_public_id(project),
-                    user_id=None,
-                )
-            uid = None
-        else:
-            uid = require_persistent_actor(user_id)
-            require_project_permission(project, PERMISSION_MANAGE, uid, allow_public_view=False)
-
-        if not _chunk_provisioning_enabled():
-            _set_project_chunk_status(project, status=CHUNK_STATUS_DISABLED)
-            db.session.add(project)
-
-            _record_project_event(
-                project,
-                action="chunk_provisioning_disabled",
-                category="service_link",
-                actor_user_id=uid,
-                payload={
-                    "service": SERVICE_CHUNK,
-                    "reason": "disabled_by_config",
-                    "is_demo": _project_is_demo(project),
-                },
-                commit=False,
-            )
-
-            _db_flush_or_commit(commit)
-
-            return ProjectOperationResult(
-                ok=True,
-                project=project,
-                payload={
-                    "ok": True,
-                    "chunk": _project_chunk_refs(project),
-                },
-                status_code=200,
-                code="chunk_provisioning_disabled",
-            )
-
-        existing_refs = _project_chunk_refs(project)
-
-        if not force and existing_refs.get("chunk_project_id") and existing_refs.get("chunk_world_id"):
-            _set_project_chunk_refs(
-                project,
-                chunk_project_id=existing_refs.get("chunk_project_id"),
-                chunk_universe_id=existing_refs.get("chunk_universe_id"),
-                chunk_world_id=existing_refs.get("chunk_world_id"),
-                route_hints=_safe_dict(existing_refs.get("route_hints")),
-                status=CHUNK_STATUS_READY,
-            )
-
-            _upsert_chunk_service_links_from_refs(project, refs=_project_chunk_refs(project), user_id=uid)
-            db.session.add(project)
-            _db_flush_or_commit(commit)
-
-            return ProjectOperationResult(
-                ok=True,
-                project=project,
-                payload={
-                    "ok": True,
-                    "chunk": _project_chunk_refs(project),
-                    "existing": True,
-                },
-                status_code=200,
-                code="chunk_link_exists",
-            )
-
-        if not _chunk_client_available():
-            error = {
-                "code": "chunk_client_unavailable",
-                "message": "services.chunk_client could not be imported.",
-            }
-            _set_project_chunk_status(project, status=CHUNK_STATUS_ERROR, error=error)
-            db.session.add(project)
-
-            _record_project_event(
-                project,
-                action="chunk_provision_failed",
-                category="service_link",
-                actor_user_id=uid,
-                payload={
-                    "service": SERVICE_CHUNK,
-                    "error": error,
-                    "is_demo": _project_is_demo(project),
-                },
-                commit=False,
-            )
-
-            _db_flush_or_commit(commit)
-
-            if _chunk_provisioning_required():
-                raise RuntimeError(error["message"])
-
-            return ProjectOperationResult(
-                ok=False,
-                project=project,
-                payload={
-                    "ok": False,
-                    "chunk": _project_chunk_refs(project),
-                    "error": error,
-                },
-                status_code=503,
-                code="chunk_client_unavailable",
-                error=error["message"],
-            )
-
-        result = ensure_chunk_project_for_project(
-            project,
-            apply_to_project=True,
-            raise_on_error=_chunk_provisioning_required(),
+    """Provision the chunk graph after the app project transaction is durable."""
+    if project is None:
+        return ProjectOperationResult(
+            ok=False,
+            status_code=400,
+            code="project_required",
+            error="project required",
         )
 
-        refs = extract_chunk_refs(result) if callable(extract_chunk_refs) else {}
-        route_hints = _safe_dict(refs.get("route_hints"))
+    if _project_is_demo(project):
+        return ProjectOperationResult(
+            ok=False,
+            project=project,
+            status_code=403,
+            code="demo_chunk_provisioning_not_allowed",
+            error="Persistent Chunk provisioning requires an authenticated user.",
+        )
 
-        if result.ok:
-            chunk_project_id = _safe_str(refs.get("chunk_project_id"), "", 160)
-            chunk_universe_id = _safe_str(refs.get("chunk_universe_id"), "", 160)
-            chunk_world_id = _safe_str(refs.get("chunk_world_id"), "", 160)
+    uid = require_persistent_actor(user_id)
+    auth_user_id = require_actor_auth_user_id(uid)
+    require_project_permission(project, PERMISSION_MANAGE, uid, allow_public_view=False)
 
-            _set_project_chunk_refs(
-                project,
-                chunk_project_id=chunk_project_id,
-                chunk_universe_id=chunk_universe_id,
-                chunk_world_id=chunk_world_id,
-                route_hints=route_hints,
-                status=CHUNK_STATUS_READY,
-            )
-
-            _upsert_chunk_service_links_from_refs(
-                project,
-                refs=_project_chunk_refs(project),
-                user_id=uid,
-            )
-
-            db.session.add(project)
-
-            _record_project_event(
-                project,
-                action="chunk_project_linked",
-                category="service_link",
-                actor_user_id=uid,
-                before=existing_refs,
-                after=_project_chunk_refs(project),
-                payload={
-                    "service": SERVICE_CHUNK,
-                    "is_demo": _project_is_demo(project),
-                    "chunk_result": result.to_dict(include_raw=False, include_request_body=False)
-                    if hasattr(result, "to_dict")
-                    else {},
-                },
-                commit=False,
-            )
-
-            _db_flush_or_commit(commit)
-
-            return ProjectOperationResult(
-                ok=True,
-                project=project,
-                payload={
-                    "ok": True,
-                    "chunk": _project_chunk_refs(project),
-                    "chunk_result": result.to_dict(include_raw=False, include_request_body=False)
-                    if hasattr(result, "to_dict")
-                    else {},
-                },
-                status_code=200,
-                code="chunk_project_linked",
-            )
-
-        error = _safe_dict(getattr(result, "error", None)) or {
-            "code": "chunk_provision_failed",
-            "message": getattr(result, "message", "chunk provisioning failed"),
-        }
-
-        _set_project_chunk_status(project, status=CHUNK_STATUS_ERROR, error=error)
+    if not _chunk_provisioning_enabled():
+        _set_project_chunk_status(project, status=CHUNK_STATUS_DISABLED)
         db.session.add(project)
-
         _record_project_event(
             project,
-            action="chunk_provision_failed",
+            action="chunk_provisioning_disabled",
             category="service_link",
             actor_user_id=uid,
-            before=existing_refs,
-            after=_project_chunk_refs(project),
+            payload={"service": SERVICE_CHUNK, "reason": "disabled_by_config"},
+            commit=False,
+        )
+        _db_flush_or_commit(commit)
+        return ProjectOperationResult(
+            ok=True,
+            project=project,
+            payload={"ok": True, "chunk": _project_chunk_refs(project)},
+            status_code=200,
+            code="chunk_provisioning_disabled",
+        )
+
+    existing = _project_chunk_refs(project)
+    if not force and existing.get("ready"):
+        _upsert_chunk_service_links_from_refs(project, refs=existing, user_id=uid)
+        db.session.add(project)
+        _db_flush_or_commit(commit)
+        access_result = _sync_project_chunk_access_best_effort(
+            project,
+            actor_user_id=uid,
+            actor_auth_user_id=auth_user_id,
+            force=False,
+            commit=commit,
+        )
+        return ProjectOperationResult(
+            ok=True,
+            project=project,
+            payload={
+                "ok": True,
+                "chunk": _project_chunk_refs(project),
+                "existing": True,
+                "access_sync": access_result,
+            },
+            status_code=200,
+            code="chunk_link_exists",
+        )
+
+    if not commit:
+        _set_project_chunk_status(project, status=CHUNK_STATUS_PENDING)
+        try:
+            db.session.add(project)
+            db.session.flush()
+        except Exception:
+            pass
+        return ProjectOperationResult(
+            ok=False,
+            project=project,
+            payload={
+                "ok": False,
+                "chunk": _project_chunk_refs(project),
+                "deferred": True,
+            },
+            status_code=409,
+            code="chunk_provisioning_requires_committed_project",
+            error="Chunk provisioning is deferred until the App project transaction is committed.",
+        )
+
+    if not callable(provision_project_chunk_graph):
+        error = {
+            "code": "chunk_provisioning_service_unavailable",
+            "message": "project_chunk_provisioning_service could not be imported.",
+        }
+        _set_project_chunk_status(project, status=CHUNK_STATUS_ERROR, error=error)
+        db.session.add(project)
+        _record_project_event(
+            project,
+            action="chunk_provisioning_failed",
+            category="service_link",
+            actor_user_id=uid,
+            payload={"service": SERVICE_CHUNK, "error": error},
+            commit=False,
+        )
+        _db_flush_or_commit(commit)
+        return ProjectOperationResult(
+            ok=False,
+            project=project,
+            payload={"ok": False, "chunk": _project_chunk_refs(project), "error": error},
+            status_code=503,
+            code=error["code"],
+            error=error["message"],
+        )
+
+    operation = provision_project_chunk_graph(
+        project,
+        owner_auth_user_id=auth_user_id,
+        force=force,
+        commit=commit,
+        raise_on_error=False,
+        request_id=uuid.uuid4().hex,
+        audit_writer=_chunk_provisioning_audit_writer,
+    )
+    operation_payload = (
+        _safe_dict(operation.to_dict())
+        if hasattr(operation, "to_dict")
+        else _safe_dict(operation)
+    )
+
+    if not bool(getattr(operation, "ok", operation_payload.get("ok"))):
+        error = _safe_dict(operation_payload.get("error")) or {
+            "code": _safe_str(operation_payload.get("code"), "chunk_provisioning_failed", 160),
+            "message": "Chunk provisioning failed.",
+        }
+        return ProjectOperationResult(
+            ok=False,
+            project=project,
+            payload={
+                "ok": False,
+                "chunk": _project_chunk_refs(project),
+                "chunk_result": operation_payload,
+                "error": error,
+            },
+            status_code=_safe_int(operation_payload.get("statusCode"), 502),
+            code=_safe_str(operation_payload.get("code"), "chunk_provisioning_failed", 160),
+            error=_safe_str(error.get("message"), "Chunk provisioning failed.", 2000),
+        )
+
+    refs = _project_chunk_refs(project)
+    try:
+        _upsert_chunk_service_links_from_refs(project, refs=refs, user_id=uid)
+        db.session.add(project)
+        _record_project_event(
+            project,
+            action="chunk_project_linked",
+            category="service_link",
+            actor_user_id=uid,
+            before=existing,
+            after=refs,
             payload={
                 "service": SERVICE_CHUNK,
-                "is_demo": _project_is_demo(project),
-                "error": error,
-                "chunk_result": result.to_dict(include_raw=False, include_request_body=False)
-                if hasattr(result, "to_dict")
-                else {},
+                "actor_auth_user_id": auth_user_id,
+                "chunk_result": operation_payload,
             },
             commit=False,
         )
-
         _db_flush_or_commit(commit)
-
-        if _chunk_provisioning_required():
-            raise RuntimeError(_safe_str(error.get("message"), "chunk provisioning failed"))
-
-        return ProjectOperationResult(
-            ok=False,
-            project=project,
-            payload={
-                "ok": False,
-                "chunk": _project_chunk_refs(project),
-                "error": error,
-            },
-            status_code=502,
-            code="chunk_provision_failed",
-            error=_safe_str(error.get("message"), "chunk provisioning failed"),
-        )
-
-    except PermissionDenied:
-        if commit:
-            _db_rollback_safely()
-        raise
-
     except Exception as exc:
-        if commit:
+        _db_rollback_safely()
+        try:
+            if hasattr(project, "mark_chunk_provisioning_failed"):
+                project.mark_chunk_provisioning_failed(
+                    code="chunk_link_metadata_repair_required",
+                    message="Chunk exists, but App service-link metadata could not be persisted.",
+                    repair_required=True,
+                )
+            db.session.add(project)
+            db.session.commit()
+        except Exception:
             _db_rollback_safely()
-
-        _log_exception("ensure_project_chunk_link failed", exc)
-
-        if _chunk_provisioning_required():
-            raise
-
         return ProjectOperationResult(
             ok=False,
             project=project,
             payload={
                 "ok": False,
                 "chunk": _project_chunk_refs(project),
+                "chunk_result": operation_payload,
                 "error": {
-                    "code": "chunk_provision_exception",
+                    "code": "chunk_link_metadata_repair_required",
                     "message": str(exc),
-                    "type": exc.__class__.__name__,
                 },
             },
-            status_code=502,
-            code="chunk_provision_exception",
-            error=str(exc),
+            status_code=500,
+            code="chunk_link_metadata_repair_required",
+            error="Chunk exists, but App metadata requires repair.",
         )
+
+    access_result = _sync_project_chunk_access_best_effort(
+        project,
+        actor_user_id=uid,
+        actor_auth_user_id=auth_user_id,
+        force=force,
+        commit=commit,
+    )
+    final_refs = _project_chunk_refs(project)
+    code = (
+        "chunk_project_linked_with_flat_fallback"
+        if final_refs.get("fallback_used")
+        else "chunk_project_linked"
+    )
+    return ProjectOperationResult(
+        ok=True,
+        project=project,
+        payload={
+            "ok": True,
+            "chunk": final_refs,
+            "chunk_result": operation_payload,
+            "access_sync": access_result,
+        },
+        status_code=200,
+        code=code,
+    )
 
 
 def retry_project_chunk_link(
@@ -2056,6 +2496,39 @@ def retry_project_chunk_link(
         user_id=user_id,
         force=True,
         commit=commit,
+    )
+
+
+def sync_project_chunk_access_for_project(
+    project: Any,
+    *,
+    user_id: Optional[int] = None,
+    force: bool = True,
+    commit: bool = True,
+) -> ProjectOperationResult:
+    if project is None:
+        return ProjectOperationResult(False, status_code=400, code="project_required", error="project required")
+    uid = require_persistent_actor(user_id)
+    auth_user_id = require_actor_auth_user_id(uid)
+    require_project_permission(project, PERMISSION_MANAGE, uid, allow_public_view=False)
+    result = _sync_project_chunk_access_best_effort(
+        project,
+        actor_user_id=uid,
+        actor_auth_user_id=auth_user_id,
+        force=force,
+        commit=commit,
+    )
+    return ProjectOperationResult(
+        ok=_safe_bool(result.get("ok"), False),
+        project=project,
+        payload={
+            "ok": _safe_bool(result.get("ok"), False),
+            "chunk": _project_chunk_refs(project),
+            "access_sync": result,
+        },
+        status_code=_safe_int(result.get("statusCode") or result.get("status_code"), 200 if result.get("ok") else 502),
+        code=_safe_str(result.get("code"), "chunk_access_synced" if result.get("ok") else "chunk_access_sync_failed", 160),
+        error=None if result.get("ok") else _safe_str(result.get("message") or result.get("error"), "Chunk access synchronization failed.", 2000),
     )
 
 
@@ -2286,6 +2759,20 @@ def serialize_project(
         payload["chunkUniverseId"] = chunk_refs.get("chunk_universe_id")
         payload["chunk_world_id"] = chunk_refs.get("chunk_world_id")
         payload["chunkWorldId"] = chunk_refs.get("chunk_world_id")
+        payload["chunk_provisioning"] = _safe_dict(chunk_refs.get("provisioning"))
+        payload["chunkProvisioning"] = _safe_dict(chunk_refs.get("provisioning"))
+        payload["chunk_access_sync"] = _safe_dict(chunk_refs.get("access_sync"))
+        payload["chunkAccessSync"] = _safe_dict(chunk_refs.get("access_sync"))
+        payload["chunk_provisioning_status"] = chunk_refs.get("provisioning_status")
+        payload["chunkProvisioningStatus"] = chunk_refs.get("provisioning_status")
+        payload["chunk_world_template_requested"] = chunk_refs.get("requested_world_template")
+        payload["chunkWorldTemplateRequested"] = chunk_refs.get("requested_world_template")
+        payload["chunk_world_template_effective"] = chunk_refs.get("effective_world_template")
+        payload["chunkWorldTemplateEffective"] = chunk_refs.get("effective_world_template")
+        payload["chunk_fallback_used"] = bool(chunk_refs.get("fallback_used"))
+        payload["chunkFallbackUsed"] = bool(chunk_refs.get("fallback_used"))
+        payload["chunk_fallback_reason"] = chunk_refs.get("fallback_reason")
+        payload["chunkFallbackReason"] = chunk_refs.get("fallback_reason")
 
         if include_permissions:
             payload["access"] = serialize_project_permissions(project, user_id=user_id)
@@ -2383,6 +2870,13 @@ def serialize_project_sidebar_item(project: Any, *, user_id: Optional[int] = Non
         item["chunk_project_id"] = chunk_refs.get("chunk_project_id")
         item["chunkWorldId"] = chunk_refs.get("chunk_world_id")
         item["chunk_world_id"] = chunk_refs.get("chunk_world_id")
+        item["chunkProvisioningStatus"] = chunk_refs.get("provisioning_status")
+        item["chunk_provisioning_status"] = chunk_refs.get("provisioning_status")
+        item["chunkWorldTemplate"] = chunk_refs.get("effective_world_template")
+        item["chunk_world_template"] = chunk_refs.get("effective_world_template")
+        item["chunkFallbackUsed"] = bool(chunk_refs.get("fallback_used"))
+        item["chunk_fallback_used"] = bool(chunk_refs.get("fallback_used"))
+        item["chunkAccessSync"] = _safe_dict(chunk_refs.get("access_sync"))
 
         return item
 
@@ -3010,59 +3504,66 @@ def create_project(
     commit: bool = True,
     provision_chunk: Optional[bool] = None,
 ) -> Any:
-    """
-    Create a persistent app project.
+    """Create the App project first, then provision Chunk in a second transaction.
 
-    Demo users are handled by create_project_result(), not here.
+    This ordering deliberately avoids pretending that the App and Chunk databases
+    share one transaction. A Chunk failure never deletes the already-created App
+    project; instead the project retains a retryable provisioning state.
     """
+    uid = require_persistent_actor(user_id)
+    context = get_actor_context(uid)
+    auth_user_id = require_actor_auth_user_id(uid)
+    auth_account_id = _safe_str(
+        context.get("account_id") or context.get("accountId"),
+        "",
+        160,
+    ) or None
+
+    payload = _normalize_project_payload(data, for_update=False)
+    visibility = _normalize_visibility(payload.get("visibility"), PROJECT_VISIBILITY_PRIVATE)
+    project_scope = PROJECT_SCOPE_ACCOUNT if auth_account_id else PROJECT_SCOPE_PERSONAL
+    should_provision = _chunk_provisioning_enabled() if provision_chunk is None else bool(provision_chunk)
+
+    project = Project(
+        owner_user_id=uid,
+        auth_owner_user_id=auth_user_id,
+        auth_account_id=auth_account_id,
+        owner_subject_type="user",
+        project_scope=project_scope,
+        is_demo=False,
+        name=payload.get("name") or DEFAULT_PROJECT_NAME,
+        description=payload.get("description"),
+        address_text=payload.get("address_text"),
+        street=payload.get("street"),
+        house_number=payload.get("house_number"),
+        postal_code=payload.get("postal_code"),
+        city=payload.get("city"),
+        region=payload.get("region"),
+        country=payload.get("country") or DEFAULT_ADDRESS_COUNTRY,
+        latitude=payload.get("latitude"),
+        longitude=payload.get("longitude"),
+        coordinate_srid=payload.get("coordinate_srid") or DEFAULT_COORDINATE_SRID,
+        service_refs=_safe_dict(payload.get("service_refs")),
+        artifact_refs=_safe_dict(payload.get("artifact_refs")),
+        visibility=visibility,
+        is_public=visibility == PROJECT_VISIBILITY_PUBLIC,
+        status=PROJECT_STATUS_ACTIVE,
+        setup_status=payload.get("setup_status") or PROJECT_SETUP_DRAFT,
+        settings=_safe_dict(payload.get("settings")),
+        metadata_json={
+            "created_via": "project_service.create_project",
+            "project_form_version": 4,
+            "address_input_mode": "single_box",
+            "system_refs_hidden_in_project_form": True,
+            "auth_owner_user_id": auth_user_id,
+            "auth_account_id": auth_account_id,
+            "project_scope": project_scope,
+            "chunkProvisioningContract": "earth-default-flat-fallback.v1",
+            **_safe_dict(payload.get("metadata")),
+        },
+    )
+
     try:
-        uid = require_persistent_actor(user_id)
-        context = get_actor_context(uid)
-        auth_user_id = _safe_str(context.get("auth_user_id") or context.get("authUserId"), "", 160) or None
-        auth_account_id = _safe_str(context.get("account_id") or context.get("accountId"), "", 160) or None
-
-        payload = _normalize_project_payload(data, for_update=False)
-        visibility = _normalize_visibility(payload.get("visibility"), PROJECT_VISIBILITY_PRIVATE)
-        project_scope = PROJECT_SCOPE_ACCOUNT if auth_account_id else PROJECT_SCOPE_PERSONAL
-
-        project = Project(
-            owner_user_id=uid,
-            auth_owner_user_id=auth_user_id,
-            auth_account_id=auth_account_id,
-            owner_subject_type="user",
-            project_scope=project_scope,
-            is_demo=False,
-            name=payload.get("name") or DEFAULT_PROJECT_NAME,
-            description=payload.get("description"),
-            address_text=payload.get("address_text"),
-            street=payload.get("street"),
-            house_number=payload.get("house_number"),
-            postal_code=payload.get("postal_code"),
-            city=payload.get("city"),
-            region=payload.get("region"),
-            country=payload.get("country") or DEFAULT_ADDRESS_COUNTRY,
-            latitude=payload.get("latitude"),
-            longitude=payload.get("longitude"),
-            coordinate_srid=payload.get("coordinate_srid") or DEFAULT_COORDINATE_SRID,
-            service_refs=_safe_dict(payload.get("service_refs")),
-            artifact_refs=_safe_dict(payload.get("artifact_refs")),
-            visibility=visibility,
-            is_public=visibility == PROJECT_VISIBILITY_PUBLIC,
-            status=PROJECT_STATUS_ACTIVE,
-            setup_status=payload.get("setup_status") or PROJECT_SETUP_DRAFT,
-            settings=_safe_dict(payload.get("settings")),
-            metadata_json={
-                "created_via": "project_service.create_project",
-                "project_form_version": 3,
-                "address_input_mode": "single_box",
-                "system_refs_hidden_in_project_form": True,
-                "auth_owner_user_id": auth_user_id,
-                "auth_account_id": auth_account_id,
-                "project_scope": project_scope,
-                **_safe_dict(payload.get("metadata")),
-            },
-        )
-
         if payload.get("geocode_payload") or payload.get("geocode_status"):
             metadata = _get_project_metadata(project)
             metadata["geocode"] = {
@@ -3087,12 +3588,19 @@ def create_project(
                 project.setup_status = PROJECT_SETUP_CONFIGURED
                 project.setup_completed_at = _utcnow()
 
+        if should_provision:
+            _set_project_chunk_status(project, status=CHUNK_STATUS_PENDING)
+            _mark_chunk_access_sync_pending(project)
+        else:
+            _set_project_chunk_status(project, status=CHUNK_STATUS_DISABLED)
+            if hasattr(project, "chunk_access_sync_status"):
+                project.chunk_access_sync_status = CHUNK_ACCESS_SYNC_DISABLED
+
         if hasattr(project, "normalize_lifecycle"):
             project.normalize_lifecycle()
 
         db.session.add(project)
         db.session.flush()
-
         conv = _create_conversation_for_project(project, title=project.name)
 
         try:
@@ -3106,15 +3614,16 @@ def create_project(
                     allow_owner=True,
                 )
             else:
-                membership = model_build_membership(
-                    project_id=project.id,
-                    user_id=uid,
-                    role=ROLE_OWNER,
-                    permissions={},
+                db.session.add(
+                    model_build_membership(
+                        project_id=project.id,
+                        user_id=uid,
+                        role=ROLE_OWNER,
+                        permissions={},
+                    )
                 )
-                db.session.add(membership)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_warning("owner membership creation failed: %s", exc.__class__.__name__)
 
         get_or_create_embed_policy(project, user_id=uid, commit=False)
 
@@ -3138,33 +3647,63 @@ def create_project(
                 "auth_owner_user_id": auth_user_id,
                 "auth_account_id": auth_account_id,
                 "project_scope": project_scope,
+                "chunk_provisioning_requested": should_provision,
+                "requested_world_template": CHUNK_WORLD_TEMPLATE_EARTH,
+                "fallback_world_template": CHUNK_WORLD_TEMPLATE_FLAT,
             },
             commit=False,
         )
 
-        should_provision = _chunk_provisioning_enabled() if provision_chunk is None else bool(provision_chunk)
-
-        if should_provision:
-            _set_project_chunk_status(project, status=CHUNK_STATUS_PENDING)
-
+        # No external side effect is allowed while an outer caller owns the DB transaction.
         _db_flush_or_commit(commit)
 
-        if should_provision and commit:
-            ensure_project_chunk_link(project, user_id=uid, force=False, commit=True)
-
-        return project
-
-    except PermissionDenied:
-        if commit:
-            _db_rollback_safely()
-        raise
-
     except Exception:
-        if commit:
-            _db_rollback_safely()
-        else:
-            _db_rollback_safely()
+        _db_rollback_safely()
         raise
+
+    if should_provision and commit:
+        try:
+            chunk_result = ensure_project_chunk_link(
+                project,
+                user_id=uid,
+                force=False,
+                commit=True,
+            )
+            try:
+                setattr(project, "_last_chunk_operation_result", chunk_result)
+            except Exception:
+                pass
+        except Exception as exc:
+            # The App project is already durable. Record a repairable state instead
+            # of attempting to roll it back across the service boundary.
+            _db_rollback_safely()
+            _set_project_chunk_status(
+                project,
+                status=CHUNK_STATUS_ERROR,
+                error={
+                    "code": _safe_str(getattr(exc, "code", None), "chunk_provision_exception", 160),
+                    "message": _safe_str(str(exc), "Chunk provisioning failed.", 2000),
+                },
+            )
+            try:
+                db.session.add(project)
+                _record_project_event(
+                    project,
+                    action="chunk_provisioning_failed",
+                    category="service_link",
+                    actor_user_id=uid,
+                    payload={
+                        "actor_auth_user_id": auth_user_id,
+                        "exception_type": exc.__class__.__name__,
+                        "message": _safe_str(str(exc), "", 1000),
+                    },
+                    commit=False,
+                )
+                db.session.commit()
+            except Exception:
+                _db_rollback_safely()
+
+    return project
 
 
 def update_project(
@@ -3175,90 +3714,90 @@ def update_project(
     commit: bool = True,
     provision_chunk_if_missing: bool = True,
 ) -> Any:
+    if project is None:
+        raise ValueError("project required")
+
+    if _project_is_demo(project):
+        result = get_project_permission_result(project, user_id=user_id, allow_public_view=False)
+        if not result.can_edit:
+            raise PermissionDenied(
+                "Demo-Projekt ist für diesen Guest nicht bearbeitbar.",
+                permission=PERMISSION_EDIT,
+                project_id=_project_public_id(project),
+                user_id=None,
+                status_code=403,
+                code="demo_project_permission_denied",
+            )
+        uid = None
+        auth_user_id = None
+    else:
+        uid = require_persistent_actor(user_id)
+        auth_user_id = require_actor_auth_user_id(uid)
+        require_project_permission(project, PERMISSION_EDIT, uid, allow_public_view=False)
+
+    before = serialize_project(project, user_id=uid, include_permissions=False)
+    payload = _normalize_project_payload(data, for_update=True, existing_project=project)
+    old_visibility = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
+    _apply_project_payload(project, payload)
+    new_visibility = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
+    conv = get_or_create_project_conversation(project, commit=False)
+
     try:
-        if project is None:
-            raise ValueError("project required")
-
-        if _project_is_demo(project):
-            result = get_project_permission_result(project, user_id=user_id, allow_public_view=False)
-            if not result.can_edit:
-                raise PermissionDenied(
-                    "Demo-Projekt ist für diesen Guest nicht bearbeitbar.",
-                    permission=PERMISSION_EDIT,
-                    project_id=_project_public_id(project),
-                    user_id=None,
-                    status_code=403,
-                    code="demo_project_permission_denied",
-                )
-            uid = None
-        else:
-            uid = require_persistent_actor(user_id)
-            require_project_permission(project, PERMISSION_EDIT, uid, allow_public_view=False)
-
-        before = serialize_project(project, user_id=uid, include_permissions=False)
-        payload = _normalize_project_payload(data, for_update=True, existing_project=project)
-
-        old_visibility = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
-        _apply_project_payload(project, payload)
-        new_visibility = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
-
-        conv = get_or_create_project_conversation(project, commit=False)
-
         if conv is not None:
-            try:
-                conv.title = project.name or conv.title
-                conv.project_id = str(project.id)
-                conv.updated_at = _utcnow()
-                db.session.add(conv)
-            except Exception:
-                pass
-
-        if not _project_is_demo(project) and old_visibility != new_visibility and callable(publication_set_project_visibility):
-            try:
-                publication_set_project_visibility(project, new_visibility, actor_user_id=uid, commit=False)
-            except Exception:
-                pass
-
-        db.session.add(project)
-
-        _record_project_event(
-            project,
-            action="demo_updated" if _project_is_demo(project) else "updated",
-            category="project",
-            actor_user_id=uid,
-            before=before,
-            after=serialize_project(project, user_id=uid, include_permissions=False),
-            payload={
-                "source": "project_service.update_project",
-                "address_input_mode": "single_box",
-                "visibility": new_visibility,
-                "payload_fields": sorted(list(payload.get("__present") or [])),
-                "is_demo": _project_is_demo(project),
-            },
-            commit=False,
-        )
-
-        should_provision = bool(provision_chunk_if_missing and _should_attempt_chunk_provision(project))
-
-        if should_provision:
-            _set_project_chunk_status(project, status=CHUNK_STATUS_PENDING)
-
-        _db_flush_or_commit(commit)
-
-        if should_provision and commit:
-            ensure_project_chunk_link(project, user_id=uid, force=False, commit=True)
-
-        return project
-
-    except PermissionDenied:
-        if commit:
-            _db_rollback_safely()
-        raise
-
+            conv.title = project.name or conv.title
+            conv.project_id = str(project.id)
+            conv.updated_at = _utcnow()
+            db.session.add(conv)
     except Exception:
-        if commit:
-            _db_rollback_safely()
+        pass
+
+    if not _project_is_demo(project) and old_visibility != new_visibility and callable(publication_set_project_visibility):
+        try:
+            publication_set_project_visibility(project, new_visibility, actor_user_id=uid, commit=False)
+        except Exception:
+            pass
+
+    should_provision = bool(
+        not _project_is_demo(project)
+        and provision_chunk_if_missing
+        and _should_attempt_chunk_provision(project)
+    )
+    if should_provision:
+        _set_project_chunk_status(project, status=CHUNK_STATUS_PENDING)
+
+    db.session.add(project)
+    _record_project_event(
+        project,
+        action="demo_updated" if _project_is_demo(project) else "updated",
+        category="project",
+        actor_user_id=uid,
+        before=before,
+        after=serialize_project(project, user_id=uid, include_permissions=False),
+        payload={
+            "source": "project_service.update_project",
+            "address_input_mode": "single_box",
+            "visibility": new_visibility,
+            "payload_fields": sorted(list(payload.get("__present") or [])),
+            "is_demo": _project_is_demo(project),
+            "chunk_provisioning_requested": should_provision,
+        },
+        commit=False,
+    )
+
+    try:
+        _db_flush_or_commit(commit)
+    except Exception:
+        _db_rollback_safely()
         raise
+
+    if should_provision and commit:
+        try:
+            result = ensure_project_chunk_link(project, user_id=uid, force=False, commit=True)
+            setattr(project, "_last_chunk_operation_result", result)
+        except Exception as exc:
+            _log_exception("post-update chunk provisioning failed", exc)
+
+    return project
 
 
 def create_or_update_project(
@@ -3426,31 +3965,36 @@ def transfer_project_owner(
     actor_user_id: Optional[int] = None,
     commit: bool = True,
 ) -> Any:
+    if project is None:
+        raise ValueError("project required")
+    if _project_is_demo(project):
+        raise PermissionDenied(
+            "Demo-Projekte können nicht übertragen werden.",
+            permission=PERMISSION_TRANSFER,
+            project_id=_project_public_id(project),
+            user_id=None,
+            status_code=403,
+            code="demo_transfer_not_allowed",
+        )
+
+    actor_id = require_persistent_actor(actor_user_id)
+    actor_auth_user_id = require_actor_auth_user_id(actor_id)
+    new_owner_id = _safe_int(new_owner_user_id, 0)
+    if not new_owner_id:
+        raise ValueError("new_owner_user_id required")
+
+    new_owner = _app_user_by_local_id(new_owner_id)
+    new_owner_auth_user_id = _app_user_auth_user_id(new_owner)
+    if not new_owner_auth_user_id:
+        raise ValueError("new owner requires canonical AppUser.auth_user_id")
+
+    require_project_permission(project, PERMISSION_TRANSFER, actor_id, allow_public_view=False)
+
+    before = serialize_project(project, user_id=actor_id, include_permissions=True)
+    old_owner_user_id = _safe_int(getattr(project, "owner_user_id", None), 0)
+    old_owner_auth_user_id = _safe_str(getattr(project, "auth_owner_user_id", None), "", 160) or None
+
     try:
-        if project is None:
-            raise ValueError("project required")
-
-        if _project_is_demo(project):
-            raise PermissionDenied(
-                "Demo-Projekte können nicht übertragen werden.",
-                permission=PERMISSION_TRANSFER,
-                project_id=_project_public_id(project),
-                user_id=None,
-                status_code=403,
-                code="demo_transfer_not_allowed",
-            )
-
-        actor_id = require_persistent_actor(actor_user_id)
-        new_owner_id = _safe_int(new_owner_user_id, 0)
-
-        if not new_owner_id:
-            raise ValueError("new_owner_user_id required")
-
-        require_project_permission(project, PERMISSION_TRANSFER, actor_id, allow_public_view=False)
-
-        before = serialize_project(project, user_id=actor_id, include_permissions=True)
-        old_owner_user_id = _safe_int(getattr(project, "owner_user_id", None), 0)
-
         if callable(permissions_transfer_project_ownership):
             permissions_transfer_project_ownership(
                 project,
@@ -3459,16 +4003,19 @@ def transfer_project_owner(
                 commit=False,
             )
         elif hasattr(project, "transfer_ownership"):
-            try:
-                project.transfer_ownership(new_owner_user_id=new_owner_id)
-            except TypeError:
-                project.transfer_ownership(new_owner_id)
+            project.transfer_ownership(
+                new_owner_user_id=new_owner_id,
+                new_auth_owner_user_id=new_owner_auth_user_id,
+            )
         else:
             project.owner_user_id = new_owner_id
             project.transferred_from_user_id = old_owner_user_id or None
             project.transferred_at = _utcnow()
-            project.updated_at = _utcnow()
 
+        project.auth_owner_user_id = new_owner_auth_user_id
+        project.owner_subject_type = "user"
+        project.updated_at = _utcnow()
+        _mark_chunk_access_sync_pending(project)
         db.session.add(project)
 
         _record_project_event(
@@ -3481,17 +4028,27 @@ def transfer_project_owner(
             payload={
                 "old_owner_user_id": old_owner_user_id,
                 "new_owner_user_id": new_owner_id,
+                "old_owner_auth_user_id": old_owner_auth_user_id,
+                "new_owner_auth_user_id": new_owner_auth_user_id,
+                "actor_auth_user_id": actor_auth_user_id,
             },
             commit=False,
         )
-
         _db_flush_or_commit(commit)
-        return project
-
     except Exception:
-        if commit:
-            _db_rollback_safely()
+        _db_rollback_safely()
         raise
+
+    if commit:
+        _sync_project_chunk_access_best_effort(
+            project,
+            actor_user_id=actor_id,
+            actor_auth_user_id=actor_auth_user_id,
+            force=True,
+            commit=True,
+        )
+
+    return project
 
 
 # ─────────────────────────────────────────────────────────────
@@ -3537,40 +4094,44 @@ def set_project_member_role(
     overrides: Optional[Dict[str, Any]] = None,
     commit: bool = True,
 ) -> Any:
+    if project is None:
+        raise ValueError("project required")
+    if _project_is_demo(project):
+        raise PermissionDenied(
+            "Demo-Projekte unterstützen keine Teamverwaltung.",
+            permission=PERMISSION_MANAGE,
+            project_id=_project_public_id(project),
+            user_id=None,
+            status_code=403,
+            code="demo_team_not_allowed",
+        )
+
+    actor_id = require_persistent_actor(actor_user_id)
+    actor_auth_user_id = require_actor_auth_user_id(actor_id)
+    target_uid = _safe_int(target_user_id, 0)
+    if not target_uid:
+        raise ValueError("target_user_id required")
+
+    target_user = _app_user_by_local_id(target_uid)
+    target_auth_user_id = _app_user_auth_user_id(target_user)
+    if not target_auth_user_id:
+        raise ValueError("target AppUser requires canonical auth_user_id")
+
+    require_project_permission(project, PERMISSION_MANAGE, actor_id, allow_public_view=False)
+    clean_role = normalize_role(role)
+    if clean_role == ROLE_OWNER:
+        raise ValueError("owner role must be changed through transfer_project_owner")
+
+    before: Dict[str, Any] = {}
+    membership = model_get_project_membership(project.id, target_uid)
+    if membership is not None:
+        before = (
+            permissions_serialize_membership(membership, include_private=True)
+            if callable(permissions_serialize_membership)
+            else model_serialize_membership(membership, include_private=True)
+        )
+
     try:
-        if project is None:
-            raise ValueError("project required")
-
-        if _project_is_demo(project):
-            raise PermissionDenied(
-                "Demo-Projekte unterstützen keine Teamverwaltung.",
-                permission=PERMISSION_MANAGE,
-                project_id=_project_public_id(project),
-                user_id=None,
-                status_code=403,
-                code="demo_team_not_allowed",
-            )
-
-        actor_id = require_persistent_actor(actor_user_id)
-        target_uid = _safe_int(target_user_id, 0)
-
-        if not target_uid:
-            raise ValueError("target_user_id required")
-
-        require_project_permission(project, PERMISSION_MANAGE, actor_id, allow_public_view=False)
-
-        before = {}
-        membership = model_get_project_membership(project.id, target_uid)
-
-        if membership is not None:
-            before = (
-                permissions_serialize_membership(membership, include_private=True)
-                if callable(permissions_serialize_membership)
-                else model_serialize_membership(membership, include_private=True)
-            )
-
-        clean_role = normalize_role(role)
-
         if callable(permissions_grant_project_role):
             membership = permissions_grant_project_role(
                 project,
@@ -3588,20 +4149,20 @@ def set_project_member_role(
                 role=clean_role,
                 permissions=_safe_dict(overrides),
             )
+        elif hasattr(membership, "apply_role"):
+            membership.apply_role(clean_role, permissions=_safe_dict(overrides))
         else:
-            if hasattr(membership, "apply_role"):
-                membership.apply_role(clean_role, permissions=_safe_dict(overrides))
-            else:
-                membership.role = clean_role
+            membership.role = clean_role
 
         db.session.add(membership)
+        _mark_chunk_access_sync_pending(project)
+        db.session.add(project)
 
         after = (
             permissions_serialize_membership(membership, include_private=True)
             if callable(permissions_serialize_membership)
             else model_serialize_membership(membership, include_private=True)
         )
-
         _record_project_event(
             project,
             action="permission_changed",
@@ -3609,17 +4170,29 @@ def set_project_member_role(
             actor_user_id=actor_id,
             before=before,
             after=after,
-            payload={"target_user_id": target_uid, "role": clean_role},
+            payload={
+                "target_user_id": target_uid,
+                "target_auth_user_id": target_auth_user_id,
+                "actor_auth_user_id": actor_auth_user_id,
+                "role": clean_role,
+            },
             commit=False,
         )
-
         _db_flush_or_commit(commit)
-        return membership
-
     except Exception:
-        if commit:
-            _db_rollback_safely()
+        _db_rollback_safely()
         raise
+
+    if commit:
+        _sync_project_chunk_access_best_effort(
+            project,
+            actor_user_id=actor_id,
+            actor_auth_user_id=actor_auth_user_id,
+            force=True,
+            commit=True,
+        )
+
+    return membership
 
 
 def revoke_project_member(
@@ -3630,33 +4203,44 @@ def revoke_project_member(
     hard_delete: bool = False,
     commit: bool = True,
 ) -> bool:
+    if project is None:
+        raise ValueError("project required")
+    if _project_is_demo(project):
+        raise PermissionDenied(
+            "Demo-Projekte unterstützen keine Teamverwaltung.",
+            permission=PERMISSION_MANAGE,
+            project_id=_project_public_id(project),
+            user_id=None,
+            status_code=403,
+            code="demo_team_not_allowed",
+        )
+
+    actor_id = require_persistent_actor(actor_user_id)
+    actor_auth_user_id = require_actor_auth_user_id(actor_id)
+    target_uid = _safe_int(target_user_id, 0)
+    if not target_uid:
+        raise ValueError("target_user_id required")
+
+    if target_uid == _safe_int(getattr(project, "owner_user_id", None), 0):
+        raise ValueError("project owner cannot be revoked; transfer ownership first")
+
+    target_auth_user_id = _app_user_auth_user_id(_app_user_by_local_id(target_uid))
+    if not target_auth_user_id:
+        raise ValueError("target AppUser requires canonical auth_user_id")
+
+    require_project_permission(project, PERMISSION_MANAGE, actor_id, allow_public_view=False)
+
     try:
-        if project is None:
-            raise ValueError("project required")
-
-        if _project_is_demo(project):
-            raise PermissionDenied(
-                "Demo-Projekte unterstützen keine Teamverwaltung.",
-                permission=PERMISSION_MANAGE,
-                project_id=_project_public_id(project),
-                user_id=None,
-                status_code=403,
-                code="demo_team_not_allowed",
-            )
-
-        actor_id = require_persistent_actor(actor_user_id)
-        require_project_permission(project, PERMISSION_MANAGE, actor_id, allow_public_view=False)
-
         if callable(permissions_revoke_project_membership):
             ok = permissions_revoke_project_membership(
                 project,
-                user_id=target_user_id,
+                user_id=target_uid,
                 actor_user_id=actor_id,
                 hard_delete=hard_delete,
                 commit=False,
             )
         else:
-            membership = model_get_project_membership(project.id, target_user_id)
+            membership = model_get_project_membership(project.id, target_uid)
             if membership is None:
                 return False
             membership.status = "revoked"
@@ -3667,25 +4251,36 @@ def revoke_project_member(
             db.session.add(membership)
             ok = True
 
+        _mark_chunk_access_sync_pending(project)
+        db.session.add(project)
         _record_project_event(
             project,
             action="member_removed",
             category="access",
             actor_user_id=actor_id,
             payload={
-                "target_user_id": target_user_id,
+                "target_user_id": target_uid,
+                "target_auth_user_id": target_auth_user_id,
+                "actor_auth_user_id": actor_auth_user_id,
                 "hard_delete": bool(hard_delete),
             },
             commit=False,
         )
-
         _db_flush_or_commit(commit)
-        return bool(ok)
-
     except Exception:
-        if commit:
-            _db_rollback_safely()
+        _db_rollback_safely()
         raise
+
+    if commit and ok:
+        _sync_project_chunk_access_best_effort(
+            project,
+            actor_user_id=actor_id,
+            actor_auth_user_id=actor_auth_user_id,
+            force=True,
+            commit=True,
+        )
+
+    return bool(ok)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -4039,13 +4634,18 @@ def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[i
             raise PermissionDenied(
                 "Der Zugriff ist gesperrt.",
                 code=_safe_str(context.get("blocked_reason"), "auth_blocked", 120),
-                status_code=403,
+                status_code=503
+                if _safe_str(context.get("blocked_reason"), "", 120) in {
+                    "auth_context_unavailable",
+                    "actor_context_unavailable",
+                    "auth_unavailable",
+                }
+                else 403,
                 permission=PERMISSION_EDIT,
             )
 
         if _safe_bool(context.get("demo_mode"), False):
             project = _ensure_or_update_demo_project(data, commit=True)
-
             return ProjectOperationResult(
                 ok=True,
                 project=project,
@@ -4070,34 +4670,74 @@ def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[i
             )
 
         project = create_project(data, user_id=user_id, commit=True)
+        chunk = _project_chunk_refs(project)
+        last_result = getattr(project, "_last_chunk_operation_result", None)
+        last_result_payload = last_result.to_dict() if hasattr(last_result, "to_dict") else {}
+
+        provisioning_status = _safe_str(
+            chunk.get("provisioning_status"),
+            CHUNK_PROVISIONING_PENDING,
+            40,
+        )
+        required = _chunk_provisioning_required()
+        response_ok = True
+        status_code = 201
+        code = "project_created"
+        error = None
+
+        if provisioning_status == CHUNK_PROVISIONING_FALLBACK_READY:
+            code = "project_created_with_flat_fallback"
+        elif provisioning_status in {
+            CHUNK_PROVISIONING_FAILED,
+            CHUNK_PROVISIONING_REPAIR_REQUIRED,
+        }:
+            code = "project_created_chunk_repair_required"
+            if required:
+                response_ok = False
+                status_code = 503
+                error = _safe_str(
+                    _safe_dict(chunk.get("provisioning")).get("errorMessage")
+                    or _safe_dict(last_result_payload).get("error"),
+                    "Das App-Projekt wurde gespeichert, aber das Chunk-Projekt konnte nicht bereitgestellt werden.",
+                    2000,
+                )
+        elif provisioning_status in {
+            CHUNK_PROVISIONING_PENDING,
+            CHUNK_PROVISIONING_PROVISIONING,
+        }:
+            code = "project_created_chunk_pending"
+
+        payload = {
+            "ok": response_ok,
+            "project_persisted": True,
+            "project": serialize_project(
+                project,
+                user_id=user_id,
+                include_permissions=True,
+                include_embed_policy=True,
+                include_service_links=True,
+                include_publication=True,
+            ),
+            "sidebar_item": serialize_project_sidebar_item(project, user_id=user_id),
+            "redirect_url": project_public_url(project),
+            "chunk": chunk,
+        }
+        if last_result_payload:
+            payload["chunk_operation"] = last_result_payload
 
         return ProjectOperationResult(
-            ok=True,
+            ok=response_ok,
             project=project,
-            payload={
-                "ok": True,
-                "project": serialize_project(
-                    project,
-                    user_id=user_id,
-                    include_permissions=True,
-                    include_embed_policy=True,
-                    include_service_links=True,
-                    include_publication=True,
-                ),
-                "sidebar_item": serialize_project_sidebar_item(project, user_id=user_id),
-                "redirect_url": project_public_url(project),
-                "chunk": _project_chunk_refs(project),
-            },
-            status_code=201,
-            code="project_created",
+            payload=payload,
+            status_code=status_code,
+            code=code,
+            error=error,
         )
 
     except PermissionDenied as exc:
         return _permission_denied_result(exc)
-
     except Exception as exc:
         _log_exception("create_project_result failed", exc)
-
         return ProjectOperationResult(
             ok=False,
             payload={"ok": False},
@@ -4223,6 +4863,40 @@ def ensure_project_chunk_link_result(
             ok=False,
             status_code=500,
             code="chunk_link_failed",
+            error=str(exc),
+        )
+
+
+
+def sync_project_chunk_access_result(
+    project_identifier: str,
+    *,
+    user_id: Optional[int] = None,
+    force: bool = True,
+) -> ProjectOperationResult:
+    try:
+        project = resolve_project(project_identifier)
+        if project is None:
+            return ProjectOperationResult(
+                ok=False,
+                status_code=404,
+                code="project_not_found",
+                error="project not found",
+            )
+        return sync_project_chunk_access_for_project(
+            project,
+            user_id=user_id,
+            force=force,
+            commit=True,
+        )
+    except PermissionDenied as exc:
+        return _permission_denied_result(exc)
+    except Exception as exc:
+        _log_exception("sync_project_chunk_access_result failed", exc)
+        return ProjectOperationResult(
+            ok=False,
+            status_code=500,
+            code="chunk_access_sync_failed",
             error=str(exc),
         )
 
@@ -4550,9 +5224,18 @@ def get_project_service_status() -> Dict[str, Any]:
                 "cleanupAvailable": callable(cleanup_expired_demo_projects),
             },
             "chunk": {
-                "clientAvailable": _chunk_client_available(),
+                "clientAvailable": callable(ensure_chunk_project_for_project),
+                "orchestratorAvailable": _chunk_client_available(),
+                "accessSyncServiceAvailable": _chunk_access_sync_available(),
+                "accessSyncEnabled": _chunk_access_sync_enabled(),
                 "provisioningEnabled": _chunk_provisioning_enabled(),
                 "provisioningRequired": _chunk_provisioning_required(),
+                "requestedWorldTemplate": _config_str("VECTOPLAN_APP_DEFAULT_WORLD_TEMPLATE", CHUNK_WORLD_TEMPLATE_EARTH, 40),
+                "fallbackWorldTemplate": _config_str("VECTOPLAN_APP_FALLBACK_WORLD_TEMPLATE", CHUNK_WORLD_TEMPLATE_FLAT, 40),
+                "worldFallbackEnabled": _config_bool("VECTOPLAN_APP_ALLOW_WORLD_FALLBACK", True),
+                "canonicalAuthUserIdRequired": True,
+                "distributedTransaction": False,
+                "appProjectCommittedBeforeChunkCall": True,
                 "internalUrlConfigured": bool(_config_str("VECTOPLAN_CHUNK_INTERNAL_URL", "")),
                 "publicUrlConfigured": bool(_config_str("VECTOPLAN_CHUNK_PUBLIC_URL", "")),
                 "health": chunk_health_payload,
@@ -4615,6 +5298,21 @@ __all__ = [
     "CHUNK_STATUS_PENDING",
     "CHUNK_STATUS_READY",
     "CHUNK_STATUS_ERROR",
+    "CHUNK_PROVISIONING_PENDING",
+    "CHUNK_PROVISIONING_PROVISIONING",
+    "CHUNK_PROVISIONING_READY",
+    "CHUNK_PROVISIONING_FALLBACK_READY",
+    "CHUNK_PROVISIONING_FAILED",
+    "CHUNK_PROVISIONING_REPAIR_REQUIRED",
+    "CHUNK_PROVISIONING_DISABLED",
+    "CHUNK_ACCESS_SYNC_PENDING",
+    "CHUNK_ACCESS_SYNC_SYNCING",
+    "CHUNK_ACCESS_SYNC_READY",
+    "CHUNK_ACCESS_SYNC_FAILED",
+    "CHUNK_ACCESS_SYNC_REPAIR_REQUIRED",
+    "CHUNK_ACCESS_SYNC_DISABLED",
+    "CHUNK_WORLD_TEMPLATE_EARTH",
+    "CHUNK_WORLD_TEMPLATE_FLAT",
     "ProjectOperationResult",
     "ProjectPermissionResult",
     "PermissionDenied",
@@ -4660,9 +5358,12 @@ __all__ = [
     "project_public_url",
     "project_workspace_path",
     "require_persistent_actor",
+    "require_actor_auth_user_id",
     "require_project_permission",
     "resolve_project",
     "retry_project_chunk_link",
+    "sync_project_chunk_access_for_project",
+    "sync_project_chunk_access_result",
     "revoke_project_member",
     "serialize_project",
     "serialize_project_list",

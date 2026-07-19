@@ -165,6 +165,89 @@ def _safe_string(value: Any, default: str = "") -> str:
         return default
 
 
+def _as_choice(
+    value: Any,
+    choices: Iterable[str],
+    default: str,
+    *,
+    lowercase: bool = True,
+) -> str:
+    """Return a normalized value only when it belongs to ``choices``."""
+    try:
+        allowed = {
+            (_safe_string(item, "").strip().lower() if lowercase else _safe_string(item, "").strip())
+            for item in choices
+            if _safe_string(item, "").strip()
+        }
+
+        fallback = _safe_string(default, "").strip()
+        if lowercase:
+            fallback = fallback.lower()
+
+        candidate = _safe_string(value, "").strip()
+        if lowercase:
+            candidate = candidate.lower()
+
+        if candidate in allowed:
+            return candidate
+
+        if fallback in allowed:
+            return fallback
+
+        return sorted(allowed)[0] if allowed else fallback
+
+    except Exception:
+        return _safe_string(default, "").strip().lower() if lowercase else _safe_string(default, "").strip()
+
+
+def _as_world_template(value: Any, default: str = "earth") -> str:
+    """Normalize the supported App -> Chunk world template contract."""
+    try:
+        return _as_choice(value, ("earth", "flat"), default)
+    except Exception:
+        return "earth" if str(default).strip().lower() != "flat" else "flat"
+
+
+def _as_fallback_world_template(value: Any, requested: Any, default: str = "flat") -> str:
+    """Return a supported fallback that never equals the requested template."""
+    try:
+        requested_template = _as_world_template(requested, "earth")
+        fallback = _as_world_template(value, default)
+
+        if fallback == requested_template:
+            return "flat" if requested_template == "earth" else "earth"
+
+        return fallback
+
+    except Exception:
+        return "flat"
+
+
+def _as_code_list(value: Optional[str], default: Iterable[str]) -> List[str]:
+    """Parse stable lowercase error/status codes without accepting arbitrary text."""
+    result: List[str] = []
+
+    try:
+        for item in _as_text_list(value, default):
+            code = re.sub(r"[^a-z0-9_]+", "_", _safe_string(item, "").strip().lower()).strip("_")
+            if code and code not in result:
+                result.append(code)
+    except Exception:
+        result = []
+
+    if result:
+        return result
+
+    try:
+        return [
+            re.sub(r"[^a-z0-9_]+", "_", _safe_string(item, "").strip().lower()).strip("_")
+            for item in default
+            if _safe_string(item, "").strip()
+        ]
+    except Exception:
+        return []
+
+
 def _as_json_list(value: Optional[str]) -> List[Any]:
     """
     Robust list parser.
@@ -434,8 +517,30 @@ _DEFAULT_OPENLAYER_ROUTE = "/map"
 
 _DEFAULT_CHUNK_PUBLIC_URL = "http://localhost:5102"
 _DEFAULT_CHUNK_INTERNAL_URL = "http://vectoplan-chunk:5000"
-_DEFAULT_CHUNK_DEFAULT_TEMPLATE_ID = "flat"
+
+# App-project provisioning policy. This does not change the independent
+# vectoplan-chunk bootstrap/default-project policy. New App projects request
+# Earth first and use Flat only as a controlled fallback.
+_DEFAULT_APP_WORLD_TEMPLATE = "earth"
+_DEFAULT_APP_FALLBACK_WORLD_TEMPLATE = "flat"
+_DEFAULT_APP_EARTH_CRS_ID = "EPSG:4979"
+_DEFAULT_APP_PROJECT_COORDINATE_CRS_ID = "EPSG:4326"
+_DEFAULT_APP_EARTH_HEIGHT = 0.0
+_DEFAULT_CHUNK_DEFAULT_TEMPLATE_ID = _DEFAULT_APP_WORLD_TEMPLATE
+_DEFAULT_CHUNK_FALLBACK_TEMPLATE_ID = _DEFAULT_APP_FALLBACK_WORLD_TEMPLATE
 _DEFAULT_CHUNK_DEFAULT_WORLD_ID = "world_spawn"
+
+_DEFAULT_CHUNK_FALLBACK_ERROR_CODES = (
+    "coordinates_unavailable",
+    "earth_reference_missing",
+    "earth_reference_required",
+    "earth_reference_incomplete",
+    "earth_reference_invalid",
+    "earth_reference_not_available",
+    "invalid_earth_reference",
+    "project_coordinates_unavailable",
+    "unsupported_coordinate_reference",
+)
 
 _DEFAULT_LIBRARY_PUBLIC_URL = "http://localhost:5101"
 _DEFAULT_LIBRARY_INTERNAL_URL = "http://vectoplan-library:5000"
@@ -1226,25 +1331,307 @@ class Config:
         "vectoplan-app/chunk-client",
     )
 
-    # Optional token for future internal auth. Empty by default.
-    VECTOPLAN_CHUNK_INTERNAL_TOKEN = _env_str_first(
+    # Service identity for App -> Chunk calls. The raw credential must never be
+    # serialized into browser responses, logs or status payloads.
+    VECTOPLAN_APP_CHUNK_SERVICE_ID = _env_str_first(
         (
+            "VECTOPLAN_APP_CHUNK_SERVICE_ID",
+            "VECTOPLAN_CHUNK_SERVICE_ID",
+            "CHUNK_SERVICE_ID",
+        ),
+        "vectoplan-app",
+    )
+
+    VECTOPLAN_APP_CHUNK_SERVICE_API_KEY = _env_str_first(
+        (
+            "VECTOPLAN_APP_CHUNK_SERVICE_API_KEY",
+            "VECTOPLAN_CHUNK_SERVICE_API_KEY",
             "VECTOPLAN_CHUNK_INTERNAL_TOKEN",
             "VECTOPLAN_CHUNK_API_TOKEN",
+            "CHUNK_SERVICE_API_KEY",
             "CHUNK_INTERNAL_TOKEN",
             "CHUNK_API_TOKEN",
         ),
         "",
     )
 
-    VECTOPLAN_CHUNK_PROVISION_DEFAULT_TEMPLATE_ID = _env_str_first(
-        (
-            "VECTOPLAN_CHUNK_PROVISION_DEFAULT_TEMPLATE_ID",
-            "VECTOPLAN_CHUNK_PROJECT_PROVISIONING_DEFAULT_TEMPLATE_ID",
-            "CHUNK_PROVISION_DEFAULT_TEMPLATE_ID",
+    # Backward-compatible aliases used by the existing chunk client.
+    VECTOPLAN_CHUNK_SERVICE_ID = VECTOPLAN_APP_CHUNK_SERVICE_ID
+    VECTOPLAN_CHUNK_SERVICE_API_KEY = VECTOPLAN_APP_CHUNK_SERVICE_API_KEY
+    VECTOPLAN_CHUNK_INTERNAL_TOKEN = VECTOPLAN_APP_CHUNK_SERVICE_API_KEY
+    VECTOPLAN_CHUNK_API_TOKEN = VECTOPLAN_APP_CHUNK_SERVICE_API_KEY
+
+    # ───────── App project world / georeference policy ─────────
+    VECTOPLAN_APP_DEFAULT_WORLD_TEMPLATE = _as_world_template(
+        _env_first(
+            (
+                "VECTOPLAN_APP_DEFAULT_WORLD_TEMPLATE",
+                "VECTOPLAN_CHUNK_PROVISION_DEFAULT_TEMPLATE_ID",
+                "VECTOPLAN_CHUNK_PROJECT_PROVISIONING_DEFAULT_TEMPLATE_ID",
+                "CHUNK_PROVISION_DEFAULT_TEMPLATE_ID",
+            ),
+            _DEFAULT_APP_WORLD_TEMPLATE,
         ),
-        _DEFAULT_CHUNK_DEFAULT_TEMPLATE_ID,
+        _DEFAULT_APP_WORLD_TEMPLATE,
     )
+
+    VECTOPLAN_APP_FALLBACK_WORLD_TEMPLATE = _as_fallback_world_template(
+        _env_first(
+            (
+                "VECTOPLAN_APP_FALLBACK_WORLD_TEMPLATE",
+                "VECTOPLAN_CHUNK_PROVISION_FALLBACK_TEMPLATE_ID",
+                "CHUNK_PROVISION_FALLBACK_TEMPLATE_ID",
+            ),
+            _DEFAULT_APP_FALLBACK_WORLD_TEMPLATE,
+        ),
+        VECTOPLAN_APP_DEFAULT_WORLD_TEMPLATE,
+        _DEFAULT_APP_FALLBACK_WORLD_TEMPLATE,
+    )
+
+    VECTOPLAN_APP_ALLOW_WORLD_FALLBACK = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_APP_ALLOW_WORLD_FALLBACK",
+                "VECTOPLAN_CHUNK_ALLOW_WORLD_FALLBACK",
+                "CHUNK_ALLOW_WORLD_FALLBACK",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    # Client-side fallback is limited to the explicit business error-code list.
+    # Timeouts, DNS failures, HTTP 5xx and database failures are never converted
+    # silently into Flat projects.
+    VECTOPLAN_APP_CLIENT_SIDE_WORLD_FALLBACK = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_APP_CLIENT_SIDE_WORLD_FALLBACK",
+                "VECTOPLAN_CHUNK_CLIENT_SIDE_WORLD_FALLBACK",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    VECTOPLAN_APP_ALLOW_WORLD_TEMPLATE_CHANGE = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_APP_ALLOW_WORLD_TEMPLATE_CHANGE",
+                "VECTOPLAN_CHUNK_ALLOW_WORLD_TEMPLATE_CHANGE",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    VECTOPLAN_APP_EARTH_CRS_ID = _env_str_first(
+        (
+            "VECTOPLAN_APP_EARTH_CRS_ID",
+            "VECTOPLAN_CHUNK_EARTH_CRS_ID",
+            "EARTH_CRS_ID",
+        ),
+        _DEFAULT_APP_EARTH_CRS_ID,
+    ).strip().upper() or _DEFAULT_APP_EARTH_CRS_ID
+
+    VECTOPLAN_APP_PROJECT_COORDINATE_CRS_ID = _env_str_first(
+        (
+            "VECTOPLAN_APP_PROJECT_COORDINATE_CRS_ID",
+            "VECTOPLAN_APP_DEFAULT_PROJECT_CRS_ID",
+            "PROJECT_COORDINATE_CRS_ID",
+        ),
+        _DEFAULT_APP_PROJECT_COORDINATE_CRS_ID,
+    ).strip().upper() or _DEFAULT_APP_PROJECT_COORDINATE_CRS_ID
+
+    VECTOPLAN_APP_DEFAULT_EARTH_HEIGHT = _clamp_float(
+        _as_float(
+            _env_first(
+                (
+                    "VECTOPLAN_APP_DEFAULT_EARTH_HEIGHT",
+                    "VECTOPLAN_CHUNK_DEFAULT_EARTH_HEIGHT",
+                    "DEFAULT_EARTH_HEIGHT",
+                ),
+                None,
+            ),
+            _DEFAULT_APP_EARTH_HEIGHT,
+        ),
+        -100_000.0,
+        1_000_000.0,
+    )
+
+    VECTOPLAN_APP_CHUNK_FALLBACK_ERROR_CODES = _as_code_list(
+        _env_first(
+            (
+                "VECTOPLAN_APP_CHUNK_FALLBACK_ERROR_CODES",
+                "VECTOPLAN_CHUNK_FALLBACK_ERROR_CODES",
+                "CHUNK_FALLBACK_ERROR_CODES",
+            ),
+            None,
+        ),
+        _DEFAULT_CHUNK_FALLBACK_ERROR_CODES,
+    )
+
+    VECTOPLAN_APP_CHUNK_PROVISIONING_CACHE_SECONDS = _clamp_float(
+        _as_float(
+            _env_first(
+                (
+                    "VECTOPLAN_APP_CHUNK_PROVISIONING_CACHE_SECONDS",
+                    "VECTOPLAN_CHUNK_PROVISIONING_CACHE_SECONDS",
+                ),
+                None,
+            ),
+            10.0,
+        ),
+        0.0,
+        300.0,
+    )
+
+    VECTOPLAN_APP_CHUNK_PROVISIONING_CACHE_MAX_ENTRIES = _clamp_int(
+        _as_int(
+            _env_first(
+                (
+                    "VECTOPLAN_APP_CHUNK_PROVISIONING_CACHE_MAX_ENTRIES",
+                    "VECTOPLAN_CHUNK_PROVISIONING_CACHE_MAX_ENTRIES",
+                ),
+                None,
+            ),
+            512,
+        ),
+        16,
+        100_000,
+    )
+
+    VECTOPLAN_APP_PERSIST_CHUNK_FAILURE_STATE = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_APP_PERSIST_CHUNK_FAILURE_STATE",
+                "VECTOPLAN_CHUNK_PERSIST_FAILURE_STATE",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    # Georeference resolution is local and deterministic by default. External
+    # geocoding remains disabled until a concrete provider is integrated.
+    VECTOPLAN_APP_GEOREFERENCE_GEOCODER_ENABLED = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_APP_GEOREFERENCE_GEOCODER_ENABLED",
+                "VECTOPLAN_APP_GEOCODER_ENABLED",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    VECTOPLAN_APP_GEOREFERENCE_DISCOVER_GEOCODER = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_APP_GEOREFERENCE_DISCOVER_GEOCODER",
+                "VECTOPLAN_APP_DISCOVER_GEOCODER",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    VECTOPLAN_APP_GEOREFERENCE_ALLOW_COORDINATE_SWAP = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_APP_GEOREFERENCE_ALLOW_COORDINATE_SWAP",
+                "VECTOPLAN_APP_ALLOW_COORDINATE_SWAP",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    VECTOPLAN_APP_GEOREFERENCE_ALLOW_DEFAULT_SOURCE_CRS = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_APP_GEOREFERENCE_ALLOW_DEFAULT_SOURCE_CRS",
+                "VECTOPLAN_APP_ALLOW_DEFAULT_SOURCE_CRS",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    VECTOPLAN_APP_PERSIST_DERIVED_GEOREFERENCE = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_APP_PERSIST_DERIVED_GEOREFERENCE",
+                "VECTOPLAN_APP_GEOREFERENCE_PERSIST_RESULT",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    VECTOPLAN_APP_GEOREFERENCE_CACHE_SECONDS = _clamp_float(
+        _as_float(_env("VECTOPLAN_APP_GEOREFERENCE_CACHE_SECONDS"), 300.0),
+        0.0,
+        3600.0,
+    )
+
+    VECTOPLAN_APP_GEOREFERENCE_NEGATIVE_CACHE_SECONDS = _clamp_float(
+        _as_float(_env("VECTOPLAN_APP_GEOREFERENCE_NEGATIVE_CACHE_SECONDS"), 30.0),
+        0.0,
+        300.0,
+    )
+
+    VECTOPLAN_APP_GEOREFERENCE_CACHE_MAX_ENTRIES = _clamp_int(
+        _as_int(_env("VECTOPLAN_APP_GEOREFERENCE_CACHE_MAX_ENTRIES"), 512),
+        16,
+        100_000,
+    )
+
+    VECTOPLAN_APP_GEOREFERENCE_GEOCODER_TIMEOUT_SECONDS = _clamp_float(
+        _as_float(_env("VECTOPLAN_APP_GEOREFERENCE_GEOCODER_TIMEOUT_SECONDS"), 4.0),
+        0.1,
+        60.0,
+    )
+
+    VECTOPLAN_APP_GEOREFERENCE_COORDINATE_PRECISION = _clamp_int(
+        _as_int(_env("VECTOPLAN_APP_GEOREFERENCE_COORDINATE_PRECISION"), 12),
+        6,
+        15,
+    )
+
+    VECTOPLAN_APP_GEOREFERENCE_HEIGHT_PRECISION = _clamp_int(
+        _as_int(_env("VECTOPLAN_APP_GEOREFERENCE_HEIGHT_PRECISION"), 6),
+        0,
+        12,
+    )
+
+    # Existing/legacy chunk-client aliases now follow the App provisioning policy.
+    VECTOPLAN_CHUNK_PROVISION_DEFAULT_TEMPLATE_ID = _as_world_template(
+        _env_first(
+            (
+                "VECTOPLAN_CHUNK_PROVISION_DEFAULT_TEMPLATE_ID",
+                "VECTOPLAN_CHUNK_PROJECT_PROVISIONING_DEFAULT_TEMPLATE_ID",
+                "CHUNK_PROVISION_DEFAULT_TEMPLATE_ID",
+            ),
+            VECTOPLAN_APP_DEFAULT_WORLD_TEMPLATE,
+        ),
+        VECTOPLAN_APP_DEFAULT_WORLD_TEMPLATE,
+    )
+
+    VECTOPLAN_CHUNK_PROVISION_FALLBACK_TEMPLATE_ID = _as_fallback_world_template(
+        _env_first(
+            (
+                "VECTOPLAN_CHUNK_PROVISION_FALLBACK_TEMPLATE_ID",
+                "CHUNK_PROVISION_FALLBACK_TEMPLATE_ID",
+            ),
+            VECTOPLAN_APP_FALLBACK_WORLD_TEMPLATE,
+        ),
+        VECTOPLAN_CHUNK_PROVISION_DEFAULT_TEMPLATE_ID,
+        VECTOPLAN_APP_FALLBACK_WORLD_TEMPLATE,
+    )
+
+    VECTOPLAN_CHUNK_PROJECT_PROVISIONING_DEFAULT_TEMPLATE_ID = VECTOPLAN_CHUNK_PROVISION_DEFAULT_TEMPLATE_ID
+    VECTOPLAN_CHUNK_PROJECT_PROVISIONING_FALLBACK_TEMPLATE_ID = VECTOPLAN_CHUNK_PROVISION_FALLBACK_TEMPLATE_ID
 
     VECTOPLAN_CHUNK_PROVISION_DEFAULT_WORLD_ID = _env_str_first(
         (
@@ -1253,6 +1640,94 @@ class Config:
             "CHUNK_PROVISION_DEFAULT_WORLD_ID",
         ),
         _DEFAULT_CHUNK_DEFAULT_WORLD_ID,
+    )
+
+    VECTOPLAN_APP_CHUNK_PROVISIONING_REQUIRED = VECTOPLAN_CHUNK_PROVISION_REQUIRED
+    VECTOPLAN_APP_CHUNK_PROVISION_ON_PROJECT_CREATE = VECTOPLAN_CHUNK_PROVISION_ON_PROJECT_CREATE
+
+    # ───────── App -> Chunk project-access synchronization ─────────
+    VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ENABLED = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ENABLED",
+                "VECTOPLAN_CHUNK_ACCESS_SYNC_ENABLED",
+                "CHUNK_ACCESS_SYNC_ENABLED",
+            ),
+            None,
+        ),
+        True,
+    )
+
+    VECTOPLAN_APP_CHUNK_ACCESS_SYNC_REQUIRED = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_APP_CHUNK_ACCESS_SYNC_REQUIRED",
+                "VECTOPLAN_CHUNK_ACCESS_SYNC_REQUIRED",
+            ),
+            None,
+        ),
+        False,
+    )
+
+    VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ON_PROJECT_CREATE = _as_bool(
+        _env("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ON_PROJECT_CREATE"),
+        True,
+    )
+    VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ON_MEMBERSHIP_CHANGE = _as_bool(
+        _env("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ON_MEMBERSHIP_CHANGE"),
+        True,
+    )
+    VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ON_INVITATION_ACCEPT = _as_bool(
+        _env("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ON_INVITATION_ACCEPT"),
+        True,
+    )
+    VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ON_OWNER_TRANSFER = _as_bool(
+        _env("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ON_OWNER_TRANSFER"),
+        True,
+    )
+
+    VECTOPLAN_APP_CHUNK_ACCESS_SYNC_TIMEOUT_SECONDS = _clamp_float(
+        _as_float(
+            _env("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_TIMEOUT_SECONDS"),
+            VECTOPLAN_CHUNK_PROVISION_TIMEOUT_SECONDS,
+        ),
+        0.1,
+        120.0,
+    )
+
+    VECTOPLAN_APP_CHUNK_ACCESS_SYNC_RETRIES = _clamp_int(
+        _as_int(
+            _env("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_RETRIES"),
+            VECTOPLAN_CHUNK_PROVISION_RETRIES,
+        ),
+        0,
+        10,
+    )
+
+    VECTOPLAN_APP_CHUNK_ACCESS_SYNC_RETRY_SECONDS = _clamp_float(
+        _as_float(
+            _env("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_RETRY_SECONDS"),
+            VECTOPLAN_CHUNK_PROVISION_RETRY_SECONDS,
+        ),
+        0.0,
+        60.0,
+    )
+
+    VECTOPLAN_APP_CHUNK_ACCESS_SYNC_CACHE_SECONDS = _clamp_float(
+        _as_float(_env("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_CACHE_SECONDS"), 5.0),
+        0.0,
+        300.0,
+    )
+
+    VECTOPLAN_APP_CHUNK_ACCESS_ROLE_OWNER = "owner"
+    VECTOPLAN_APP_CHUNK_ACCESS_ROLE_ADMIN = "admin"
+    VECTOPLAN_APP_CHUNK_ACCESS_ROLE_EDITOR = "editor"
+    VECTOPLAN_APP_CHUNK_ACCESS_ROLE_VIEWER = "viewer"
+    VECTOPLAN_APP_CHUNK_ACCESS_ALLOWED_ROLES = (
+        VECTOPLAN_APP_CHUNK_ACCESS_ROLE_OWNER,
+        VECTOPLAN_APP_CHUNK_ACCESS_ROLE_ADMIN,
+        VECTOPLAN_APP_CHUNK_ACCESS_ROLE_EDITOR,
+        VECTOPLAN_APP_CHUNK_ACCESS_ROLE_VIEWER,
     )
 
     VECTOPLAN_CHUNK_SERVICE_LINK_AUTO_CREATE = _as_bool(
@@ -1278,7 +1753,11 @@ class Config:
     )
 
     VECTOPLAN_CHUNK_PROVISION_STATUS_PENDING = "pending"
+    VECTOPLAN_CHUNK_PROVISION_STATUS_PROVISIONING = "provisioning"
     VECTOPLAN_CHUNK_PROVISION_STATUS_READY = "ready"
+    VECTOPLAN_CHUNK_PROVISION_STATUS_FALLBACK_READY = "fallback_ready"
+    VECTOPLAN_CHUNK_PROVISION_STATUS_FAILED = "failed"
+    VECTOPLAN_CHUNK_PROVISION_STATUS_REPAIR_REQUIRED = "repair_required"
     VECTOPLAN_CHUNK_PROVISION_STATUS_ERROR = "error"
     VECTOPLAN_CHUNK_PROVISION_STATUS_DISABLED = "disabled"
 
@@ -1286,6 +1765,11 @@ class Config:
     VECTOPLAN_CHUNK_PROVISION_API_PATH_ENSURE = "/projects/ensure"
     VECTOPLAN_CHUNK_PROVISION_API_PATH_PREVIEW_BY_APP = "/projects/preview/by-app/{app_project_public_id}"
     VECTOPLAN_CHUNK_STATUS_API_PATH = "/projects/_status"
+
+    VECTOPLAN_CHUNK_ACCESS_API_PATH = "/projects/{chunk_project_id}/access"
+    VECTOPLAN_CHUNK_ACCESS_INITIALIZE_API_PATH = "/projects/{chunk_project_id}/access/initialize"
+    VECTOPLAN_CHUNK_ASSIGNMENTS_API_PATH = "/projects/{chunk_project_id}/assignments"
+    VECTOPLAN_CHUNK_TRANSFER_OWNER_API_PATH = "/projects/{chunk_project_id}/access/transfer-owner"
 
     VECTOPLAN_LIBRARY_PUBLIC_URL = _norm_url(
         _env_str_first(
@@ -1598,7 +2082,153 @@ class Config:
     SUPERSET_BASE_PATH = _norm_path(_env_str("SUPERSET_BASE_PATH", "/"), "/")
 
 
+def get_project_chunk_config_status(config: Any = None) -> Dict[str, Any]:
+    """Return a non-sensitive readiness snapshot for App -> Chunk integration."""
+    try:
+        cfg = config or Config
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        requested = _as_world_template(
+            getattr(cfg, "VECTOPLAN_APP_DEFAULT_WORLD_TEMPLATE", "earth"),
+            "earth",
+        )
+        fallback = _as_fallback_world_template(
+            getattr(cfg, "VECTOPLAN_APP_FALLBACK_WORLD_TEMPLATE", "flat"),
+            requested,
+            "flat",
+        )
+        internal_url = _norm_url(
+            _safe_string(getattr(cfg, "VECTOPLAN_CHUNK_INTERNAL_URL", ""), ""),
+            "",
+        )
+        public_url = _norm_url(
+            _safe_string(getattr(cfg, "VECTOPLAN_CHUNK_PUBLIC_URL", ""), ""),
+            "",
+        )
+        service_id = _safe_string(
+            getattr(cfg, "VECTOPLAN_APP_CHUNK_SERVICE_ID", "vectoplan-app"),
+            "vectoplan-app",
+        ).strip()
+        service_key = _safe_string(
+            getattr(cfg, "VECTOPLAN_APP_CHUNK_SERVICE_API_KEY", ""),
+            "",
+        )
+
+        if requested not in {"earth", "flat"}:
+            errors.append("default_world_template_invalid")
+        if fallback not in {"earth", "flat"}:
+            errors.append("fallback_world_template_invalid")
+        if fallback == requested:
+            errors.append("fallback_world_template_matches_requested")
+        if requested == "earth" and fallback != "flat":
+            warnings.append("earth_default_without_flat_fallback")
+        if not internal_url:
+            errors.append("chunk_internal_url_missing")
+        if not service_id:
+            errors.append("chunk_service_id_missing")
+        if not service_key:
+            warnings.append("chunk_service_api_key_not_configured")
+        if bool(getattr(cfg, "VECTOPLAN_APP_GEOREFERENCE_GEOCODER_ENABLED", False)) and not bool(
+            getattr(cfg, "VECTOPLAN_APP_GEOREFERENCE_DISCOVER_GEOCODER", False)
+        ):
+            warnings.append("geocoder_enabled_without_discovery")
+
+        return {
+            "ok": not errors,
+            "ready": not errors,
+            "errors": errors,
+            "warnings": warnings,
+            "projectProvisioning": {
+                "enabled": bool(getattr(cfg, "VECTOPLAN_CHUNK_PROVISION_ON_PROJECT_CREATE", True)),
+                "required": bool(getattr(cfg, "VECTOPLAN_CHUNK_PROVISION_REQUIRED", False)),
+                "requestedWorldTemplate": requested,
+                "fallbackWorldTemplate": fallback,
+                "allowWorldFallback": bool(getattr(cfg, "VECTOPLAN_APP_ALLOW_WORLD_FALLBACK", True)),
+                "allowClientSideFallback": bool(
+                    getattr(cfg, "VECTOPLAN_APP_CLIENT_SIDE_WORLD_FALLBACK", True)
+                ),
+                "allowExistingTemplateChange": bool(
+                    getattr(cfg, "VECTOPLAN_APP_ALLOW_WORLD_TEMPLATE_CHANGE", False)
+                ),
+                "persistFailureState": bool(
+                    getattr(cfg, "VECTOPLAN_APP_PERSIST_CHUNK_FAILURE_STATE", True)
+                ),
+                "defaultWorldId": _safe_string(
+                    getattr(cfg, "VECTOPLAN_CHUNK_PROVISION_DEFAULT_WORLD_ID", "world_spawn"),
+                    "world_spawn",
+                ),
+                "cacheSeconds": float(
+                    getattr(cfg, "VECTOPLAN_APP_CHUNK_PROVISIONING_CACHE_SECONDS", 10.0)
+                ),
+                "cacheMaxEntries": int(
+                    getattr(cfg, "VECTOPLAN_APP_CHUNK_PROVISIONING_CACHE_MAX_ENTRIES", 512)
+                ),
+                "fallbackErrorCodes": list(
+                    getattr(cfg, "VECTOPLAN_APP_CHUNK_FALLBACK_ERROR_CODES", ()) or ()
+                ),
+            },
+            "georeference": {
+                "earthCrsId": _safe_string(
+                    getattr(cfg, "VECTOPLAN_APP_EARTH_CRS_ID", "EPSG:4979"),
+                    "EPSG:4979",
+                ),
+                "projectCoordinateCrsId": _safe_string(
+                    getattr(cfg, "VECTOPLAN_APP_PROJECT_COORDINATE_CRS_ID", "EPSG:4326"),
+                    "EPSG:4326",
+                ),
+                "defaultEarthHeight": float(
+                    getattr(cfg, "VECTOPLAN_APP_DEFAULT_EARTH_HEIGHT", 0.0)
+                ),
+                "geocoderEnabled": bool(
+                    getattr(cfg, "VECTOPLAN_APP_GEOREFERENCE_GEOCODER_ENABLED", False)
+                ),
+                "persistDerivedReference": bool(
+                    getattr(cfg, "VECTOPLAN_APP_PERSIST_DERIVED_GEOREFERENCE", False)
+                ),
+            },
+            "accessSync": {
+                "enabled": bool(
+                    getattr(cfg, "VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ENABLED", True)
+                ),
+                "required": bool(
+                    getattr(cfg, "VECTOPLAN_APP_CHUNK_ACCESS_SYNC_REQUIRED", False)
+                ),
+                "roles": list(
+                    getattr(
+                        cfg,
+                        "VECTOPLAN_APP_CHUNK_ACCESS_ALLOWED_ROLES",
+                        ("owner", "admin", "editor", "viewer"),
+                    )
+                ),
+            },
+            "transport": {
+                "internalUrl": internal_url,
+                "publicUrl": public_url,
+                "serviceId": service_id,
+                "serviceApiKeyConfigured": bool(service_key),
+                "timeoutSeconds": float(
+                    getattr(cfg, "VECTOPLAN_CHUNK_PROVISION_TIMEOUT_SECONDS", 10.0)
+                ),
+                "retries": int(getattr(cfg, "VECTOPLAN_CHUNK_PROVISION_RETRIES", 2)),
+            },
+        }
+
+    except Exception as exc:
+        return {
+            "ok": False,
+            "ready": False,
+            "errors": ["project_chunk_config_status_failed"],
+            "warnings": [],
+            "error": {
+                "type": exc.__class__.__name__,
+                "message": _safe_string(exc, "Configuration status failed."),
+            },
+        }
+
+
 __all__ = [
     "Config",
     "refresh_env_cache",
+    "get_project_chunk_config_status",
 ]

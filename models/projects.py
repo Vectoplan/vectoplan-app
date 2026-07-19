@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional
 
+from sqlalchemy.orm import validates
+
 from .base import (
     SerializationMixin,
     SoftDeleteMixin,
@@ -47,6 +49,24 @@ CHUNK_STATUS_PENDING = "pending"
 CHUNK_STATUS_READY = "ready"
 CHUNK_STATUS_ERROR = "error"
 
+CHUNK_PROVISIONING_PENDING = "pending"
+CHUNK_PROVISIONING_PROVISIONING = "provisioning"
+CHUNK_PROVISIONING_READY = "ready"
+CHUNK_PROVISIONING_FALLBACK_READY = "fallback_ready"
+CHUNK_PROVISIONING_FAILED = "failed"
+CHUNK_PROVISIONING_REPAIR_REQUIRED = "repair_required"
+CHUNK_PROVISIONING_DISABLED = "disabled"
+
+CHUNK_WORLD_TEMPLATE_EARTH = "earth"
+CHUNK_WORLD_TEMPLATE_FLAT = "flat"
+
+CHUNK_ACCESS_SYNC_PENDING = "pending"
+CHUNK_ACCESS_SYNC_SYNCING = "syncing"
+CHUNK_ACCESS_SYNC_READY = "ready"
+CHUNK_ACCESS_SYNC_FAILED = "failed"
+CHUNK_ACCESS_SYNC_REPAIR_REQUIRED = "repair_required"
+CHUNK_ACCESS_SYNC_DISABLED = "disabled"
+
 VALID_PROJECT_SCOPES = frozenset(
     {
         PROJECT_SCOPE_PERSONAL,
@@ -69,6 +89,36 @@ VALID_CHUNK_STATUSES = frozenset(
         CHUNK_STATUS_PENDING,
         CHUNK_STATUS_READY,
         CHUNK_STATUS_ERROR,
+    }
+)
+
+VALID_CHUNK_PROVISIONING_STATUSES = frozenset(
+    {
+        CHUNK_PROVISIONING_PENDING,
+        CHUNK_PROVISIONING_PROVISIONING,
+        CHUNK_PROVISIONING_READY,
+        CHUNK_PROVISIONING_FALLBACK_READY,
+        CHUNK_PROVISIONING_FAILED,
+        CHUNK_PROVISIONING_REPAIR_REQUIRED,
+        CHUNK_PROVISIONING_DISABLED,
+    }
+)
+
+VALID_CHUNK_WORLD_TEMPLATES = frozenset(
+    {
+        CHUNK_WORLD_TEMPLATE_EARTH,
+        CHUNK_WORLD_TEMPLATE_FLAT,
+    }
+)
+
+VALID_CHUNK_ACCESS_SYNC_STATUSES = frozenset(
+    {
+        CHUNK_ACCESS_SYNC_PENDING,
+        CHUNK_ACCESS_SYNC_SYNCING,
+        CHUNK_ACCESS_SYNC_READY,
+        CHUNK_ACCESS_SYNC_FAILED,
+        CHUNK_ACCESS_SYNC_REPAIR_REQUIRED,
+        CHUNK_ACCESS_SYNC_DISABLED,
     }
 )
 
@@ -138,6 +188,12 @@ def _core_model_if_registered(model_name: str, table_name: str) -> Any:
                     "chunk_world_id",
                     "chunk_status",
                     "chunk_ready",
+                    "chunk_provisioning_status",
+                    "chunk_world_template_requested",
+                    "chunk_world_template_fallback",
+                    "chunk_world_template_effective",
+                    "earth_reference_fingerprint",
+                    "chunk_access_sync_status",
                 ],
             ):
                 return model
@@ -329,6 +385,138 @@ def normalize_chunk_status(
     except Exception:
         return CHUNK_STATUS_READY if has_refs else default
 
+
+
+def normalize_chunk_world_template(
+    value: Any,
+    default: Optional[str] = CHUNK_WORLD_TEMPLATE_EARTH,
+    *,
+    allow_none: bool = False,
+) -> Optional[str]:
+    try:
+        text = safe_str(value, "", 80).strip().lower().replace("-", "_").replace(" ", "_")
+
+        aliases = {
+            "": None if allow_none else default,
+            "earth": CHUNK_WORLD_TEMPLATE_EARTH,
+            "global": CHUNK_WORLD_TEMPLATE_EARTH,
+            "globe": CHUNK_WORLD_TEMPLATE_EARTH,
+            "geographic": CHUNK_WORLD_TEMPLATE_EARTH,
+            "wgs84": CHUNK_WORLD_TEMPLATE_EARTH,
+            "flat": CHUNK_WORLD_TEMPLATE_FLAT,
+            "local": CHUNK_WORLD_TEMPLATE_FLAT,
+            "planar": CHUNK_WORLD_TEMPLATE_FLAT,
+            "default": CHUNK_WORLD_TEMPLATE_FLAT,
+        }
+
+        normalized = aliases.get(text, text or (None if allow_none else default))
+
+        if normalized is None and allow_none:
+            return None
+
+        if normalized not in VALID_CHUNK_WORLD_TEMPLATES:
+            return None if allow_none else (default or CHUNK_WORLD_TEMPLATE_EARTH)
+
+        return normalized
+
+    except Exception:
+        return None if allow_none else (default or CHUNK_WORLD_TEMPLATE_EARTH)
+
+
+def normalize_chunk_provisioning_status(
+    value: Any,
+    default: str = CHUNK_PROVISIONING_PENDING,
+    *,
+    has_refs: bool = False,
+    requested_template: Any = None,
+    effective_template: Any = None,
+) -> str:
+    try:
+        text = safe_str(value, "", 80).strip().lower().replace("-", "_").replace(" ", "_")
+
+        requested = normalize_chunk_world_template(requested_template, allow_none=True)
+        effective = normalize_chunk_world_template(effective_template, allow_none=True)
+
+        inferred_ready = (
+            CHUNK_PROVISIONING_FALLBACK_READY
+            if has_refs and requested and effective and requested != effective
+            else CHUNK_PROVISIONING_READY
+        )
+
+        aliases = {
+            "": inferred_ready if has_refs else default,
+            "pending": CHUNK_PROVISIONING_PENDING,
+            "waiting": CHUNK_PROVISIONING_PENDING,
+            "queued": CHUNK_PROVISIONING_PENDING,
+            "provisioning": CHUNK_PROVISIONING_PROVISIONING,
+            "running": CHUNK_PROVISIONING_PROVISIONING,
+            "in_progress": CHUNK_PROVISIONING_PROVISIONING,
+            "ready": inferred_ready if has_refs else CHUNK_PROVISIONING_READY,
+            "ok": inferred_ready if has_refs else CHUNK_PROVISIONING_READY,
+            "provisioned": inferred_ready if has_refs else CHUNK_PROVISIONING_READY,
+            "fallback": CHUNK_PROVISIONING_FALLBACK_READY,
+            "fallback_ready": CHUNK_PROVISIONING_FALLBACK_READY,
+            "failed": CHUNK_PROVISIONING_FAILED,
+            "failure": CHUNK_PROVISIONING_FAILED,
+            "error": CHUNK_PROVISIONING_FAILED,
+            "repair": CHUNK_PROVISIONING_REPAIR_REQUIRED,
+            "repair_required": CHUNK_PROVISIONING_REPAIR_REQUIRED,
+            "inconsistent": CHUNK_PROVISIONING_REPAIR_REQUIRED,
+            "disabled": CHUNK_PROVISIONING_DISABLED,
+            "off": CHUNK_PROVISIONING_DISABLED,
+        }
+
+        normalized = aliases.get(text, text or default)
+
+        if normalized not in VALID_CHUNK_PROVISIONING_STATUSES:
+            return inferred_ready if has_refs else default
+
+        if normalized == CHUNK_PROVISIONING_READY and has_refs and requested and effective and requested != effective:
+            return CHUNK_PROVISIONING_FALLBACK_READY
+
+        return normalized
+
+    except Exception:
+        return CHUNK_PROVISIONING_READY if has_refs else default
+
+
+def normalize_chunk_access_sync_status(
+    value: Any,
+    default: str = CHUNK_ACCESS_SYNC_PENDING,
+) -> str:
+    try:
+        text = safe_str(value, "", 80).strip().lower().replace("-", "_").replace(" ", "_")
+
+        aliases = {
+            "": default,
+            "pending": CHUNK_ACCESS_SYNC_PENDING,
+            "waiting": CHUNK_ACCESS_SYNC_PENDING,
+            "queued": CHUNK_ACCESS_SYNC_PENDING,
+            "syncing": CHUNK_ACCESS_SYNC_SYNCING,
+            "running": CHUNK_ACCESS_SYNC_SYNCING,
+            "in_progress": CHUNK_ACCESS_SYNC_SYNCING,
+            "ready": CHUNK_ACCESS_SYNC_READY,
+            "ok": CHUNK_ACCESS_SYNC_READY,
+            "synced": CHUNK_ACCESS_SYNC_READY,
+            "failed": CHUNK_ACCESS_SYNC_FAILED,
+            "failure": CHUNK_ACCESS_SYNC_FAILED,
+            "error": CHUNK_ACCESS_SYNC_FAILED,
+            "repair": CHUNK_ACCESS_SYNC_REPAIR_REQUIRED,
+            "repair_required": CHUNK_ACCESS_SYNC_REPAIR_REQUIRED,
+            "inconsistent": CHUNK_ACCESS_SYNC_REPAIR_REQUIRED,
+            "disabled": CHUNK_ACCESS_SYNC_DISABLED,
+            "off": CHUNK_ACCESS_SYNC_DISABLED,
+        }
+
+        normalized = aliases.get(text, text or default)
+
+        if normalized not in VALID_CHUNK_ACCESS_SYNC_STATUSES:
+            return default
+
+        return normalized
+
+    except Exception:
+        return default
 
 def _clean_ref_id(value: Any, max_len: int = 160) -> Optional[str]:
     try:
@@ -797,6 +985,52 @@ def _define_project_model(*, extend_existing: bool = False):
         chunk_last_error = db.Column(json_type(), nullable=True)
         chunk_route_hints = db.Column(json_type(), nullable=False, default=dict)
 
+        # App-side orchestration state for the idempotent App -> Chunk provisioning flow.
+        # The default requested template is Earth; Flat is the controlled fallback.
+        chunk_provisioning_status = db.Column(
+            db.String(40),
+            nullable=False,
+            default=CHUNK_PROVISIONING_PENDING,
+            index=True,
+        )
+        chunk_world_template_requested = db.Column(
+            db.String(40),
+            nullable=False,
+            default=CHUNK_WORLD_TEMPLATE_EARTH,
+            index=True,
+        )
+        chunk_world_template_fallback = db.Column(
+            db.String(40),
+            nullable=False,
+            default=CHUNK_WORLD_TEMPLATE_FLAT,
+            index=True,
+        )
+        chunk_world_template_effective = db.Column(db.String(40), nullable=True, index=True)
+        chunk_world_fallback_reason = db.Column(db.String(160), nullable=True, index=True)
+        earth_reference_fingerprint = db.Column(db.String(128), nullable=True, index=True)
+
+        chunk_provisioning_error_code = db.Column(db.String(160), nullable=True, index=True)
+        chunk_provisioning_error_message = db.Column(db.Text, nullable=True)
+        chunk_provisioning_attempt_count = db.Column(db.Integer, nullable=False, default=0)
+        chunk_provisioning_started_at = db.Column(db.DateTime, nullable=True, index=True)
+        chunk_provisioning_finished_at = db.Column(db.DateTime, nullable=True, index=True)
+        chunk_provisioning_request_id = db.Column(db.String(180), nullable=True, index=True)
+        chunk_provisioning_idempotency_key = db.Column(db.String(180), nullable=True, index=True)
+
+        # Mirrored App-membership -> Chunk Project Access synchronization state.
+        chunk_access_sync_status = db.Column(
+            db.String(40),
+            nullable=False,
+            default=CHUNK_ACCESS_SYNC_PENDING,
+            index=True,
+        )
+        chunk_access_sync_error_code = db.Column(db.String(160), nullable=True, index=True)
+        chunk_access_sync_error_message = db.Column(db.Text, nullable=True)
+        chunk_access_sync_attempt_count = db.Column(db.Integer, nullable=False, default=0)
+        chunk_access_sync_started_at = db.Column(db.DateTime, nullable=True, index=True)
+        chunk_access_synced_at = db.Column(db.DateTime, nullable=True, index=True)
+        chunk_access_sync_request_id = db.Column(db.String(180), nullable=True, index=True)
+
         # References into other microservices.
         plan2d_id = db.Column(db.String(160), nullable=True, index=True)
         lv_id = db.Column(db.String(160), nullable=True, index=True)
@@ -837,6 +1071,80 @@ def _define_project_model(*, extend_existing: bool = False):
                 )
             except Exception:
                 return "<Project>"
+
+        @validates("chunk_provisioning_status")
+        def _validate_chunk_provisioning_status(self, _: str, value: Any) -> str:
+            """
+            Keep the legacy chunk readiness columns coherent when the new
+            provisioning service writes its explicit status fields directly.
+            """
+            try:
+                normalized = normalize_chunk_provisioning_status(
+                    value,
+                    has_refs=bool(self.chunk_project_id and self.chunk_world_id),
+                    requested_template=self.chunk_world_template_requested,
+                    effective_template=self.chunk_world_template_effective,
+                )
+
+                if normalized in {
+                    CHUNK_PROVISIONING_READY,
+                    CHUNK_PROVISIONING_FALLBACK_READY,
+                }:
+                    self.chunk_status = CHUNK_STATUS_READY
+                    self.chunk_ready = bool(self.chunk_project_id and self.chunk_world_id)
+                    self.chunk_last_error = None
+
+                elif normalized in {
+                    CHUNK_PROVISIONING_FAILED,
+                    CHUNK_PROVISIONING_REPAIR_REQUIRED,
+                }:
+                    self.chunk_status = CHUNK_STATUS_ERROR
+                    self.chunk_ready = False
+
+                elif normalized == CHUNK_PROVISIONING_DISABLED:
+                    self.chunk_status = CHUNK_STATUS_DISABLED
+                    self.chunk_ready = False
+
+                elif not (self.chunk_project_id and self.chunk_world_id):
+                    self.chunk_status = CHUNK_STATUS_PENDING
+                    self.chunk_ready = False
+
+                return normalized
+
+            except Exception:
+                return CHUNK_PROVISIONING_PENDING
+
+        @validates(
+            "chunk_world_template_requested",
+            "chunk_world_template_fallback",
+            "chunk_world_template_effective",
+        )
+        def _validate_chunk_world_template(self, key: str, value: Any) -> Optional[str]:
+            try:
+                if key == "chunk_world_template_effective":
+                    return normalize_chunk_world_template(value, allow_none=True)
+
+                default = (
+                    CHUNK_WORLD_TEMPLATE_FLAT
+                    if key == "chunk_world_template_fallback"
+                    else CHUNK_WORLD_TEMPLATE_EARTH
+                )
+                return normalize_chunk_world_template(value, default)
+
+            except Exception:
+                return (
+                    None
+                    if key == "chunk_world_template_effective"
+                    else (
+                        CHUNK_WORLD_TEMPLATE_FLAT
+                        if key == "chunk_world_template_fallback"
+                        else CHUNK_WORLD_TEMPLATE_EARTH
+                    )
+                )
+
+        @validates("chunk_access_sync_status")
+        def _validate_chunk_access_sync_status(self, _: str, value: Any) -> str:
+            return normalize_chunk_access_sync_status(value)
 
         @property
         def project_id(self) -> str:
@@ -983,9 +1291,213 @@ def _define_project_model(*, extend_existing: bool = False):
         @property
         def is_chunk_ready(self) -> bool:
             try:
-                return bool(self.chunk_ready and self.has_chunk_world and self.chunk_status == CHUNK_STATUS_READY)
+                explicit_ready = self.chunk_provisioning_status in {
+                    CHUNK_PROVISIONING_READY,
+                    CHUNK_PROVISIONING_FALLBACK_READY,
+                }
+                return bool(
+                    self.has_chunk_world
+                    and (
+                        explicit_ready
+                        or (
+                            self.chunk_ready
+                            and self.chunk_status == CHUNK_STATUS_READY
+                        )
+                    )
+                )
             except Exception:
                 return False
+
+        @property
+        def uses_earth_world(self) -> bool:
+            try:
+                return self.chunk_world_template_effective == CHUNK_WORLD_TEMPLATE_EARTH
+            except Exception:
+                return False
+
+        @property
+        def uses_flat_world(self) -> bool:
+            try:
+                return self.chunk_world_template_effective == CHUNK_WORLD_TEMPLATE_FLAT
+            except Exception:
+                return False
+
+        @property
+        def chunk_fallback_used(self) -> bool:
+            try:
+                return bool(
+                    self.chunk_world_template_requested
+                    and self.chunk_world_template_effective
+                    and self.chunk_world_template_requested != self.chunk_world_template_effective
+                )
+            except Exception:
+                return False
+
+        @property
+        def chunk_provisioning(self) -> Dict[str, Any]:
+            try:
+                metadata = safe_dict(self.metadata_json)
+                metadata_state = safe_dict(metadata.get("chunkProvisioning"))
+
+                status = normalize_chunk_provisioning_status(
+                    self.chunk_provisioning_status or metadata_state.get("status"),
+                    has_refs=bool(self.chunk_project_id and self.chunk_world_id),
+                    requested_template=(
+                        self.chunk_world_template_requested
+                        or metadata_state.get("requestedWorldTemplate")
+                    ),
+                    effective_template=(
+                        self.chunk_world_template_effective
+                        or metadata_state.get("effectiveWorldTemplate")
+                    ),
+                )
+
+                requested = normalize_chunk_world_template(
+                    self.chunk_world_template_requested
+                    or metadata_state.get("requestedWorldTemplate"),
+                    CHUNK_WORLD_TEMPLATE_EARTH,
+                )
+                fallback = normalize_chunk_world_template(
+                    self.chunk_world_template_fallback
+                    or metadata_state.get("fallbackWorldTemplate"),
+                    CHUNK_WORLD_TEMPLATE_FLAT,
+                )
+                effective = normalize_chunk_world_template(
+                    self.chunk_world_template_effective
+                    or metadata_state.get("effectiveWorldTemplate"),
+                    allow_none=True,
+                )
+
+                return {
+                    "status": status,
+                    "requested_world_template": requested,
+                    "requestedWorldTemplate": requested,
+                    "fallback_world_template": fallback,
+                    "fallbackWorldTemplate": fallback,
+                    "effective_world_template": effective,
+                    "effectiveWorldTemplate": effective,
+                    "fallback_used": bool(requested and effective and requested != effective),
+                    "fallbackUsed": bool(requested and effective and requested != effective),
+                    "fallback_reason": (
+                        self.chunk_world_fallback_reason
+                        or metadata_state.get("fallbackReason")
+                    ),
+                    "fallbackReason": (
+                        self.chunk_world_fallback_reason
+                        or metadata_state.get("fallbackReason")
+                    ),
+                    "earth_reference_fingerprint": (
+                        self.earth_reference_fingerprint
+                        or metadata_state.get("earthReferenceFingerprint")
+                    ),
+                    "earthReferenceFingerprint": (
+                        self.earth_reference_fingerprint
+                        or metadata_state.get("earthReferenceFingerprint")
+                    ),
+                    "attempt_count": safe_int(
+                        self.chunk_provisioning_attempt_count
+                        or metadata_state.get("attemptCount"),
+                        0,
+                        minimum=0,
+                    ),
+                    "attemptCount": safe_int(
+                        self.chunk_provisioning_attempt_count
+                        or metadata_state.get("attemptCount"),
+                        0,
+                        minimum=0,
+                    ),
+                    "started_at": (
+                        isoformat(self.chunk_provisioning_started_at)
+                        or metadata_state.get("lastStartedAt")
+                    ),
+                    "startedAt": (
+                        isoformat(self.chunk_provisioning_started_at)
+                        or metadata_state.get("lastStartedAt")
+                    ),
+                    "finished_at": (
+                        isoformat(self.chunk_provisioning_finished_at)
+                        or metadata_state.get("lastFinishedAt")
+                    ),
+                    "finishedAt": (
+                        isoformat(self.chunk_provisioning_finished_at)
+                        or metadata_state.get("lastFinishedAt")
+                    ),
+                    "request_id": (
+                        self.chunk_provisioning_request_id
+                        or metadata_state.get("lastRequestId")
+                    ),
+                    "requestId": (
+                        self.chunk_provisioning_request_id
+                        or metadata_state.get("lastRequestId")
+                    ),
+                    "error_code": (
+                        self.chunk_provisioning_error_code
+                        or metadata_state.get("lastErrorCode")
+                    ),
+                    "errorCode": (
+                        self.chunk_provisioning_error_code
+                        or metadata_state.get("lastErrorCode")
+                    ),
+                    "error_message": (
+                        self.chunk_provisioning_error_message
+                        or metadata_state.get("lastErrorMessage")
+                    ),
+                    "errorMessage": (
+                        self.chunk_provisioning_error_message
+                        or metadata_state.get("lastErrorMessage")
+                    ),
+                    "ready": bool(
+                        self.chunk_project_id
+                        and self.chunk_world_id
+                        and status in {
+                            CHUNK_PROVISIONING_READY,
+                            CHUNK_PROVISIONING_FALLBACK_READY,
+                        }
+                    ),
+                }
+
+            except Exception:
+                return {
+                    "status": CHUNK_PROVISIONING_PENDING,
+                    "requestedWorldTemplate": CHUNK_WORLD_TEMPLATE_EARTH,
+                    "fallbackWorldTemplate": CHUNK_WORLD_TEMPLATE_FLAT,
+                    "effectiveWorldTemplate": None,
+                    "ready": False,
+                }
+
+        @property
+        def chunk_access_sync(self) -> Dict[str, Any]:
+            try:
+                return {
+                    "status": normalize_chunk_access_sync_status(
+                        self.chunk_access_sync_status
+                    ),
+                    "attempt_count": safe_int(
+                        self.chunk_access_sync_attempt_count,
+                        0,
+                        minimum=0,
+                    ),
+                    "attemptCount": safe_int(
+                        self.chunk_access_sync_attempt_count,
+                        0,
+                        minimum=0,
+                    ),
+                    "started_at": isoformat(self.chunk_access_sync_started_at),
+                    "startedAt": isoformat(self.chunk_access_sync_started_at),
+                    "synced_at": isoformat(self.chunk_access_synced_at),
+                    "syncedAt": isoformat(self.chunk_access_synced_at),
+                    "request_id": self.chunk_access_sync_request_id,
+                    "requestId": self.chunk_access_sync_request_id,
+                    "error_code": self.chunk_access_sync_error_code,
+                    "errorCode": self.chunk_access_sync_error_code,
+                    "error_message": self.chunk_access_sync_error_message,
+                    "errorMessage": self.chunk_access_sync_error_message,
+                }
+            except Exception:
+                return {
+                    "status": CHUNK_ACCESS_SYNC_PENDING,
+                    "attemptCount": 0,
+                }
 
         @property
         def demo_remaining_seconds(self) -> Optional[int]:
@@ -1048,10 +1560,14 @@ def _define_project_model(*, extend_existing: bool = False):
                         provisioned_at=self.chunk_provisioned_at,
                     )
                 )
+                service_refs["chunk"]["provisioning"] = self.chunk_provisioning
+                service_refs["chunk"]["accessSync"] = self.chunk_access_sync
                 self.service_refs = service_refs
 
                 metadata = safe_dict(self.metadata_json)
                 metadata["chunk"] = _chunk_refs_to_service_ref(service_refs["chunk"])
+                metadata["chunk"]["provisioning"] = self.chunk_provisioning
+                metadata["chunk"]["accessSync"] = self.chunk_access_sync
                 self.metadata_json = metadata
 
             except Exception:
@@ -1067,6 +1583,11 @@ def _define_project_model(*, extend_existing: bool = False):
             status: Any = CHUNK_STATUS_READY,
             error: Optional[Mapping[str, Any]] = None,
             provisioned_at: Any = None,
+            requested_world_template: Any = None,
+            fallback_world_template: Any = None,
+            effective_world_template: Any = None,
+            fallback_reason: Any = None,
+            earth_reference_fingerprint: Any = None,
         ) -> None:
             try:
                 refs = build_chunk_refs(
@@ -1087,6 +1608,48 @@ def _define_project_model(*, extend_existing: bool = False):
                 self.chunk_route_hints = safe_dict(refs.get("route_hints"))
                 self.chunk_last_error = safe_dict(refs.get("error")) or None
 
+                if requested_world_template is not None:
+                    self.chunk_world_template_requested = normalize_chunk_world_template(
+                        requested_world_template,
+                        CHUNK_WORLD_TEMPLATE_EARTH,
+                    )
+
+                if fallback_world_template is not None:
+                    self.chunk_world_template_fallback = normalize_chunk_world_template(
+                        fallback_world_template,
+                        CHUNK_WORLD_TEMPLATE_FLAT,
+                    )
+
+                if effective_world_template is not None:
+                    self.chunk_world_template_effective = normalize_chunk_world_template(
+                        effective_world_template,
+                        allow_none=True,
+                    )
+
+                if fallback_reason is not None:
+                    self.chunk_world_fallback_reason = safe_str(
+                        fallback_reason,
+                        "",
+                        160,
+                    ) or None
+
+                if earth_reference_fingerprint is not None:
+                    self.earth_reference_fingerprint = safe_str(
+                        earth_reference_fingerprint,
+                        "",
+                        128,
+                    ) or None
+
+                if self.chunk_ready:
+                    self.chunk_provisioning_status = normalize_chunk_provisioning_status(
+                        CHUNK_PROVISIONING_READY,
+                        has_refs=True,
+                        requested_template=self.chunk_world_template_requested,
+                        effective_template=self.chunk_world_template_effective,
+                    )
+                    self.chunk_provisioning_error_code = None
+                    self.chunk_provisioning_error_message = None
+
                 if self.chunk_ready and not self.chunk_provisioned_at:
                     self.chunk_provisioned_at = utcnow()
 
@@ -1100,6 +1663,9 @@ def _define_project_model(*, extend_existing: bool = False):
             try:
                 self.chunk_status = CHUNK_STATUS_PENDING
                 self.chunk_ready = False
+                self.chunk_provisioning_status = CHUNK_PROVISIONING_PENDING
+                self.chunk_provisioning_error_code = None
+                self.chunk_provisioning_error_message = None
                 self.sync_chunk_refs()
                 self.touch()
             except Exception:
@@ -1121,13 +1687,34 @@ def _define_project_model(*, extend_existing: bool = False):
                 status=CHUNK_STATUS_READY,
                 error=None,
                 provisioned_at=self.chunk_provisioned_at or utcnow(),
+                requested_world_template=self.chunk_world_template_requested,
+                fallback_world_template=self.chunk_world_template_fallback,
+                effective_world_template=(
+                    self.chunk_world_template_effective
+                    or self.chunk_world_template_requested
+                ),
+                fallback_reason=self.chunk_world_fallback_reason,
+                earth_reference_fingerprint=self.earth_reference_fingerprint,
             )
 
         def mark_chunk_error(self, error: Optional[Mapping[str, Any]] = None) -> None:
             try:
+                clean_error = safe_dict(error)
                 self.chunk_status = CHUNK_STATUS_ERROR
                 self.chunk_ready = False
-                self.chunk_last_error = safe_dict(error)
+                self.chunk_last_error = clean_error
+                self.chunk_provisioning_status = CHUNK_PROVISIONING_FAILED
+                self.chunk_provisioning_error_code = safe_str(
+                    clean_error.get("code"),
+                    "chunk_provisioning_failed",
+                    160,
+                ) or "chunk_provisioning_failed"
+                self.chunk_provisioning_error_message = safe_str(
+                    clean_error.get("message"),
+                    "Chunk provisioning failed.",
+                    2000,
+                ) or "Chunk provisioning failed."
+                self.chunk_provisioning_finished_at = utcnow()
                 self.sync_chunk_refs()
                 self.touch()
             except Exception:
@@ -1137,7 +1724,181 @@ def _define_project_model(*, extend_existing: bool = False):
             try:
                 self.chunk_status = CHUNK_STATUS_DISABLED
                 self.chunk_ready = False
+                self.chunk_provisioning_status = CHUNK_PROVISIONING_DISABLED
                 self.sync_chunk_refs()
+                self.touch()
+            except Exception:
+                pass
+
+        def mark_chunk_provisioning_started(
+            self,
+            *,
+            request_id: Any = None,
+            idempotency_key: Any = None,
+            requested_world_template: Any = CHUNK_WORLD_TEMPLATE_EARTH,
+            fallback_world_template: Any = CHUNK_WORLD_TEMPLATE_FLAT,
+        ) -> None:
+            try:
+                self.chunk_provisioning_status = CHUNK_PROVISIONING_PROVISIONING
+                self.chunk_world_template_requested = normalize_chunk_world_template(
+                    requested_world_template,
+                    CHUNK_WORLD_TEMPLATE_EARTH,
+                )
+                self.chunk_world_template_fallback = normalize_chunk_world_template(
+                    fallback_world_template,
+                    CHUNK_WORLD_TEMPLATE_FLAT,
+                )
+                self.chunk_provisioning_error_code = None
+                self.chunk_provisioning_error_message = None
+                self.chunk_provisioning_attempt_count = safe_int(
+                    self.chunk_provisioning_attempt_count,
+                    0,
+                    minimum=0,
+                ) + 1
+                self.chunk_provisioning_started_at = utcnow()
+                self.chunk_provisioning_finished_at = None
+                self.chunk_provisioning_request_id = safe_str(
+                    request_id,
+                    "",
+                    180,
+                ) or None
+                self.chunk_provisioning_idempotency_key = safe_str(
+                    idempotency_key,
+                    "",
+                    180,
+                ) or None
+                self.touch()
+            except Exception:
+                pass
+
+        def mark_chunk_provisioning_ready(
+            self,
+            *,
+            effective_world_template: Any,
+            fallback_reason: Any = None,
+            earth_reference_fingerprint: Any = None,
+        ) -> None:
+            try:
+                self.chunk_world_template_effective = normalize_chunk_world_template(
+                    effective_world_template,
+                    allow_none=True,
+                )
+                self.chunk_world_fallback_reason = safe_str(
+                    fallback_reason,
+                    "",
+                    160,
+                ) or None
+                self.earth_reference_fingerprint = safe_str(
+                    earth_reference_fingerprint,
+                    "",
+                    128,
+                ) or None
+                self.chunk_provisioning_status = normalize_chunk_provisioning_status(
+                    CHUNK_PROVISIONING_READY,
+                    has_refs=bool(self.chunk_project_id and self.chunk_world_id),
+                    requested_template=self.chunk_world_template_requested,
+                    effective_template=self.chunk_world_template_effective,
+                )
+                self.chunk_status = CHUNK_STATUS_READY
+                self.chunk_ready = bool(self.chunk_project_id and self.chunk_world_id)
+                self.chunk_last_error = None
+                self.chunk_provisioning_error_code = None
+                self.chunk_provisioning_error_message = None
+                self.chunk_provisioned_at = self.chunk_provisioned_at or utcnow()
+                self.chunk_provisioning_finished_at = utcnow()
+                self.sync_chunk_refs()
+                self.touch()
+            except Exception:
+                pass
+
+        def mark_chunk_provisioning_failed(
+            self,
+            *,
+            code: Any = "chunk_provisioning_failed",
+            message: Any = "Chunk provisioning failed.",
+            repair_required: bool = False,
+        ) -> None:
+            try:
+                self.chunk_provisioning_status = (
+                    CHUNK_PROVISIONING_REPAIR_REQUIRED
+                    if repair_required
+                    else CHUNK_PROVISIONING_FAILED
+                )
+                self.chunk_provisioning_error_code = safe_str(
+                    code,
+                    "chunk_provisioning_failed",
+                    160,
+                ) or "chunk_provisioning_failed"
+                self.chunk_provisioning_error_message = safe_str(
+                    message,
+                    "Chunk provisioning failed.",
+                    2000,
+                ) or "Chunk provisioning failed."
+                self.chunk_status = CHUNK_STATUS_ERROR
+                self.chunk_ready = False
+                self.chunk_provisioning_finished_at = utcnow()
+                self.chunk_last_error = {
+                    "code": self.chunk_provisioning_error_code,
+                    "message": self.chunk_provisioning_error_message,
+                }
+                self.sync_chunk_refs()
+                self.touch()
+            except Exception:
+                pass
+
+        def mark_chunk_access_sync_started(self, *, request_id: Any = None) -> None:
+            try:
+                self.chunk_access_sync_status = CHUNK_ACCESS_SYNC_SYNCING
+                self.chunk_access_sync_error_code = None
+                self.chunk_access_sync_error_message = None
+                self.chunk_access_sync_attempt_count = safe_int(
+                    self.chunk_access_sync_attempt_count,
+                    0,
+                    minimum=0,
+                ) + 1
+                self.chunk_access_sync_started_at = utcnow()
+                self.chunk_access_sync_request_id = safe_str(
+                    request_id,
+                    "",
+                    180,
+                ) or None
+                self.touch()
+            except Exception:
+                pass
+
+        def mark_chunk_access_synced(self) -> None:
+            try:
+                self.chunk_access_sync_status = CHUNK_ACCESS_SYNC_READY
+                self.chunk_access_sync_error_code = None
+                self.chunk_access_sync_error_message = None
+                self.chunk_access_synced_at = utcnow()
+                self.touch()
+            except Exception:
+                pass
+
+        def mark_chunk_access_sync_failed(
+            self,
+            *,
+            code: Any = "chunk_access_sync_failed",
+            message: Any = "Chunk access synchronization failed.",
+            repair_required: bool = False,
+        ) -> None:
+            try:
+                self.chunk_access_sync_status = (
+                    CHUNK_ACCESS_SYNC_REPAIR_REQUIRED
+                    if repair_required
+                    else CHUNK_ACCESS_SYNC_FAILED
+                )
+                self.chunk_access_sync_error_code = safe_str(
+                    code,
+                    "chunk_access_sync_failed",
+                    160,
+                ) or "chunk_access_sync_failed"
+                self.chunk_access_sync_error_message = safe_str(
+                    message,
+                    "Chunk access synchronization failed.",
+                    2000,
+                ) or "Chunk access synchronization failed."
                 self.touch()
             except Exception:
                 pass
@@ -1328,6 +2089,125 @@ def _define_project_model(*, extend_existing: bool = False):
                 )
                 self.chunk_route_hints = safe_dict(refs.get("route_hints"))
                 self.chunk_last_error = safe_dict(refs.get("error")) or None
+
+                provisioning_meta = safe_dict(
+                    safe_dict(self.metadata_json).get("chunkProvisioning")
+                )
+
+                self.chunk_world_template_requested = normalize_chunk_world_template(
+                    self.chunk_world_template_requested
+                    or provisioning_meta.get("requestedWorldTemplate"),
+                    CHUNK_WORLD_TEMPLATE_EARTH,
+                )
+                self.chunk_world_template_fallback = normalize_chunk_world_template(
+                    self.chunk_world_template_fallback
+                    or provisioning_meta.get("fallbackWorldTemplate"),
+                    CHUNK_WORLD_TEMPLATE_FLAT,
+                )
+                self.chunk_world_template_effective = normalize_chunk_world_template(
+                    self.chunk_world_template_effective
+                    or provisioning_meta.get("effectiveWorldTemplate"),
+                    allow_none=True,
+                )
+                self.chunk_world_fallback_reason = safe_str(
+                    self.chunk_world_fallback_reason
+                    or provisioning_meta.get("fallbackReason"),
+                    "",
+                    160,
+                ) or None
+                self.earth_reference_fingerprint = safe_str(
+                    self.earth_reference_fingerprint
+                    or provisioning_meta.get("earthReferenceFingerprint"),
+                    "",
+                    128,
+                ) or None
+
+                self.chunk_provisioning_attempt_count = safe_int(
+                    self.chunk_provisioning_attempt_count
+                    or provisioning_meta.get("attemptCount"),
+                    0,
+                    minimum=0,
+                )
+                self.chunk_provisioning_request_id = safe_str(
+                    self.chunk_provisioning_request_id
+                    or provisioning_meta.get("lastRequestId"),
+                    "",
+                    180,
+                ) or None
+                self.chunk_provisioning_idempotency_key = safe_str(
+                    self.chunk_provisioning_idempotency_key
+                    or provisioning_meta.get("lastIdempotencyKey"),
+                    "",
+                    180,
+                ) or None
+                self.chunk_provisioning_error_code = safe_str(
+                    self.chunk_provisioning_error_code
+                    or provisioning_meta.get("lastErrorCode"),
+                    "",
+                    160,
+                ) or None
+                self.chunk_provisioning_error_message = safe_str(
+                    self.chunk_provisioning_error_message
+                    or provisioning_meta.get("lastErrorMessage"),
+                    "",
+                    2000,
+                ) or None
+
+                self.chunk_provisioning_status = normalize_chunk_provisioning_status(
+                    self.chunk_provisioning_status
+                    or provisioning_meta.get("status"),
+                    has_refs=bool(self.chunk_project_id and self.chunk_world_id),
+                    requested_template=self.chunk_world_template_requested,
+                    effective_template=self.chunk_world_template_effective,
+                )
+
+                if (
+                    self.chunk_project_id
+                    and self.chunk_world_id
+                    and self.chunk_provisioning_status
+                    in {
+                        CHUNK_PROVISIONING_READY,
+                        CHUNK_PROVISIONING_FALLBACK_READY,
+                    }
+                ):
+                    self.chunk_status = CHUNK_STATUS_READY
+                    self.chunk_ready = True
+                    self.chunk_last_error = None
+
+                elif self.chunk_provisioning_status in {
+                    CHUNK_PROVISIONING_FAILED,
+                    CHUNK_PROVISIONING_REPAIR_REQUIRED,
+                }:
+                    self.chunk_status = CHUNK_STATUS_ERROR
+                    self.chunk_ready = False
+
+                elif self.chunk_provisioning_status == CHUNK_PROVISIONING_DISABLED:
+                    self.chunk_status = CHUNK_STATUS_DISABLED
+                    self.chunk_ready = False
+
+                self.chunk_access_sync_status = normalize_chunk_access_sync_status(
+                    self.chunk_access_sync_status
+                )
+                self.chunk_access_sync_error_code = safe_str(
+                    self.chunk_access_sync_error_code,
+                    "",
+                    160,
+                ) or None
+                self.chunk_access_sync_error_message = safe_str(
+                    self.chunk_access_sync_error_message,
+                    "",
+                    2000,
+                ) or None
+                self.chunk_access_sync_attempt_count = safe_int(
+                    self.chunk_access_sync_attempt_count,
+                    0,
+                    minimum=0,
+                )
+                self.chunk_access_sync_request_id = safe_str(
+                    self.chunk_access_sync_request_id,
+                    "",
+                    180,
+                ) or None
 
                 self.sync_chunk_refs()
 
@@ -1545,6 +2425,20 @@ def _define_project_model(*, extend_existing: bool = False):
                     "chunk_universe_id",
                     "chunk_world_id",
                     "chunk_status",
+                    "chunk_provisioning_status",
+                    "chunk_world_template_requested",
+                    "chunk_world_template_fallback",
+                    "chunk_world_template_effective",
+                    "chunk_world_fallback_reason",
+                    "earth_reference_fingerprint",
+                    "chunk_provisioning_error_code",
+                    "chunk_provisioning_error_message",
+                    "chunk_provisioning_request_id",
+                    "chunk_provisioning_idempotency_key",
+                    "chunk_access_sync_status",
+                    "chunk_access_sync_error_code",
+                    "chunk_access_sync_error_message",
+                    "chunk_access_sync_request_id",
                     "plan2d_id",
                     "lv_id",
                     "setup_status",
@@ -1589,6 +2483,21 @@ def _define_project_model(*, extend_existing: bool = False):
 
                 if "chunkError" in data or "chunk_last_error" in data:
                     self.chunk_last_error = safe_dict(data.get("chunkError") or data.get("chunk_last_error"))
+
+                camel_fields = {
+                    "chunkProvisioningStatus": "chunk_provisioning_status",
+                    "requestedWorldTemplate": "chunk_world_template_requested",
+                    "fallbackWorldTemplate": "chunk_world_template_fallback",
+                    "effectiveWorldTemplate": "chunk_world_template_effective",
+                    "fallbackReason": "chunk_world_fallback_reason",
+                    "earthReferenceFingerprint": "earth_reference_fingerprint",
+                    "chunkProvisioningErrorCode": "chunk_provisioning_error_code",
+                    "chunkProvisioningErrorMessage": "chunk_provisioning_error_message",
+                    "chunkAccessSyncStatus": "chunk_access_sync_status",
+                }
+                for source_field, target_field in camel_fields.items():
+                    if source_field in data:
+                        setattr(self, target_field, data.get(source_field))
 
                 if "address" in data:
                     self.update_address(data)
@@ -1740,6 +2649,8 @@ def _define_project_model(*, extend_existing: bool = False):
 
                 public_id = self.public_id or str(self.id or "")
                 chunk_refs = self.chunk_refs
+                chunk_provisioning = self.chunk_provisioning
+                chunk_access_sync = self.chunk_access_sync
 
                 payload: Dict[str, Any] = {
                     "id": self.id,
@@ -1800,6 +2711,24 @@ def _define_project_model(*, extend_existing: bool = False):
                     "chunkWorldId": chunk_refs.get("chunk_world_id"),
                     "chunk_route_hints": chunk_refs.get("route_hints"),
                     "chunkRouteHints": chunk_refs.get("route_hints"),
+                    "chunk_provisioning": chunk_provisioning,
+                    "chunkProvisioning": chunk_provisioning,
+                    "chunk_provisioning_status": chunk_provisioning.get("status"),
+                    "chunkProvisioningStatus": chunk_provisioning.get("status"),
+                    "requested_world_template": chunk_provisioning.get("requestedWorldTemplate"),
+                    "requestedWorldTemplate": chunk_provisioning.get("requestedWorldTemplate"),
+                    "effective_world_template": chunk_provisioning.get("effectiveWorldTemplate"),
+                    "effectiveWorldTemplate": chunk_provisioning.get("effectiveWorldTemplate"),
+                    "fallback_world_template": chunk_provisioning.get("fallbackWorldTemplate"),
+                    "fallbackWorldTemplate": chunk_provisioning.get("fallbackWorldTemplate"),
+                    "fallback_used": chunk_provisioning.get("fallbackUsed"),
+                    "fallbackUsed": chunk_provisioning.get("fallbackUsed"),
+                    "fallback_reason": chunk_provisioning.get("fallbackReason"),
+                    "fallbackReason": chunk_provisioning.get("fallbackReason"),
+                    "earth_reference_fingerprint": chunk_provisioning.get("earthReferenceFingerprint"),
+                    "earthReferenceFingerprint": chunk_provisioning.get("earthReferenceFingerprint"),
+                    "chunk_access_sync_status": chunk_access_sync.get("status"),
+                    "chunkAccessSyncStatus": chunk_access_sync.get("status"),
                 }
 
                 if include_address:
@@ -1880,6 +2809,12 @@ def _define_project_model(*, extend_existing: bool = False):
                             "chunkLastError": safe_dict(self.chunk_last_error),
                             "chunk_provisioned_at": isoformat(self.chunk_provisioned_at),
                             "chunkProvisionedAt": isoformat(self.chunk_provisioned_at),
+                            "chunk_provisioning_details": chunk_provisioning,
+                            "chunkProvisioningDetails": chunk_provisioning,
+                            "chunk_access_sync": chunk_access_sync,
+                            "chunkAccessSync": chunk_access_sync,
+                            "chunk_provisioning_idempotency_key": self.chunk_provisioning_idempotency_key,
+                            "chunkProvisioningIdempotencyKey": self.chunk_provisioning_idempotency_key,
                         }
                     )
 
@@ -1967,6 +2902,11 @@ def _define_project_model(*, extend_existing: bool = False):
                     "chunk_universe_id": chunk_refs.get("chunk_universe_id"),
                     "chunkWorldId": chunk_refs.get("chunk_world_id"),
                     "chunk_world_id": chunk_refs.get("chunk_world_id"),
+                    "chunkProvisioningStatus": self.chunk_provisioning.get("status"),
+                    "chunk_provisioning_status": self.chunk_provisioning.get("status"),
+                    "requestedWorldTemplate": self.chunk_provisioning.get("requestedWorldTemplate"),
+                    "effectiveWorldTemplate": self.chunk_provisioning.get("effectiveWorldTemplate"),
+                    "fallbackUsed": self.chunk_provisioning.get("fallbackUsed"),
                     "source": "api",
                     "initial": (self.display_name[:1] or "P").upper(),
                     "updatedAt": isoformat(self.updated_at),
@@ -1987,6 +2927,8 @@ def _define_project_model(*, extend_existing: bool = False):
                         "chunk_project_id": chunk_refs.get("chunk_project_id"),
                         "chunk_universe_id": chunk_refs.get("chunk_universe_id"),
                         "chunk_world_id": chunk_refs.get("chunk_world_id"),
+                        "chunk_provisioning": self.chunk_provisioning,
+                        "chunk_access_sync": self.chunk_access_sync,
                         "plan2d_id": self.plan2d_id,
                         "lv_id": self.lv_id,
                         "status": self.status,
@@ -2167,6 +3109,21 @@ def serialize_project(project: Any, **kwargs: Any) -> Dict[str, Any]:
             "chunk_project_id": getattr(project, "chunk_project_id", None),
             "chunk_universe_id": getattr(project, "chunk_universe_id", None),
             "chunk_world_id": getattr(project, "chunk_world_id", None),
+            "chunk_provisioning_status": getattr(
+                project,
+                "chunk_provisioning_status",
+                CHUNK_PROVISIONING_PENDING,
+            ),
+            "requested_world_template": getattr(
+                project,
+                "chunk_world_template_requested",
+                CHUNK_WORLD_TEMPLATE_EARTH,
+            ),
+            "effective_world_template": getattr(
+                project,
+                "chunk_world_template_effective",
+                None,
+            ),
         }
 
     except Exception:
@@ -2292,6 +3249,32 @@ def get_project_model_status() -> Dict[str, Any]:
             "chunk_provisioned_at",
         ]
 
+        required_chunk_provisioning_columns = [
+            "chunk_provisioning_status",
+            "chunk_world_template_requested",
+            "chunk_world_template_fallback",
+            "chunk_world_template_effective",
+            "chunk_world_fallback_reason",
+            "earth_reference_fingerprint",
+            "chunk_provisioning_error_code",
+            "chunk_provisioning_error_message",
+            "chunk_provisioning_attempt_count",
+            "chunk_provisioning_started_at",
+            "chunk_provisioning_finished_at",
+            "chunk_provisioning_request_id",
+            "chunk_provisioning_idempotency_key",
+        ]
+
+        required_chunk_access_sync_columns = [
+            "chunk_access_sync_status",
+            "chunk_access_sync_error_code",
+            "chunk_access_sync_error_message",
+            "chunk_access_sync_attempt_count",
+            "chunk_access_sync_started_at",
+            "chunk_access_synced_at",
+            "chunk_access_sync_request_id",
+        ]
+
         required_auth_demo_columns = [
             "owner_user_id",
             "auth_owner_user_id",
@@ -2311,12 +3294,32 @@ def get_project_model_status() -> Dict[str, Any]:
             "count": count,
             "columns": columns,
             "chunkIntegrationReady": all(column in columns for column in required_chunk_columns),
+            "chunkProvisioningIntegrationReady": all(
+                column in columns
+                for column in required_chunk_provisioning_columns
+            ),
+            "chunkAccessSyncIntegrationReady": all(
+                column in columns
+                for column in required_chunk_access_sync_columns
+            ),
             "authDemoIntegrationReady": all(column in columns for column in required_auth_demo_columns),
+            "defaultWorldTemplate": CHUNK_WORLD_TEMPLATE_EARTH,
+            "fallbackWorldTemplate": CHUNK_WORLD_TEMPLATE_FLAT,
             "defaultOwnerRemoved": True,
             "ownerUserIdNullable": True,
             "missingChunkColumns": [
                 column
                 for column in required_chunk_columns
+                if column not in columns
+            ],
+            "missingChunkProvisioningColumns": [
+                column
+                for column in required_chunk_provisioning_columns
+                if column not in columns
+            ],
+            "missingChunkAccessSyncColumns": [
+                column
+                for column in required_chunk_access_sync_columns
                 if column not in columns
             ],
             "missingAuthDemoColumns": [
@@ -2358,12 +3361,33 @@ __all__ = [
     "CHUNK_STATUS_READY",
     "CHUNK_STATUS_ERROR",
     "VALID_CHUNK_STATUSES",
+    "CHUNK_PROVISIONING_PENDING",
+    "CHUNK_PROVISIONING_PROVISIONING",
+    "CHUNK_PROVISIONING_READY",
+    "CHUNK_PROVISIONING_FALLBACK_READY",
+    "CHUNK_PROVISIONING_FAILED",
+    "CHUNK_PROVISIONING_REPAIR_REQUIRED",
+    "CHUNK_PROVISIONING_DISABLED",
+    "VALID_CHUNK_PROVISIONING_STATUSES",
+    "CHUNK_WORLD_TEMPLATE_EARTH",
+    "CHUNK_WORLD_TEMPLATE_FLAT",
+    "VALID_CHUNK_WORLD_TEMPLATES",
+    "CHUNK_ACCESS_SYNC_PENDING",
+    "CHUNK_ACCESS_SYNC_SYNCING",
+    "CHUNK_ACCESS_SYNC_READY",
+    "CHUNK_ACCESS_SYNC_FAILED",
+    "CHUNK_ACCESS_SYNC_REPAIR_REQUIRED",
+    "CHUNK_ACCESS_SYNC_DISABLED",
+    "VALID_CHUNK_ACCESS_SYNC_STATUSES",
     "Project",
     "normalize_project_setup_status",
     "normalize_project_status",
     "normalize_project_visibility",
     "normalize_project_scope",
     "normalize_chunk_status",
+    "normalize_chunk_world_template",
+    "normalize_chunk_provisioning_status",
+    "normalize_chunk_access_sync_status",
     "is_configured_status",
     "build_chunk_refs",
     "build_project_paths",

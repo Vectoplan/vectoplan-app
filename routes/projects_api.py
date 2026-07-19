@@ -15,7 +15,9 @@ Zweck:
     - Einladungen per registrierter E-Mail für persistente Projekte
     - Veröffentlichte Workspace-Reiter für persistente Projekte
     - Embed-/Publication-Policy für persistente Projekte
-    - Chunk-Referenzen
+    - Chunk-Referenzen, Earth/Flat-Provisionierungsstatus und Retry/Reconcile
+    - Chunk-Project-Access-Synchronisation für owner/admin/editor/viewer
+    - Viewer als read-only Kontext
     - Demo-/Auth-Kontext
 
 Wichtige Architekturregeln:
@@ -34,9 +36,10 @@ Wichtige Architekturregeln:
 - Systemreferenzen sind API-/Admin-Daten und nicht normales Projektformular.
 """
 
+import uuid
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request
 from werkzeug.wrappers import Response
 
 
@@ -150,6 +153,7 @@ try:
         serialize_project,
         serialize_project_sidebar_item,
         set_project_member_role,
+        sync_project_chunk_access_result,
         transfer_project_owner,
         update_project_embed_policy,
         update_project_result,
@@ -171,6 +175,7 @@ except Exception:  # pragma: no cover
     serialize_project = None  # type: ignore
     serialize_project_sidebar_item = None  # type: ignore
     set_project_member_role = None  # type: ignore
+    sync_project_chunk_access_result = None  # type: ignore
     transfer_project_owner = None  # type: ignore
     update_project_embed_policy = None  # type: ignore
     update_project_result = None  # type: ignore
@@ -214,6 +219,22 @@ except Exception:  # pragma: no cover
     get_project_publication_service_status = None  # type: ignore
     normalize_workspace_key = None  # type: ignore
     update_project_publication = None  # type: ignore
+
+
+try:
+    from services.project_chunk_access_sync_service import (
+        get_project_chunk_access_sync_service_status,
+        serialize_project_chunk_access_sync_status,
+    )
+except Exception:  # pragma: no cover
+    get_project_chunk_access_sync_service_status = None  # type: ignore
+    serialize_project_chunk_access_sync_status = None  # type: ignore
+
+
+try:
+    from config import get_project_chunk_config_status
+except Exception:  # pragma: no cover
+    get_project_chunk_config_status = None  # type: ignore
 
 
 bp = Blueprint("projects_api", __name__)
@@ -397,6 +418,153 @@ def _log_exception(message: str, exc: Optional[Exception] = None) -> None:
             current_app.logger.exception(message)
     except Exception:
         pass
+
+
+def _request_id() -> str:
+    """Return one stable request/correlation id for the current request."""
+    try:
+        existing = _safe_str(getattr(g, "vectoplan_request_id", None), "", 160)
+        if existing:
+            return existing
+    except Exception:
+        pass
+
+    try:
+        value = _safe_str(
+            request.headers.get("X-Request-ID")
+            or request.headers.get("X-Vectoplan-Request-Id")
+            or request.headers.get("X-Correlation-ID"),
+            "",
+            160,
+        )
+    except Exception:
+        value = ""
+
+    value = value or f"req_{uuid.uuid4().hex}"
+    try:
+        g.vectoplan_request_id = value
+    except Exception:
+        pass
+    return value
+
+
+def _project_access_sync_payload(project: Any) -> Dict[str, Any]:
+    """Serialize local App->Chunk access-sync state without exposing secrets."""
+    try:
+        if callable(serialize_project_chunk_access_sync_status):
+            return _safe_dict(serialize_project_chunk_access_sync_status(project))
+    except Exception as exc:
+        _log_warning("project chunk access status serialization failed: %s", exc.__class__.__name__)
+
+    try:
+        metadata = _safe_dict(getattr(project, "metadata_json", None))
+        chunk_meta = _safe_dict(metadata.get("chunk"))
+        access_sync = _safe_dict(chunk_meta.get("accessSync") or chunk_meta.get("access_sync"))
+        status = _safe_str(
+            getattr(project, "chunk_access_sync_status", None)
+            or access_sync.get("status"),
+            "pending",
+            80,
+        )
+        return {
+            "enabled": _config_bool("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ENABLED", True),
+            "status": status,
+            "ready": status == "ready",
+            "repairRequired": status == "repair_required",
+            "chunkProjectId": getattr(project, "chunk_project_id", None),
+            "ownerAuthUserId": getattr(project, "auth_owner_user_id", None),
+        }
+    except Exception:
+        return {
+            "enabled": _config_bool("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ENABLED", True),
+            "status": "unknown",
+            "ready": False,
+        }
+
+
+def _project_read_only(project: Any, user_id: Optional[int]) -> bool:
+    """Viewer/public/demo contexts are read-only; editors and managers are not."""
+    try:
+        access = _safe_dict(serialize_project_permissions(project, user_id=user_id))
+        permissions = _safe_dict(access.get("permissions"))
+        can_edit = _safe_bool(access.get("can_edit", permissions.get("edit")), False)
+        return not can_edit
+    except Exception:
+        return True
+
+
+def _sanitize_project_payload_for_route(
+    payload: Mapping[str, Any],
+    *,
+    include_private: bool,
+) -> Dict[str, Any]:
+    """Remove internal identities, raw geocoder data and service metadata for viewers."""
+    result = _safe_dict(payload)
+    if include_private:
+        return result
+
+    for key in (
+        "auth_owner_user_id",
+        "auth_account_id",
+        "settings",
+        "metadata",
+        "metadata_json",
+        "service_refs",
+        "serviceRefs",
+        "artifact_refs",
+        "artifactRefs",
+        "geocode_raw",
+        "chunk_last_error",
+        "chunkLastError",
+        "demo_client_identity_id",
+        "demo_session_id",
+        "deleted_by_user_id",
+        "archived_by_user_id",
+        "transferred_from_user_id",
+    ):
+        result.pop(key, None)
+
+    chunk = _safe_dict(result.get("chunk"))
+    chunk.pop("error", None)
+    provisioning = _safe_dict(chunk.get("provisioning"))
+    for key in ("requestPayload", "request_payload", "raw", "response", "errorDetails"):
+        provisioning.pop(key, None)
+    if provisioning:
+        chunk["provisioning"] = provisioning
+    result["chunk"] = chunk
+    return result
+
+
+def _identity_override_error(data: Mapping[str, Any]) -> Optional[Tuple[Any, int]]:
+    """Reject caller-controlled identity overrides on invitation accept/reject routes."""
+    payload = _safe_dict(data)
+    current_auth_user_id = _current_auth_user_id()
+    current_local_user_id = _current_user_id_optional()
+    current_email = _current_email()
+
+    supplied_auth = _safe_str(payload.get("auth_user_id") or payload.get("authUserId"), "", 160)
+    supplied_local = _safe_int(payload.get("local_user_id") or payload.get("localUserId"), 0)
+    supplied_email = _safe_str(payload.get("email"), "", 320).lower()
+
+    if supplied_auth and current_auth_user_id and supplied_auth != current_auth_user_id:
+        return _json_error(
+            "auth_user_id darf nicht für einen anderen Benutzer überschrieben werden.",
+            403,
+            code="identity_override_denied",
+        )
+    if supplied_local and current_local_user_id and supplied_local != current_local_user_id:
+        return _json_error(
+            "local_user_id darf nicht für einen anderen Benutzer überschrieben werden.",
+            403,
+            code="identity_override_denied",
+        )
+    if supplied_email and current_email and supplied_email != current_email.lower():
+        return _json_error(
+            "E-Mail-Identität stimmt nicht mit dem aktuellen Auth-Kontext überein.",
+            403,
+            code="identity_override_denied",
+        )
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -598,11 +766,15 @@ def _current_user_id_optional() -> Optional[int]:
 def _current_auth_user_id() -> Optional[str]:
     try:
         context = _current_user_context_dict(ensure=False)
+        user = _safe_dict(context.get("user"))
+        subject = _safe_dict(context.get("subject"))
         value = _safe_str(
             context.get("auth_user_id")
             or context.get("authUserId")
-            or context.get("sub")
-            or context.get("subject"),
+            or user.get("id")
+            or user.get("user_id")
+            or subject.get("id")
+            or context.get("sub"),
             "",
             160,
         )
@@ -614,10 +786,14 @@ def _current_auth_user_id() -> Optional[str]:
 def _current_email() -> Optional[str]:
     try:
         context = _current_user_context_dict(ensure=False)
+        user = _safe_dict(context.get("user"))
+        subject = _safe_dict(context.get("subject"))
         value = _safe_str(
             context.get("email")
             or context.get("auth_email")
-            or context.get("authEmail"),
+            or context.get("authEmail")
+            or user.get("email")
+            or subject.get("email"),
             "",
             320,
         ).lower()
@@ -894,6 +1070,18 @@ def _extract_chunk_from_project_payload(project_payload: Dict[str, Any]) -> Dict
             bool(chunk_project_id and chunk_world_id and status == "ready"),
         )
 
+        provisioning = _safe_dict(
+            chunk.get("provisioning")
+            or payload.get("chunk_provisioning")
+            or payload.get("chunkProvisioning")
+        )
+        access_sync = _safe_dict(
+            chunk.get("access_sync")
+            or chunk.get("accessSync")
+            or payload.get("chunk_access_sync")
+            or payload.get("chunkAccessSync")
+        )
+
         return {
             "status": status,
             "ready": ready,
@@ -905,6 +1093,21 @@ def _extract_chunk_from_project_payload(project_payload: Dict[str, Any]) -> Dict
             "chunkWorldId": chunk_world_id,
             "route_hints": route_hints,
             "routeHints": route_hints,
+            "provisioning": provisioning,
+            "access_sync": access_sync,
+            "accessSync": access_sync,
+            "worldTemplateRequested": provisioning.get("requestedWorldTemplate")
+            or payload.get("chunkWorldTemplateRequested"),
+            "worldTemplateEffective": provisioning.get("effectiveWorldTemplate")
+            or payload.get("chunkWorldTemplateEffective"),
+            "fallbackUsed": _safe_bool(
+                provisioning.get("fallbackUsed")
+                if "fallbackUsed" in provisioning
+                else payload.get("chunkFallbackUsed"),
+                False,
+            ),
+            "fallbackReason": provisioning.get("fallbackReason")
+            or payload.get("chunkFallbackReason"),
             "error": _safe_dict(chunk.get("error") or payload.get("chunk_last_error") or payload.get("chunkLastError")),
         }
 
@@ -938,8 +1141,15 @@ def _serialize_project_chunk_payload(
             include_service_links=include_private,
             include_publication=True,
         )
+        project_payload = _sanitize_project_payload_for_route(
+            project_payload,
+            include_private=include_private,
+        )
 
         chunk = _extract_chunk_from_project_payload(project_payload)
+
+        access_sync = _project_access_sync_payload(project)
+        read_only = _project_read_only(project, user_id)
 
         result = {
             "ok": True,
@@ -948,6 +1158,8 @@ def _serialize_project_chunk_payload(
             "appProjectPublicId": getattr(project, "public_id", None),
             "is_demo": _project_is_demo(project),
             "isDemo": _project_is_demo(project),
+            "read_only": read_only,
+            "readOnly": read_only,
             "chunk": chunk,
             "chunk_ready": chunk.get("ready"),
             "chunkReady": chunk.get("ready"),
@@ -959,6 +1171,10 @@ def _serialize_project_chunk_payload(
             "chunkUniverseId": chunk.get("chunk_universe_id"),
             "chunk_world_id": chunk.get("chunk_world_id"),
             "chunkWorldId": chunk.get("chunk_world_id"),
+            "chunk_provisioning": chunk.get("provisioning") or {},
+            "chunkProvisioning": chunk.get("provisioning") or {},
+            "chunk_access_sync": access_sync,
+            "chunkAccessSync": access_sync,
             "project": project_payload,
         }
 
@@ -1431,6 +1647,9 @@ def _finalize_json_response(resp: Response, *, no_store: bool = True) -> Respons
     try:
         resp.headers.setdefault("Referrer-Policy", "no-referrer")
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        request_id = _request_id()
+        resp.headers.setdefault("X-Request-ID", request_id)
+        resp.headers.setdefault("X-Correlation-ID", request_id)
     except Exception:
         pass
 
@@ -1449,6 +1668,8 @@ def _json_response(payload: Dict[str, Any], status: int = 200, *, no_store: bool
     try:
         body = _safe_dict(payload)
         body.setdefault("status_code", int(status))
+        body.setdefault("request_id", _request_id())
+        body.setdefault("requestId", body.get("request_id"))
         resp = jsonify(body)
         resp.status_code = int(status)
         _finalize_json_response(resp, no_store=no_store)
@@ -1577,6 +1798,7 @@ def _projects_api_before_request():
     AuthContext. Access decisions remain inside the route/service handlers.
     """
     try:
+        _request_id()
         _current_user_context_dict(ensure=False)
     except Exception as exc:
         _log_warning("projects API auth context preload failed: %s", exc.__class__.__name__)
@@ -1591,6 +1813,8 @@ def projects_status():
     try:
         invitation_status = {}
         publication_status = {}
+        access_sync_status = {}
+        chunk_config_status = {}
         auth_dependency = {}
         auth_requirements = {}
 
@@ -1634,11 +1858,31 @@ def projects_status():
                 "error": str(exc),
             }
 
+        try:
+            if callable(get_project_chunk_access_sync_service_status):
+                access_sync_status = get_project_chunk_access_sync_service_status()
+        except Exception as exc:
+            access_sync_status = {
+                "ok": False,
+                "code": "chunk_access_sync_status_failed",
+                "error": str(exc),
+            }
+
+        try:
+            if callable(get_project_chunk_config_status):
+                chunk_config_status = get_project_chunk_config_status()
+        except Exception as exc:
+            chunk_config_status = {
+                "ok": False,
+                "code": "chunk_config_status_failed",
+                "error": str(exc),
+            }
+
         payload = {
             "ok": True,
             "service": "projects_api",
             "blueprint": "projects_api",
-            "phase": "project-management-vectoplan-auth-no-default-user",
+            "phase": "project-management-earth-default-chunk-access-sync",
             "default_user_removed": True,
             "auth_unavailable_returns_503": True,
             "auth_dependency": auth_dependency,
@@ -1648,6 +1892,8 @@ def projects_status():
             "permissions": get_permission_service_status() if callable(get_permission_service_status) else {"ok": False, "code": "permission_service_unavailable"},
             "invitations": invitation_status,
             "publication": publication_status,
+            "chunk_access_sync": access_sync_status,
+            "chunk_config": chunk_config_status,
             "project_form": {
                 "address_input_mode": "single_box",
                 "visibility_mode": "cards_private_unlisted_public",
@@ -1666,6 +1912,10 @@ def projects_status():
                 "provisioningRequired": _config_bool("VECTOPLAN_CHUNK_PROVISION_REQUIRED", False),
                 "internalUrlConfigured": bool(_config_str("VECTOPLAN_CHUNK_INTERNAL_URL", "")),
                 "publicUrlConfigured": bool(_config_str("VECTOPLAN_CHUNK_PUBLIC_URL", "")),
+                "defaultWorldTemplate": _config_str("VECTOPLAN_APP_DEFAULT_WORLD_TEMPLATE", "earth", 40),
+                "fallbackWorldTemplate": _config_str("VECTOPLAN_APP_FALLBACK_WORLD_TEMPLATE", "flat", 40),
+                "accessSyncEnabled": _config_bool("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ENABLED", True),
+                "viewerReadOnly": True,
             },
             "routes": {
                 "list": "/v1/projects",
@@ -1676,6 +1926,9 @@ def projects_status():
                 "chunk_get": "/v1/projects/<project_id>/chunk",
                 "chunk_ensure": "/v1/projects/<project_id>/chunk/ensure",
                 "chunk_retry": "/v1/projects/<project_id>/chunk/retry",
+                "chunk_reconcile": "/v1/projects/<project_id>/chunk/reconcile",
+                "chunk_access_status": "/v1/projects/<project_id>/chunk/access",
+                "chunk_access_sync": "/v1/projects/<project_id>/chunk/access/sync",
                 "members": "/v1/projects/<project_id>/members",
                 "invitations": "/v1/projects/<project_id>/invitations",
                 "publication": "/v1/projects/<project_id>/publication",
@@ -1955,6 +2208,9 @@ def project_chunk_get(project_id: str):
             "self": f"/v1/projects/{getattr(project, 'public_id', project_id)}/chunk",
             "ensure": f"/v1/projects/{getattr(project, 'public_id', project_id)}/chunk/ensure",
             "retry": f"/v1/projects/{getattr(project, 'public_id', project_id)}/chunk/retry",
+            "reconcile": f"/v1/projects/{getattr(project, 'public_id', project_id)}/chunk/reconcile",
+            "access": f"/v1/projects/{getattr(project, 'public_id', project_id)}/chunk/access",
+            "accessSync": f"/v1/projects/{getattr(project, 'public_id', project_id)}/chunk/access/sync",
         }
 
         return _json_response(payload, 200, no_store=True)
@@ -2024,6 +2280,148 @@ def project_chunk_retry(project_id: str):
         return _exception_response("project_chunk_retry failed", exc, code="project_chunk_retry_failed")
 
 
+@bp.post("/v1/projects/<project_id>/chunk/reconcile")
+def project_chunk_reconcile(project_id: str):
+    """Ensure the Chunk graph and then reconcile all direct project assignments."""
+    try:
+        persistent_error = _require_persistent_context()
+        if persistent_error is not None:
+            return persistent_error
+
+        if not callable(ensure_project_chunk_link_result):
+            return _json_error("project service unavailable", 503, code="project_service_unavailable")
+        if not callable(sync_project_chunk_access_result):
+            return _json_error("chunk access sync service unavailable", 503, code="chunk_access_sync_unavailable")
+
+        user_id = _current_user_id_optional()
+        data = _request_json({})
+        force = _safe_bool(data.get("force", request.args.get("force")), True)
+
+        provision = ensure_project_chunk_link_result(
+            project_id,
+            user_id=user_id,
+            force=force,
+        )
+        provision_payload = provision.to_dict() if hasattr(provision, "to_dict") else _safe_dict(provision)
+        if not _safe_bool(provision_payload.get("ok"), False):
+            return _result_response(provision)
+
+        access_sync = sync_project_chunk_access_result(
+            project_id,
+            user_id=user_id,
+            force=True,
+        )
+        access_payload = access_sync.to_dict() if hasattr(access_sync, "to_dict") else _safe_dict(access_sync)
+        project = resolve_project(project_id) if callable(resolve_project) else None
+
+        status = _safe_int(
+            access_payload.get("status_code"),
+            200 if _safe_bool(access_payload.get("ok"), False) else 502,
+        )
+        return _json_response(
+            {
+                "ok": _safe_bool(access_payload.get("ok"), False),
+                "code": access_payload.get("code") or "chunk_reconciled",
+                "project": serialize_project(
+                    project,
+                    user_id=user_id,
+                    include_permissions=True,
+                    include_service_links=True,
+                    include_publication=True,
+                ) if project is not None else None,
+                "chunk": _serialize_project_chunk_payload(
+                    project,
+                    user_id=user_id,
+                    include_private=True,
+                ) if project is not None else {},
+                "provisioning": provision_payload,
+                "access_sync": access_payload,
+                "accessSync": access_payload,
+            },
+            status,
+            no_store=True,
+        )
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+    except Exception as exc:
+        return _exception_response("project_chunk_reconcile failed", exc, code="project_chunk_reconcile_failed")
+
+
+@bp.get("/v1/projects/<project_id>/chunk/access")
+@bp.get("/v1/projects/<project_id>/chunk/access/status")
+def project_chunk_access_status(project_id: str):
+    try:
+        auth_error = _require_auth_available()
+        if auth_error is not None:
+            return auth_error
+
+        project = resolve_project(project_id) if callable(resolve_project) else None
+        if project is None:
+            return _json_error("project not found", 404, code="project_not_found")
+
+        user_id = _current_user_id_optional()
+        _require_project_permission_checked(project, PERMISSION_VIEW, user_id, allow_public_view=False)
+        access = serialize_project_permissions(project, user_id=user_id)
+        access_sync = _project_access_sync_payload(project)
+        permissions = _safe_dict(_safe_dict(access).get("permissions"))
+        can_manage = _safe_bool(_safe_dict(access).get("can_manage", permissions.get("manage")), False)
+        if not can_manage:
+            access_sync.pop("ownerAuthUserId", None)
+            access_sync.pop("owner_auth_user_id", None)
+
+        return _json_response(
+            {
+                "ok": True,
+                "project_id": getattr(project, "id", None),
+                "public_id": getattr(project, "public_id", None),
+                "read_only": _project_read_only(project, user_id),
+                "readOnly": _project_read_only(project, user_id),
+                "access": access,
+                "chunk_access_sync": access_sync,
+                "chunkAccessSync": access_sync,
+                "chunk": _extract_chunk_from_project_payload(
+                    serialize_project(
+                        project,
+                        user_id=user_id,
+                        include_permissions=True,
+                        include_service_links=False,
+                        include_publication=True,
+                    )
+                ),
+            },
+            200,
+            no_store=True,
+        )
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+    except Exception as exc:
+        return _exception_response("project_chunk_access_status failed", exc, code="chunk_access_status_failed")
+
+
+@bp.post("/v1/projects/<project_id>/chunk/access/sync")
+@bp.post("/v1/projects/<project_id>/chunk/access/reconcile")
+def project_chunk_access_sync(project_id: str):
+    try:
+        persistent_error = _require_persistent_context()
+        if persistent_error is not None:
+            return persistent_error
+        if not callable(sync_project_chunk_access_result):
+            return _json_error("chunk access sync service unavailable", 503, code="chunk_access_sync_unavailable")
+
+        user_id = _current_user_id_optional()
+        force = _request_bool("force", True)
+        result = sync_project_chunk_access_result(
+            project_id,
+            user_id=user_id,
+            force=force,
+        )
+        return _result_response(result)
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+    except Exception as exc:
+        return _exception_response("project_chunk_access_sync failed", exc, code="chunk_access_sync_failed")
+
+
 # ─────────────────────────────────────────────────────────────
 # Project members / permissions
 # ─────────────────────────────────────────────────────────────
@@ -2045,6 +2443,7 @@ def project_access_get(project_id: str):
             return _json_error("project not found", 404, code="project_not_found")
 
         user_id = _current_user_id_optional()
+        _require_project_permission_checked(project, PERMISSION_VIEW, user_id, allow_public_view=False)
 
         return _json_response(
             {
@@ -2053,10 +2452,17 @@ def project_access_get(project_id: str):
                 "public_id": getattr(project, "public_id", None),
                 "auth": _current_user_context_dict(ensure=False),
                 "access": serialize_project_permissions(project, user_id=user_id),
+                "read_only": _project_read_only(project, user_id),
+                "readOnly": _project_read_only(project, user_id),
+                "chunk_access_sync": _project_access_sync_payload(project),
+                "chunkAccessSync": _project_access_sync_payload(project),
             },
             200,
             no_store=True,
         )
+
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
 
     except Exception as exc:
         return _exception_response("project_access_get failed", exc, code="project_access_failed")
@@ -2129,13 +2535,19 @@ def project_member_set(project_id: str, target_user_id: int):
         user_id = _current_user_id_optional()
         data = _request_json({})
 
-        role = data.get("role") or request.args.get("role") or "viewer"
+        role = normalize_role(data.get("role") or request.args.get("role") or "viewer")
+        if role == "owner":
+            return _json_error(
+                "Die Owner-Rolle darf nur über die Eigentumsübertragung vergeben werden.",
+                409,
+                code="owner_role_requires_transfer",
+            )
         permissions = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
 
         membership = set_project_member_role(
             project,
             target_user_id=target_user_id,
-            role=normalize_role(role),
+            role=role,
             actor_user_id=user_id,
             overrides=permissions,
             commit=True,
@@ -2148,6 +2560,15 @@ def project_member_set(project_id: str, target_user_id: int):
                 "public_id": getattr(project, "public_id", None),
                 "member": _serialize_model(membership, include_private=True),
                 "access": serialize_project_permissions(project, user_id=user_id),
+                "chunk_access_sync": _project_access_sync_payload(project),
+                "chunkAccessSync": _project_access_sync_payload(project),
+                "project": serialize_project(
+                    project,
+                    user_id=user_id,
+                    include_permissions=True,
+                    include_service_links=False,
+                    include_publication=True,
+                ),
             },
             200,
             no_store=True,
@@ -2196,6 +2617,15 @@ def project_member_delete(project_id: str, target_user_id: int):
                 "public_id": getattr(project, "public_id", None),
                 "target_user_id": target_user_id,
                 "deleted": bool(ok),
+                "chunk_access_sync": _project_access_sync_payload(project),
+                "chunkAccessSync": _project_access_sync_payload(project),
+                "project": serialize_project(
+                    project,
+                    user_id=user_id,
+                    include_permissions=True,
+                    include_service_links=False,
+                    include_publication=True,
+                ),
             },
             200 if ok else 404,
             no_store=True,
@@ -2253,6 +2683,9 @@ def project_transfer(project_id: str):
                 "ok": True,
                 "project": serialize_project(updated, user_id=user_id, include_permissions=True),
                 "new_owner_user_id": new_owner_user_id,
+                "new_owner_auth_user_id": getattr(updated, "auth_owner_user_id", None),
+                "chunk_access_sync": _project_access_sync_payload(updated),
+                "chunkAccessSync": _project_access_sync_payload(updated),
             },
             200,
             no_store=True,
@@ -2337,7 +2770,13 @@ def project_invitations_create(project_id: str):
             or data.get("recipient")
             or request.args.get("email")
         )
-        role = data.get("role") or request.args.get("role") or "viewer"
+        role = normalize_role(data.get("role") or request.args.get("role") or "viewer")
+        if role == "owner":
+            return _json_error(
+                "Owner kann nicht per Einladung vergeben werden.",
+                409,
+                code="owner_role_requires_transfer",
+            )
         message = data.get("message") or data.get("note")
         metadata = _safe_dict(data.get("metadata") or data.get("meta"))
 
@@ -2409,21 +2848,33 @@ def project_invitations_revoke(project_id: str, invitation_id: str):
 @bp.post("/v1/project-invitations/<invitation_id>/accept")
 def project_invitation_accept(invitation_id: str):
     try:
-        auth_error = _require_auth_available()
-        if auth_error is not None:
-            return auth_error
+        persistent_error = _require_persistent_context()
+        if persistent_error is not None:
+            return persistent_error
 
         if not callable(accept_project_invitation):
             return _json_error("project invitation service unavailable", 503, code="invitation_service_unavailable")
 
         data = _request_json({})
+        identity_error = _identity_override_error(data)
+        if identity_error is not None:
+            return identity_error
+
         user_id = _current_user_id_optional()
+        auth_user_id = _current_auth_user_id()
+        email = _current_email()
+        if not user_id or not auth_user_id:
+            return _json_error(
+                "Persistente lokale und kanonische Auth-Identität erforderlich.",
+                403,
+                code="persistent_identity_required",
+            )
 
         result = accept_project_invitation(
             invitation_id=invitation_id,
-            auth_user_id=data.get("auth_user_id") or data.get("authUserId") or _current_auth_user_id(),
-            email=data.get("email") or _current_email(),
-            local_user_id=data.get("local_user_id") or data.get("localUserId") or user_id,
+            auth_user_id=auth_user_id,
+            email=email,
+            local_user_id=user_id,
             plain_token=data.get("token") or request.args.get("token"),
             actor_user_id=user_id,
             commit=True,
@@ -2441,24 +2892,38 @@ def project_invitation_accept(invitation_id: str):
 @bp.post("/v1/project-invitations/<invitation_id>/reject")
 def project_invitation_reject(invitation_id: str):
     try:
-        auth_error = _require_auth_available()
-        if auth_error is not None:
-            return auth_error
+        persistent_error = _require_persistent_context()
+        if persistent_error is not None:
+            return persistent_error
 
         if not callable(reject_project_invitation):
             return _json_error("project invitation service unavailable", 503, code="invitation_service_unavailable")
 
         data = _request_json({})
+        identity_error = _identity_override_error(data)
+        if identity_error is not None:
+            return identity_error
+
+        auth_user_id = _current_auth_user_id()
+        if not auth_user_id:
+            return _json_error(
+                "Kanonische Auth-Identität erforderlich.",
+                403,
+                code="persistent_identity_required",
+            )
 
         result = reject_project_invitation(
             invitation_id=invitation_id,
-            auth_user_id=data.get("auth_user_id") or data.get("authUserId") or _current_auth_user_id(),
-            email=data.get("email") or _current_email(),
+            auth_user_id=auth_user_id,
+            email=_current_email(),
             reason=data.get("reason") or request.args.get("reason"),
             commit=True,
         )
 
         return _service_dict_response(result, default_status=200)
+
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
 
     except Exception as exc:
         return _exception_response("project_invitation_reject failed", exc, code="invitation_reject_failed")

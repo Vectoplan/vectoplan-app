@@ -34,9 +34,13 @@ import json
 import logging
 import os
 import secrets
+import threading
+import time
 import uuid
+from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +362,25 @@ except Exception:  # pragma: no cover
         get_current_user_context = None  # type: ignore
 
 
+try:
+    from services.project_chunk_access_sync_service import (  # type: ignore
+        ProjectChunkAccessSyncError,
+        serialize_project_chunk_access_sync_status,
+        sync_project_chunk_access,
+    )
+except Exception:  # pragma: no cover
+    try:
+        from .project_chunk_access_sync_service import (  # type: ignore
+            ProjectChunkAccessSyncError,
+            serialize_project_chunk_access_sync_status,
+            sync_project_chunk_access,
+        )
+    except Exception:
+        ProjectChunkAccessSyncError = RuntimeError  # type: ignore
+        serialize_project_chunk_access_sync_status = None  # type: ignore
+        sync_project_chunk_access = None  # type: ignore
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -371,6 +394,8 @@ ACTION_INVITATION_REVOKED = "invitation_revoked"
 ACTION_INVITATION_REJECTED = "invitation_rejected"
 ACTION_INVITATION_ACCEPTED = "invitation_accepted"
 ACTION_INVITATION_EXPIRED = "invitation_expired"
+ACTION_INVITATION_ACCESS_SYNCED = "invitation_access_synced"
+ACTION_INVITATION_ACCESS_SYNC_FAILED = "invitation_access_sync_failed"
 
 AUDIT_CATEGORY_ACCESS = "project_access"
 
@@ -440,6 +465,23 @@ AUTH_UNAVAILABLE_CODES = {
     "request_failed",
     "requests_unavailable",
 }
+
+_SENSITIVE_KEY_PARTS = frozenset({
+    "authorization",
+    "cookie",
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "session",
+})
+
+_IDENTITY_CACHE_LOCK = threading.RLock()
+_IDENTITY_CACHE: "OrderedDict[str, Tuple[float, Dict[str, Any]]]" = OrderedDict()
+_KEYED_LOCKS_GUARD = threading.RLock()
+_KEYED_LOCKS: "OrderedDict[str, threading.RLock]" = OrderedDict()
+
 
 USER_BLOCKED_CODES = {
     "blocked",
@@ -633,6 +675,141 @@ def _json_clone(value: Any) -> Dict[str, Any]:
         return _safe_dict(value)
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or isinstance(value, bool):
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _redact_sensitive(value: Any, *, preserve_invitation_token: bool = False) -> Any:
+    """Return a JSON-safe copy without secrets suitable for logs/audit/results."""
+    if isinstance(value, Mapping):
+        result: Dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = _safe_str(raw_key, "", 200)
+            lowered = key.lower().replace("-", "_")
+            sensitive = any(part in lowered for part in _SENSITIVE_KEY_PARTS)
+            if preserve_invitation_token and lowered in {
+                "invitation_token",
+                "invitationtoken",
+                "invitation_url_with_token",
+                "invitationurlwithtoken",
+            }:
+                sensitive = False
+            result[key] = "[REDACTED]" if sensitive else _redact_sensitive(
+                raw_value, preserve_invitation_token=preserve_invitation_token
+            )
+        return result
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [
+            _redact_sensitive(item, preserve_invitation_token=preserve_invitation_token)
+            for item in value
+        ]
+    if isinstance(value, (_dt.datetime, _dt.date)):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    try:
+        return str(value)
+    except Exception:
+        return repr(value)
+
+
+def _cache_seconds() -> float:
+    return max(0.0, min(60.0, _safe_float(
+        _read_config("VECTOPLAN_PROJECT_INVITATION_IDENTITY_CACHE_SECONDS", 5.0), 5.0
+    )))
+
+
+def _cache_max_entries() -> int:
+    return max(16, min(4096, int(_safe_int(
+        _read_config("VECTOPLAN_PROJECT_INVITATION_IDENTITY_CACHE_MAX_ENTRIES", 512), 512
+    ) or 512)))
+
+
+def clear_project_invitation_identity_cache(email: Any = None) -> None:
+    key = normalize_email(email) if email is not None else ""
+    with _IDENTITY_CACHE_LOCK:
+        if key:
+            _IDENTITY_CACHE.pop(key, None)
+        else:
+            _IDENTITY_CACHE.clear()
+
+
+def _identity_cache_get(email: str) -> Optional[Dict[str, Any]]:
+    ttl = _cache_seconds()
+    if ttl <= 0:
+        return None
+    now = time.monotonic()
+    with _IDENTITY_CACHE_LOCK:
+        entry = _IDENTITY_CACHE.get(email)
+        if entry is None:
+            return None
+        expires_at, payload = entry
+        if expires_at <= now:
+            _IDENTITY_CACHE.pop(email, None)
+            return None
+        _IDENTITY_CACHE.move_to_end(email)
+        return _json_clone(payload)
+
+
+def _identity_cache_set(email: str, payload: Mapping[str, Any]) -> None:
+    ttl = _cache_seconds()
+    clean = _safe_dict(payload)
+    if (
+        ttl <= 0
+        or not _safe_bool(clean.get("ok"), False)
+        or not _safe_bool(clean.get("registered"), False)
+        or not _safe_str(clean.get("auth_user_id"), "", 160)
+    ):
+        return
+    safe_payload = _safe_dict(_redact_sensitive(clean))
+    with _IDENTITY_CACHE_LOCK:
+        _IDENTITY_CACHE[email] = (time.monotonic() + ttl, safe_payload)
+        _IDENTITY_CACHE.move_to_end(email)
+        while len(_IDENTITY_CACHE) > _cache_max_entries():
+            _IDENTITY_CACHE.popitem(last=False)
+
+
+def _lock_timeout_seconds() -> float:
+    return max(0.1, min(30.0, _safe_float(
+        _read_config("VECTOPLAN_PROJECT_INVITATION_LOCK_TIMEOUT_SECONDS", 5.0), 5.0
+    )))
+
+
+@contextmanager
+def _keyed_lock(key: str) -> Iterator[None]:
+    clean_key = _safe_str(key, "invitation", 500) or "invitation"
+    with _KEYED_LOCKS_GUARD:
+        lock = _KEYED_LOCKS.get(clean_key)
+        if lock is None:
+            lock = threading.RLock()
+            _KEYED_LOCKS[clean_key] = lock
+        _KEYED_LOCKS.move_to_end(clean_key)
+        while len(_KEYED_LOCKS) > 1024:
+            _KEYED_LOCKS.popitem(last=False)
+    acquired = lock.acquire(timeout=_lock_timeout_seconds())
+    if not acquired:
+        raise TimeoutError("project_invitation_lock_timeout")
+    try:
+        yield
+    finally:
+        try:
+            lock.release()
+        except Exception:
+            pass
+
+
+def _request_id(prefix: str = "inv") -> str:
+    return f"{prefix}_{uuid.uuid4().hex}"
+
+
 def _commit_or_flush(commit: bool = True) -> None:
     if db is None:
         raise RuntimeError("database_unavailable")
@@ -821,7 +998,7 @@ def _identity_failure_status(payload: Mapping[str, Any]) -> int:
     return 400
 
 
-def require_registered_email_identity(email: Any) -> Dict[str, Any]:
+def _require_registered_email_identity_uncached(email: Any) -> Dict[str, Any]:
     normalized_email = normalize_email(email)
 
     if not is_valid_email(normalized_email):
@@ -864,6 +1041,8 @@ def require_registered_email_identity(email: Any) -> Dict[str, Any]:
             "email": normalized_email,
             "require_registered": True,
             "source": "vectoplan-app.project_invitation_service",
+            "idempotency_key": "identity-lookup:" + hashlib.sha256(normalized_email.encode("utf-8")).hexdigest(),
+            "request_id": _request_id("identity_lookup"),
         },
     )
 
@@ -902,6 +1081,20 @@ def require_registered_email_identity(email: Any) -> Dict[str, Any]:
     return result
 
 
+def require_registered_email_identity(email: Any, *, use_cache: bool = True) -> Dict[str, Any]:
+    normalized_email = normalize_email(email)
+    if use_cache:
+        cached = _identity_cache_get(normalized_email)
+        if cached is not None:
+            cached["cache_hit"] = True
+            return cached
+    result = _require_registered_email_identity_uncached(normalized_email)
+    result = _safe_dict(result)
+    result.setdefault("cache_hit", False)
+    _identity_cache_set(normalized_email, result)
+    return result
+
+
 def dispatch_project_invitation_identity(
     *,
     email: Any,
@@ -915,6 +1108,7 @@ def dispatch_project_invitation_identity(
     require_registered: bool = False,
 ) -> Dict[str, Any]:
     normalized_email = normalize_email(email)
+    dispatch_idempotency_key = "project-invitation:" + (_safe_str(invitation_id, "", 160) or hashlib.sha256((normalized_email + ":" + _safe_str(project_public_id, "", 160)).encode("utf-8")).hexdigest())
 
     if legacy_dispatch_project_invitation_identity is not None:
         try:
@@ -962,6 +1156,8 @@ def dispatch_project_invitation_identity(
             "metadata": _safe_dict(metadata),
             "require_registered": bool(require_registered),
             "source": "vectoplan-app.project_invitation_service",
+            "idempotency_key": dispatch_idempotency_key,
+            "request_id": _request_id("invite_dispatch"),
         },
     )
     result.setdefault("status_code", 200 if _safe_bool(result.get("ok"), False) else _identity_failure_status(result))
@@ -984,6 +1180,7 @@ class ProjectInvitationServiceResult:
     identity: Dict[str, Any] = field(default_factory=dict)
     dispatch: Dict[str, Any] = field(default_factory=dict)
     access: Dict[str, Any] = field(default_factory=dict)
+    chunk_access_sync: Dict[str, Any] = field(default_factory=dict)
     data: Dict[str, Any] = field(default_factory=dict)
     status_code: int = 200
     error: Optional[str] = None
@@ -1006,10 +1203,12 @@ class ProjectInvitationServiceResult:
             "status_code": self.status_code,
             "project_id": project_id,
             "project_public_id": project_public_id,
-            "identity": self.identity,
-            "dispatch": self.dispatch,
-            "access": self.access,
-            "data": self.data,
+            "identity": _redact_sensitive(self.identity),
+            "dispatch": _redact_sensitive(self.dispatch),
+            "access": _redact_sensitive(self.access),
+            "chunk_access_sync": _redact_sensitive(self.chunk_access_sync),
+            "chunkAccessSync": _redact_sensitive(self.chunk_access_sync),
+            "data": _redact_sensitive(self.data, preserve_invitation_token=include_private),
             "error": self.error,
         }
 
@@ -1123,30 +1322,13 @@ def _context_denial_status(context: Mapping[str, Any]) -> int:
 
 
 def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
-    """
-    Liefert aktuellen Actor-Kontext.
+    """Return the current authenticated actor; an explicit local id is only a verifier.
 
-    Kein Default-User.
-    Kein Fallback auf id=1.
-    Explizites user_id wird nur als lokaler AppUser-Link verstanden.
+    The caller may pass a local ``AppUser.id`` for compatibility, but that value
+    never creates an authenticated context. It must match the server-side current
+    user context or the result is fail-closed.
     """
     context: Dict[str, Any] = {}
-
-    explicit_user_id = _safe_int(user_id, default=None)
-    if explicit_user_id:
-        return {
-            "user_id": explicit_user_id,
-            "id": explicit_user_id,
-            "authenticated": True,
-            "demo_mode": False,
-            "persistent": True,
-            "blocked": False,
-            "auth_unavailable": False,
-            "user_blocked": False,
-            "access_blocked": False,
-            "source": "explicit_user_id",
-        }
-
     try:
         if get_current_user_context is not None:
             try:
@@ -1174,15 +1356,47 @@ def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
             "source": "fallback_auth_unavailable",
         }
 
-    actor_user_id = _safe_int(context.get("user_id") or context.get("userId") or context.get("id"), default=None)
+    explicit_user_id = _safe_int(user_id, default=None)
+    current_user_id = _safe_int(
+        context.get("user_id") or context.get("userId") or context.get("id"),
+        default=None,
+    )
+    if explicit_user_id is not None and current_user_id != explicit_user_id:
+        return {
+            **context,
+            "user_id": None,
+            "id": None,
+            "authenticated": False,
+            "persistent": False,
+            "blocked": True,
+            "access_blocked": True,
+            "auth_unavailable": False,
+            "user_blocked": False,
+            "blocked_kind": "identity_mismatch",
+            "blocked_reason": "actor_user_id_mismatch",
+            "denial_status_code": 403,
+            "source": "explicit_user_id_verification_failed",
+        }
+
     auth_unavailable = _context_auth_unavailable(context)
     user_blocked = _context_user_blocked(context)
     access_blocked = _context_access_blocked(context)
-
-    demo_mode = _safe_bool(context.get("demo_mode") or context.get("is_demo") or context.get("demo") or context.get("demoMode"), default=False)
-    authenticated = _safe_bool(context.get("authenticated") or context.get("is_authenticated") or context.get("isAuthenticated") or context.get("logged_in"), default=False)
-    persistent = _safe_bool(context.get("persistent"), default=bool(actor_user_id and authenticated and not demo_mode and not access_blocked))
-
+    demo_mode = _safe_bool(
+        context.get("demo_mode") or context.get("is_demo") or context.get("demo") or context.get("demoMode"),
+        default=False,
+    )
+    authenticated = _safe_bool(
+        context.get("authenticated")
+        or context.get("is_authenticated")
+        or context.get("isAuthenticated")
+        or context.get("logged_in"),
+        default=False,
+    )
+    persistent = _safe_bool(
+        context.get("persistent"),
+        default=bool(current_user_id and authenticated and not demo_mode and not access_blocked),
+    )
+    actor_user_id = current_user_id
     if access_blocked or demo_mode or not persistent:
         actor_user_id = None
 
@@ -1195,9 +1409,11 @@ def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
         default="",
         max_len=160,
     )
-
-    email = _safe_str(context.get("email") or context.get("auth_email") or context.get("authEmail"), default="", max_len=320).lower()
-
+    email = _safe_str(
+        context.get("email") or context.get("auth_email") or context.get("authEmail"),
+        default="",
+        max_len=320,
+    ).lower()
     account_plan = _safe_str(
         context.get("account_plan")
         or context.get("accountPlan")
@@ -1206,7 +1422,6 @@ def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
         default="",
         max_len=80,
     )
-
     return {
         **context,
         "user_id": actor_user_id,
@@ -1215,7 +1430,7 @@ def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
         "email": email or None,
         "demo_mode": bool(demo_mode and not access_blocked),
         "authenticated": bool(authenticated and not access_blocked),
-        "persistent": bool(persistent and actor_user_id and not access_blocked and not demo_mode),
+        "persistent": bool(persistent and actor_user_id and auth_user_id and not access_blocked and not demo_mode),
         "blocked": bool(access_blocked),
         "auth_unavailable": bool(auth_unavailable),
         "user_blocked": bool(user_blocked),
@@ -1224,6 +1439,7 @@ def get_actor_context(user_id: Any = None) -> Dict[str, Any]:
         "denial_status_code": _context_denial_status(context),
         "account_plan": account_plan or None,
     }
+
 
 
 def _actor_user_id(actor_context: Optional[Mapping[str, Any]]) -> Optional[int]:
@@ -1624,7 +1840,9 @@ def _serialize_membership(membership: Any) -> Dict[str, Any]:
 
 
 def _apply_role_to_membership(membership: Any, role: Any) -> None:
-    normalized_role = normalize_invitation_role(role, allow_owner=True)
+    normalized_role = normalize_invitation_role(role, allow_owner=False)
+    if normalized_role == ROLE_OWNER:
+        raise ValueError("owner_invitation_not_allowed")
     flags = _permission_flags_for_role(normalized_role)
 
     try:
@@ -1690,7 +1908,7 @@ def _create_or_update_membership_from_invitation(
     kwargs = {
         "project_id": safe_project_id,
         "user_id": safe_user_id,
-        "role": normalize_invitation_role(invitation.role),
+        "role": normalize_invitation_role(invitation.role, allow_owner=False),
         "status": MEMBERSHIP_STATUS_ACTIVE,
     }
 
@@ -1914,20 +2132,257 @@ def _invitation_can_revoke(invitation: Any) -> bool:
 
 
 def _invitation_can_accept(invitation: Any, *, auth_user_id: Any = None, email: Any = None) -> bool:
+    """Match canonical auth id first; email fallback is legacy-only."""
     try:
-        if hasattr(invitation, "can_accept") and callable(invitation.can_accept):
-            return bool(invitation.can_accept(auth_user_id=auth_user_id, email=email))
         candidate_auth = _safe_str(auth_user_id, "", 160)
         candidate_email = normalize_email(email)
         inv_auth = _safe_str(getattr(invitation, "auth_user_id", ""), "", 160)
         inv_email = normalize_email(getattr(invitation, "email_normalized", "") or getattr(invitation, "email", ""))
-        if inv_auth and candidate_auth and inv_auth == candidate_auth:
-            return True
-        if inv_email and candidate_email and inv_email == candidate_email:
-            return True
+        if inv_auth:
+            return bool(candidate_auth and secrets.compare_digest(inv_auth, candidate_auth))
+        if inv_email:
+            return bool(candidate_email and secrets.compare_digest(inv_email, candidate_email))
         return False
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Invitation security / Chunk access synchronization
+# ---------------------------------------------------------------------------
+
+
+def _strict_invitation_role(value: Any) -> Tuple[Optional[str], Optional[ProjectInvitationServiceResult]]:
+    raw = _safe_str(value, DEFAULT_INVITATION_ROLE, 80).strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "administrator": ROLE_ADMIN,
+        "manager": ROLE_ADMIN,
+        "edit": ROLE_EDITOR,
+        "writer": ROLE_EDITOR,
+        "view": ROLE_VIEWER,
+        "reader": ROLE_VIEWER,
+    }
+    normalized = aliases.get(raw, raw or DEFAULT_INVITATION_ROLE)
+    if normalized == ROLE_OWNER:
+        return None, _result(
+            ok=False,
+            code="owner_invitation_not_allowed",
+            message="Die Owner-Rolle kann nur über die dedizierte Besitzübertragung vergeben werden.",
+            status_code=400,
+        )
+    allowed = {ROLE_ADMIN, ROLE_EDITOR, ROLE_VIEWER}
+    if normalized not in allowed:
+        return None, _result(
+            ok=False,
+            code="invalid_invitation_role",
+            message="Ungültige Projektrolle für eine Einladung.",
+            status_code=400,
+            data={"allowed_roles": sorted(allowed)},
+        )
+    return normalized, None
+
+
+def _identity_override_error(
+    actor_context: Mapping[str, Any],
+    *,
+    auth_user_id: Any = None,
+    email: Any = None,
+    local_user_id: Any = None,
+) -> Optional[ProjectInvitationServiceResult]:
+    actor_auth = _actor_auth_user_id(actor_context)
+    actor_email = normalize_email(_actor_email(actor_context))
+    actor_local = _actor_user_id(actor_context)
+    supplied_auth = _safe_str(auth_user_id, "", 160)
+    supplied_email = normalize_email(email)
+    supplied_local = _safe_int(local_user_id, None)
+    mismatch = bool(
+        (supplied_auth and supplied_auth != actor_auth)
+        or (supplied_email and supplied_email != actor_email)
+        or (supplied_local and supplied_local != actor_local)
+    )
+    if not mismatch:
+        return None
+    return _result(
+        ok=False,
+        code="identity_override_denied",
+        message="Identitätswerte dürfen nicht vom aktuellen serverseitigen Auth-Kontext abweichen.",
+        status_code=403,
+        data={"identity_override_denied": True},
+    )
+
+
+def _verify_invitation_plain_token(invitation: Any, plain_token: Any) -> bool:
+    token = _safe_str(plain_token, "", 4096)
+    if not token:
+        return True
+    try:
+        verifier = getattr(invitation, "verify_plain_token", None)
+        if callable(verifier):
+            return bool(verifier(token))
+    except Exception:
+        return False
+    expected = _safe_str(getattr(invitation, "token_hash", None), "", 256)
+    if not expected:
+        return False
+    try:
+        return secrets.compare_digest(hash_invitation_token(token), expected)
+    except Exception:
+        return False
+
+
+def _access_sync_enabled() -> bool:
+    return _safe_bool(_read_config("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ENABLED", True), True)
+
+
+def _access_sync_on_accept() -> bool:
+    return _safe_bool(_read_config("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ON_INVITATION_ACCEPT", True), True)
+
+
+def _access_sync_required() -> bool:
+    return _safe_bool(_read_config("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_REQUIRED", False), False)
+
+
+def _serialize_access_sync_status(project: Any) -> Dict[str, Any]:
+    if callable(serialize_project_chunk_access_sync_status):
+        try:
+            return _safe_dict(serialize_project_chunk_access_sync_status(project))
+        except Exception:
+            pass
+    metadata = _safe_dict(getattr(project, "metadata_json", None))
+    chunk_meta = _safe_dict(metadata.get("chunk"))
+    return _safe_dict(chunk_meta.get("accessSync") or chunk_meta.get("access_sync"))
+
+
+def _mark_access_sync_local(
+    project: Any,
+    *,
+    status: str,
+    code: str = "",
+    message: str = "",
+    request_id: str = "",
+    repair_required: bool = False,
+) -> None:
+    try:
+        if status in {"failed", "repair_required"} and hasattr(project, "mark_chunk_access_sync_failed"):
+            project.mark_chunk_access_sync_failed(
+                code=code or "chunk_access_sync_failed",
+                message=message or "Chunk access synchronization failed.",
+                repair_required=repair_required or status == "repair_required",
+            )
+        elif status == "syncing" and hasattr(project, "mark_chunk_access_sync_started"):
+            project.mark_chunk_access_sync_started(request_id=request_id or None)
+        elif status == "ready" and hasattr(project, "mark_chunk_access_synced"):
+            project.mark_chunk_access_synced()
+        else:
+            if hasattr(project, "chunk_access_sync_status"):
+                project.chunk_access_sync_status = status
+            if code and hasattr(project, "chunk_access_sync_error_code"):
+                project.chunk_access_sync_error_code = code
+            if message and hasattr(project, "chunk_access_sync_error_message"):
+                project.chunk_access_sync_error_message = message
+        metadata = _safe_dict(getattr(project, "metadata_json", None))
+        chunk_meta = _safe_dict(metadata.get("chunk"))
+        chunk_meta["accessSync"] = {
+            **_safe_dict(chunk_meta.get("accessSync") or chunk_meta.get("access_sync")),
+            "status": status,
+            "code": code or None,
+            "message": message or None,
+            "requestId": request_id or None,
+            "repairRequired": bool(repair_required),
+            "updatedAt": utcnow().isoformat(),
+            "source": "project_invitation_service",
+        }
+        metadata["chunk"] = chunk_meta
+        if hasattr(project, "metadata_json"):
+            project.metadata_json = metadata
+        _session_add(project)
+    except Exception:
+        pass
+
+
+def _sync_access_after_invitation_accept(
+    project: Any,
+    *,
+    actor_auth_user_id: str,
+    commit: bool,
+) -> Dict[str, Any]:
+    request_id = _request_id("invite_access")
+    if not commit:
+        _mark_access_sync_local(
+            project, status="pending", code="chunk_access_sync_deferred_until_commit",
+            message="Access synchronization is deferred until the app transaction is committed.",
+            request_id=request_id,
+        )
+        return {
+            "ok": False,
+            "code": "chunk_access_sync_deferred_until_commit",
+            "statusCode": 202,
+            "retryable": True,
+            "deferred": True,
+            "requestId": request_id,
+        }
+    if not _access_sync_enabled() or not _access_sync_on_accept():
+        return {
+            "ok": True,
+            "code": "chunk_access_sync_disabled_for_invitation_accept",
+            "statusCode": 200,
+            "disabled": True,
+            "requestId": request_id,
+        }
+    if not callable(sync_project_chunk_access):
+        _mark_access_sync_local(
+            project, status="repair_required", code="chunk_access_sync_service_unavailable",
+            message="project_chunk_access_sync_service is unavailable.",
+            request_id=request_id, repair_required=True,
+        )
+        try:
+            _commit_or_flush(commit=True)
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "code": "chunk_access_sync_service_unavailable",
+            "statusCode": 503,
+            "retryable": True,
+            "repairRequired": True,
+            "requestId": request_id,
+        }
+    try:
+        raw = sync_project_chunk_access(
+            project,
+            actor_auth_user_id=actor_auth_user_id,
+            force=True,
+            commit=True,
+            request_id=request_id,
+            raise_on_error=False,
+        )
+        result = _safe_dict(raw.to_dict() if hasattr(raw, "to_dict") else raw)
+        result.setdefault("requestId", request_id)
+        return _safe_dict(_redact_sensitive(result))
+    except Exception as exc:
+        error_payload = _safe_dict(exc.to_dict() if hasattr(exc, "to_dict") else {})
+        code = _safe_str(error_payload.get("code") or getattr(exc, "code", None), "chunk_access_sync_failed", 160)
+        message = _safe_str(error_payload.get("message") or getattr(exc, "message", None) or str(exc), "Chunk access synchronization failed.", 2000)
+        status_code = _safe_int(error_payload.get("statusCode") or getattr(exc, "status_code", None), 502) or 502
+        repair_required = _safe_bool(error_payload.get("repairRequired") or getattr(exc, "repair_required", False), True)
+        retryable = _safe_bool(error_payload.get("retryable") or getattr(exc, "retryable", False), True)
+        _mark_access_sync_local(
+            project, status="repair_required" if repair_required else "failed",
+            code=code, message=message, request_id=request_id, repair_required=repair_required,
+        )
+        try:
+            _commit_or_flush(commit=True)
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "code": code,
+            "message": message,
+            "statusCode": status_code,
+            "retryable": retryable,
+            "repairRequired": repair_required,
+            "requestId": request_id,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1969,12 +2424,28 @@ class ProjectInvitationService:
             "auth_identity": auth_status,
             "invitable_roles": sorted(list(INVITABLE_PROJECT_ROLES)),
             "auth_unavailable_returns_503": True,
+            "chunk_access_sync": {
+                "service_available": callable(sync_project_chunk_access),
+                "enabled": _access_sync_enabled(),
+                "on_invitation_accept": _access_sync_on_accept(),
+                "required": _access_sync_required(),
+            },
+            "identity_cache": {
+                "ttl_seconds": _cache_seconds(),
+                "max_entries": _cache_max_entries(),
+                "entries": len(_IDENTITY_CACHE),
+                "positive_only": True,
+            },
             "rules": {
                 "creates_app_user": False,
                 "allows_demo": False,
                 "requires_manage_permission": True,
                 "requires_registered_email": True,
                 "accept_requires_local_app_user_link": True,
+                "accept_uses_server_auth_identity_only": True,
+                "owner_invitation_allowed": False,
+                "chunk_sync_after_local_commit": True,
+                "remote_mutation_with_commit_false": False,
                 "default_user": False,
             },
         }
@@ -2052,250 +2523,228 @@ class ProjectInvitationService:
     ) -> ProjectInvitationServiceResult:
         if ProjectInvitation is None or db is None:
             return _model_unavailable_result()
-
         project = resolve_project(project_or_id)
         if project is None:
             return _result(ok=False, code="project_not_found", message="Projekt nicht gefunden.", status_code=404)
-
         actor_context = get_actor_context(actor_user_id)
         actor_id = _actor_user_id(actor_context)
         actor_auth_user_id = _actor_auth_user_id(actor_context)
-
         denied = _require_manage_permission(project, actor_context)
         if denied is not None:
             return denied
-
         normalized_email = normalize_email(email)
         if not is_valid_email(normalized_email):
             return _result(
-                ok=False,
-                code="invalid_email",
-                message="Die E-Mail-Adresse ist ungültig.",
-                project=project,
-                status_code=400,
-                data={"email": normalized_email},
+                ok=False, code="invalid_email", message="Die E-Mail-Adresse ist ungültig.",
+                project=project, status_code=400, data={"email": normalized_email},
             )
-
-        normalized_role = normalize_invitation_role(role, allow_owner=False)
-        if normalized_role == ROLE_OWNER:
-            normalized_role = ROLE_ADMIN
-        if normalized_role not in INVITABLE_PROJECT_ROLES:
-            normalized_role = DEFAULT_INVITATION_ROLE
-
-        identity = require_registered_email_identity(normalized_email)
-
-        if not _safe_bool(identity.get("ok"), default=False) or not _safe_bool(identity.get("registered"), default=False):
-            code = _safe_str(identity.get("code"), default="user_not_registered", max_len=120)
-            message_text = _safe_str(
-                identity.get("message"),
-                default="Einladungen sind nur an bereits registrierte Accounts möglich.",
-                max_len=1000,
-            )
-            status = _safe_int(identity.get("status_code"), default=None) or (404 if code == "user_not_registered" else 503 if code in AUTH_UNAVAILABLE_CODES else 400)
-
+        normalized_role, role_error = _strict_invitation_role(role)
+        if role_error is not None:
+            role_error.project = project
+            return role_error
+        assert normalized_role is not None
+        identity = require_registered_email_identity(normalized_email, use_cache=True)
+        if not _safe_bool(identity.get("ok"), False) or not _safe_bool(identity.get("registered"), False):
+            code = _safe_str(identity.get("code"), "user_not_registered", 120)
+            status = _safe_int(identity.get("status_code"), None) or (404 if code == "user_not_registered" else 503 if code in AUTH_UNAVAILABLE_CODES else 400)
             _write_audit_event(
-                project,
-                ACTION_INVITATION_FAILED,
-                actor_user_id=actor_id,
-                message="Project invitation rejected.",
-                metadata={"email": normalized_email, "role": normalized_role, "code": code, "identity": identity},
+                project, ACTION_INVITATION_FAILED, actor_user_id=actor_id,
+                message="Project invitation rejected before creation.",
+                metadata={"email": normalized_email, "role": normalized_role, "code": code, "identity": _redact_sensitive(identity)},
             )
-
             try:
                 _commit_or_flush(commit=commit)
             except Exception:
                 pass
-
             return _result(
-                ok=False,
-                code=code,
-                message=message_text,
-                project=project,
-                identity=identity,
-                status_code=status,
+                ok=False, code=code,
+                message=_safe_str(identity.get("message"), "Einladungen sind nur an bereits registrierte Accounts möglich.", 1000),
+                project=project, identity=_safe_dict(_redact_sensitive(identity)), status_code=status,
             )
-
-        existing_pending = _find_active_invitation_for_email(_project_id(project), normalized_email)
-        if existing_pending is not None:
+        target_auth_user_id = _safe_str(identity.get("auth_user_id"), "", 160)
+        if not target_auth_user_id:
             return _result(
-                ok=True,
-                code="invitation_already_pending",
-                message="Für diese E-Mail-Adresse existiert bereits eine aktive Einladung.",
-                project=project,
-                invitation=existing_pending,
-                identity=identity,
-                status_code=200,
+                ok=False, code="auth_identity_incomplete",
+                message="vectoplan-auth hat keine kanonische User-ID für die registrierte Identität geliefert.",
+                project=project, identity=_safe_dict(_redact_sensitive(identity)), status_code=503,
             )
-
-        linked_user = find_linked_app_user(auth_user_id=identity.get("auth_user_id"), email=normalized_email)
-        if linked_user is not None:
-            linked_user_id = _safe_int(getattr(linked_user, "id", None))
-            existing_membership = _find_membership(_project_id(project), linked_user_id)
-            if existing_membership is not None and _membership_is_active(existing_membership):
-                return _result(
-                    ok=True,
-                    code="user_already_project_member",
-                    message="Dieser registrierte User ist bereits Projektmitglied.",
-                    project=project,
-                    membership=existing_membership,
-                    identity=identity,
-                    status_code=200,
-                )
-
-        invitation: Optional[Any] = None
-        plain_token: Optional[str] = None
-
+        lock_key = f"invite:{_project_id(project)}:{normalized_email}"
         try:
-            if hasattr(ProjectInvitation, "create_pending"):
-                invitation, plain_token = ProjectInvitation.create_pending(
-                    project_id=_project_id(project),
-                    project_public_id=_project_public_id(project),
-                    email=normalized_email,
-                    role=normalized_role,
-                    invited_by_user_id=actor_id,
-                    invited_by_auth_user_id=actor_auth_user_id,
-                    identity=identity,
-                    message=message,
-                    metadata={
-                        **_safe_dict(metadata),
-                        "created_by_service": "project_invitation_service",
-                        "default_user_removed": True,
-                    },
-                    expires_in_days=expires_in_days,
-                    generate_token=True,
-                )
-            else:
-                invitation, plain_token = _manual_create_pending_invitation(
-                    project_id=_project_id(project),
-                    project_public_id=_project_public_id(project),
-                    email=normalized_email,
-                    role=normalized_role,
-                    invited_by_user_id=actor_id,
-                    invited_by_auth_user_id=actor_auth_user_id,
-                    identity=identity,
-                    message=message,
-                    metadata={**_safe_dict(metadata), "created_by_service": "project_invitation_service", "default_user_removed": True},
-                    expires_in_days=expires_in_days,
-                )
-
-            if linked_user is not None:
-                _setattr_if_present(invitation, "target_user_id", _safe_int(getattr(linked_user, "id", None)))
-
-            invitation_url = build_invitation_url(invitation, plain_token=plain_token, include_token=include_token_in_dispatch_url)
-            safe_public_url = build_invitation_url(invitation, plain_token=None, include_token=False)
-            if safe_public_url:
-                _setattr_if_present(invitation, "invitation_url", safe_public_url)
-
-            _session_add(invitation)
-
-            dispatch_result: Dict[str, Any] = {}
-
-            if dispatch:
-                dispatch_result = dispatch_project_invitation_identity(
-                    email=normalized_email,
-                    project_public_id=_project_public_id(project),
-                    role=normalized_role,
-                    invited_by_auth_user_id=actor_auth_user_id,
-                    invitation_id=getattr(invitation, "public_id", None),
-                    invitation_url=invitation_url,
-                    message=_safe_str(message, default="", max_len=4000) or None,
-                    metadata={
-                        "project_id": _project_id(project),
-                        "project_public_id": _project_public_id(project),
-                        "invitation_public_id": getattr(invitation, "public_id", None),
-                    },
-                    require_registered=False,
-                )
-
-                if hasattr(invitation, "apply_dispatch_result"):
-                    try:
-                        invitation.apply_dispatch_result(dispatch_result)
-                    except Exception:
-                        pass
-            else:
-                dispatch_result = {
-                    "ok": True,
-                    "code": "invitation_dispatch_skipped",
-                    "message": "Einladungsversand wurde übersprungen.",
-                    "external_sent": False,
-                    "placeholder": False,
-                    "status_code": 200,
-                }
-
-            if dispatch and not _safe_bool(dispatch_result.get("ok"), default=False):
-                if hasattr(invitation, "mark_failed"):
-                    try:
-                        invitation.mark_failed(dispatch_result.get("message") or dispatch_result.get("error"))
-                    except Exception:
-                        _setattr_if_present(invitation, "status", STATUS_FAILED)
+            with _keyed_lock(lock_key):
+                existing_pending = _find_active_invitation_for_email(_project_id(project), normalized_email)
+                if existing_pending is not None:
+                    return _result(
+                        ok=True, code="invitation_already_pending",
+                        message="Für diese E-Mail-Adresse existiert bereits eine aktive Einladung.",
+                        project=project, invitation=existing_pending, identity=_safe_dict(_redact_sensitive(identity)), status_code=200,
+                        data={"idempotent": True},
+                    )
+                linked_user = find_linked_app_user(auth_user_id=target_auth_user_id, email=None)
+                if linked_user is not None:
+                    linked_user_id = _safe_int(getattr(linked_user, "id", None))
+                    existing_membership = _find_membership(_project_id(project), linked_user_id)
+                    if existing_membership is not None and _membership_is_active(existing_membership):
+                        return _result(
+                            ok=True, code="user_already_project_member",
+                            message="Dieser registrierte User ist bereits Projektmitglied.",
+                            project=project, membership=existing_membership, identity=_safe_dict(_redact_sensitive(identity)),
+                            status_code=200, data={"idempotent": True},
+                        )
+                invitation: Optional[Any] = None
+                plain_token: Optional[str] = None
+                try:
+                    if hasattr(ProjectInvitation, "create_pending"):
+                        invitation, plain_token = ProjectInvitation.create_pending(
+                            project_id=_project_id(project), project_public_id=_project_public_id(project),
+                            email=normalized_email, role=normalized_role, invited_by_user_id=actor_id,
+                            invited_by_auth_user_id=actor_auth_user_id, identity=identity, message=message,
+                            metadata={
+                                **_safe_dict(metadata),
+                                "created_by_service": "project_invitation_service",
+                                "default_user_removed": True,
+                                "target_auth_user_id": target_auth_user_id,
+                            },
+                            expires_in_days=expires_in_days, generate_token=True,
+                        )
+                    else:
+                        invitation, plain_token = _manual_create_pending_invitation(
+                            project_id=_project_id(project), project_public_id=_project_public_id(project),
+                            email=normalized_email, role=normalized_role, invited_by_user_id=actor_id,
+                            invited_by_auth_user_id=actor_auth_user_id, identity=identity, message=message,
+                            metadata={
+                                **_safe_dict(metadata),
+                                "created_by_service": "project_invitation_service",
+                                "default_user_removed": True,
+                                "target_auth_user_id": target_auth_user_id,
+                            },
+                            expires_in_days=expires_in_days,
+                        )
+                    if invitation is None:
+                        raise RuntimeError("project_invitation_create_returned_none")
+                    _setattr_if_present(invitation, "auth_user_id", target_auth_user_id)
+                    if linked_user is not None:
+                        _setattr_if_present(invitation, "target_user_id", _safe_int(getattr(linked_user, "id", None)))
+                    safe_public_url = build_invitation_url(invitation, plain_token=None, include_token=False)
+                    if safe_public_url:
+                        _setattr_if_present(invitation, "invitation_url", safe_public_url)
+                    _session_add(invitation)
+                    _write_audit_event(
+                        project, ACTION_INVITATION_CREATED, actor_user_id=actor_id,
+                        message="Project invitation created.",
+                        metadata={
+                            "invitation_id": getattr(invitation, "public_id", None),
+                            "email": normalized_email, "role": normalized_role,
+                            "target_auth_user_id": target_auth_user_id,
+                        },
+                    )
+                    _commit_or_flush(commit=commit)
+                except Exception as exc:
+                    _rollback_safely()
+                    _log_exception("invite_by_email local persistence failed", project_id=_project_id(project), email=normalized_email)
+                    return _result(
+                        ok=False, code="project_invitation_create_failed",
+                        message="Die Einladung konnte nicht erstellt werden.", project=project,
+                        invitation=invitation, identity=_safe_dict(_redact_sensitive(identity)),
+                        status_code=500, error=str(exc),
+                    )
+                if not commit:
+                    data = {
+                        "email": normalized_email, "role": normalized_role,
+                        "dispatch_requested": bool(dispatch), "dispatch_deferred": bool(dispatch),
+                        "local_committed": False, "no_user_created": True,
+                    }
+                    if include_token_in_result and plain_token:
+                        data["invitation_token"] = plain_token
+                        data["invitation_url_with_token"] = build_invitation_url(invitation, plain_token=plain_token, include_token=True)
+                    return _result(
+                        ok=True, code="project_invitation_created_dispatch_deferred",
+                        message="Einladung wurde im aktuellen Transaktionskontext erstellt; der Versand ist bis nach dem Commit zurückgestellt.",
+                        project=project, invitation=invitation, identity=_safe_dict(_redact_sensitive(identity)),
+                        dispatch={"ok": True, "code": "invitation_dispatch_deferred", "deferred": bool(dispatch)},
+                        status_code=201, data=data,
+                    )
+                dispatch_result: Dict[str, Any]
+                if dispatch:
+                    invitation_url = build_invitation_url(
+                        invitation, plain_token=plain_token, include_token=include_token_in_dispatch_url
+                    )
+                    dispatch_result = dispatch_project_invitation_identity(
+                        email=normalized_email, project_public_id=_project_public_id(project), role=normalized_role,
+                        invited_by_auth_user_id=actor_auth_user_id, invitation_id=getattr(invitation, "public_id", None),
+                        invitation_url=invitation_url, message=_safe_str(message, "", 4000) or None,
+                        metadata={
+                            "project_id": _project_id(project),
+                            "project_public_id": _project_public_id(project),
+                            "invitation_public_id": getattr(invitation, "public_id", None),
+                            "idempotency_key": f"project-invitation:{getattr(invitation, 'public_id', '')}",
+                        },
+                        require_registered=False,
+                    )
                 else:
-                    _setattr_if_present(invitation, "status", STATUS_FAILED)
-                audit_action = ACTION_INVITATION_FAILED
-                audit_message = "Project invitation created but dispatch failed."
-                result_ok = False
-                result_code = _safe_str(dispatch_result.get("code"), default="invitation_dispatch_failed", max_len=120)
-                result_status = _safe_int(dispatch_result.get("status_code"), default=None) or 503 if _safe_bool(dispatch_result.get("auth_unavailable"), False) else 502
-                result_message = _safe_str(dispatch_result.get("message"), default="Die Einladung konnte nicht versendet werden.", max_len=1000)
-            else:
-                audit_action = ACTION_INVITATION_CREATED
-                audit_message = "Project invitation created."
-                result_ok = True
-                result_code = "project_invitation_created"
-                result_status = 201
-                result_message = "Einladung wurde erstellt."
-
-            _write_audit_event(
-                project,
-                audit_action,
-                actor_user_id=actor_id,
-                message=audit_message,
-                metadata={
-                    "invitation_id": getattr(invitation, "public_id", None),
-                    "email": normalized_email,
-                    "role": normalized_role,
-                    "identity": identity,
-                    "dispatch": dispatch_result,
-                },
-            )
-
-            _commit_or_flush(commit=commit)
-
-            data: Dict[str, Any] = {
-                "email": normalized_email,
-                "role": normalized_role,
-                "dispatch_requested": bool(dispatch),
-                "linked_app_user_found": linked_user is not None,
-                "no_user_created": True,
-            }
-
-            if include_token_in_result and plain_token:
-                data["invitation_token"] = plain_token
-                data["invitation_url_with_token"] = build_invitation_url(invitation, plain_token=plain_token, include_token=True)
-
+                    dispatch_result = {
+                        "ok": True, "code": "invitation_dispatch_skipped",
+                        "message": "Einladungsversand wurde übersprungen.",
+                        "external_sent": False, "status_code": 200,
+                    }
+                safe_dispatch = _safe_dict(_redact_sensitive(dispatch_result))
+                dispatch_ok = _safe_bool(dispatch_result.get("ok"), False)
+                try:
+                    if hasattr(invitation, "apply_dispatch_result"):
+                        invitation.apply_dispatch_result(dispatch_result)
+                    if dispatch and not dispatch_ok:
+                        if hasattr(invitation, "mark_failed"):
+                            invitation.mark_failed(dispatch_result.get("message") or dispatch_result.get("error"))
+                        else:
+                            _setattr_if_present(invitation, "status", STATUS_FAILED)
+                    _session_add(invitation)
+                    _write_audit_event(
+                        project, ACTION_INVITATION_DISPATCHED if dispatch_ok else ACTION_INVITATION_FAILED,
+                        actor_user_id=actor_id,
+                        message="Project invitation dispatched." if dispatch_ok else "Project invitation dispatch failed.",
+                        metadata={
+                            "invitation_id": getattr(invitation, "public_id", None),
+                            "email": normalized_email, "role": normalized_role,
+                            "dispatch": safe_dispatch, "invitation_persisted": True,
+                        },
+                    )
+                    _commit_or_flush(commit=True)
+                except Exception as exc:
+                    _rollback_safely()
+                    return _result(
+                        ok=False, code="invitation_dispatch_state_persist_failed",
+                        message="Die Einladung wurde gespeichert und möglicherweise versendet, aber der Versandstatus konnte nicht gespeichert werden.",
+                        project=project, invitation=invitation, identity=_safe_dict(_redact_sensitive(identity)),
+                        dispatch=safe_dispatch, status_code=500, error=str(exc),
+                        data={"invitation_persisted": True, "dispatch_state_unknown": True, "repair_required": True},
+                    )
+                data = {
+                    "email": normalized_email, "role": normalized_role,
+                    "dispatch_requested": bool(dispatch), "linked_app_user_found": linked_user is not None,
+                    "no_user_created": True, "invitation_persisted": True, "local_committed": True,
+                }
+                if include_token_in_result and plain_token:
+                    data["invitation_token"] = plain_token
+                    data["invitation_url_with_token"] = build_invitation_url(invitation, plain_token=plain_token, include_token=True)
+                if dispatch_ok:
+                    return _result(
+                        ok=True, code="project_invitation_created", message="Einladung wurde erstellt.",
+                        project=project, invitation=invitation, identity=_safe_dict(_redact_sensitive(identity)),
+                        dispatch=safe_dispatch, status_code=201, data=data,
+                    )
+                code = _safe_str(dispatch_result.get("code"), "invitation_dispatch_failed", 120)
+                status = _safe_int(dispatch_result.get("status_code"), None) or (503 if _safe_bool(dispatch_result.get("auth_unavailable"), False) else 502)
+                return _result(
+                    ok=False, code=code,
+                    message=_safe_str(dispatch_result.get("message"), "Die Einladung wurde gespeichert, konnte aber nicht versendet werden.", 1000),
+                    project=project, invitation=invitation, identity=_safe_dict(_redact_sensitive(identity)),
+                    dispatch=safe_dispatch, status_code=status,
+                    data={**data, "dispatch_failed": True, "retryable": status >= 500},
+                )
+        except TimeoutError:
             return _result(
-                ok=result_ok,
-                code=result_code,
-                message=result_message,
-                project=project,
-                invitation=invitation,
-                identity=identity,
-                dispatch=dispatch_result,
-                status_code=result_status,
-                data=data,
-            )
-
-        except Exception as exc:
-            _rollback_safely()
-            _log_exception("invite_by_email failed", project_id=_project_id(project), email=normalized_email, role=normalized_role)
-            return _result(
-                ok=False,
-                code="project_invitation_create_failed",
-                message="Die Einladung konnte nicht erstellt werden.",
-                project=project,
-                invitation=invitation,
-                identity=identity,
-                status_code=500,
-                error=str(exc),
+                ok=False, code="project_invitation_busy",
+                message="Eine parallele Einladungsaktion für diese E-Mail-Adresse läuft bereits.",
+                project=project, status_code=409, data={"retryable": True},
             )
 
     def revoke_invitation(
@@ -2395,80 +2844,55 @@ class ProjectInvitationService:
     ) -> ProjectInvitationServiceResult:
         if ProjectInvitation is None or db is None:
             return _model_unavailable_result()
-
         actor_context = get_actor_context(None)
-
         if _context_auth_unavailable(actor_context):
             return _result(ok=False, code=_context_code(actor_context) or "auth_service_unavailable", message="vectoplan-auth ist nicht erreichbar.", status_code=503, data={"auth_unavailable": True})
-
         if _actor_is_blocked(actor_context):
             return _result(ok=False, code=_context_code(actor_context) or "auth_blocked", message="Der Zugriff ist gesperrt.", status_code=_context_denial_status(actor_context), data={"blocked": True})
-
-        invitation = _find_invitation_by_public_id(invitation_id)
-        if invitation is None:
-            return _result(ok=False, code="project_invitation_not_found", message="Einladung nicht gefunden.", status_code=404)
-
-        project = resolve_project(getattr(invitation, "project_id", None))
-
-        effective_auth_user_id = auth_user_id or _actor_auth_user_id(actor_context)
-        effective_email = email or _actor_email(actor_context)
-
-        if not effective_auth_user_id and not effective_email:
-            return _result(
-                ok=False,
-                code="auth_identity_required",
-                message="Zum Ablehnen der Einladung ist eine Auth-Identität erforderlich.",
-                project=project,
-                invitation=invitation,
-                status_code=401,
-            )
-
-        if not _invitation_can_accept(invitation, auth_user_id=effective_auth_user_id, email=effective_email):
-            return _result(
-                ok=False,
-                code="project_invitation_not_rejectable",
-                message="Diese Einladung kann durch diese Identität nicht abgelehnt werden.",
-                project=project,
-                invitation=invitation,
-                status_code=409,
-            )
-
+        if not _safe_bool(actor_context.get("authenticated"), False):
+            return _result(ok=False, code="authentication_required", message="Zum Ablehnen der Einladung ist Login erforderlich.", status_code=401)
+        override_error = _identity_override_error(actor_context, auth_user_id=auth_user_id, email=email)
+        if override_error is not None:
+            return override_error
+        effective_auth_user_id = _actor_auth_user_id(actor_context)
+        effective_email = _actor_email(actor_context)
+        if not effective_auth_user_id:
+            return _result(ok=False, code="auth_identity_required", message="Zum Ablehnen der Einladung ist eine kanonische Auth-User-ID erforderlich.", status_code=401)
         try:
-            if hasattr(invitation, "mark_rejected"):
-                invitation.mark_rejected(reason=reason)
-            else:
-                _setattr_if_present(invitation, "status", STATUS_REJECTED)
-                _setattr_if_present(invitation, "rejected_at", utcnow())
-                _setattr_if_present(invitation, "reject_reason", _safe_str(reason, "", 1000) or None)
-
-            _write_audit_event(
-                project,
-                ACTION_INVITATION_REJECTED,
-                actor_user_id=None,
-                message="Project invitation rejected.",
-                metadata={
-                    "invitation_id": getattr(invitation, "public_id", None),
-                    "email": getattr(invitation, "email_normalized", None),
-                    "auth_user_id": _safe_str(effective_auth_user_id),
-                    "reason": _safe_str(reason),
-                },
-            )
-
-            _commit_or_flush(commit=commit)
-
-            return _result(ok=True, code="project_invitation_rejected", message="Einladung wurde abgelehnt.", project=project, invitation=invitation, status_code=200)
-
-        except Exception as exc:
-            _rollback_safely()
-            return _result(
-                ok=False,
-                code="project_invitation_reject_failed",
-                message="Einladung konnte nicht abgelehnt werden.",
-                project=project,
-                invitation=invitation,
-                status_code=500,
-                error=str(exc),
-            )
+            with _keyed_lock(f"reject:{_safe_str(invitation_id, '', 180)}"):
+                invitation = _find_invitation_by_public_id(invitation_id)
+                if invitation is None:
+                    return _result(ok=False, code="project_invitation_not_found", message="Einladung nicht gefunden.", status_code=404)
+                project = resolve_project(getattr(invitation, "project_id", None))
+                if _safe_str(getattr(invitation, "status", ""), "", 40).lower() == STATUS_REJECTED:
+                    return _result(ok=True, code="project_invitation_already_rejected", message="Einladung wurde bereits abgelehnt.", project=project, invitation=invitation, status_code=200, data={"idempotent": True})
+                if not _invitation_can_accept(invitation, auth_user_id=effective_auth_user_id, email=effective_email):
+                    return _result(ok=False, code="project_invitation_not_rejectable", message="Diese Einladung kann durch diese Identität nicht abgelehnt werden.", project=project, invitation=invitation, status_code=403)
+                try:
+                    if hasattr(invitation, "mark_rejected"):
+                        invitation.mark_rejected(reason=reason)
+                    else:
+                        _setattr_if_present(invitation, "status", STATUS_REJECTED)
+                        _setattr_if_present(invitation, "rejected_at", utcnow())
+                        _setattr_if_present(invitation, "reject_reason", _safe_str(reason, "", 1000) or None)
+                    _session_add(invitation)
+                    _write_audit_event(
+                        project, ACTION_INVITATION_REJECTED, actor_user_id=_actor_user_id(actor_context),
+                        message="Project invitation rejected.",
+                        metadata={
+                            "invitation_id": getattr(invitation, "public_id", None),
+                            "email": getattr(invitation, "email_normalized", None),
+                            "auth_user_id": effective_auth_user_id,
+                            "reason": _safe_str(reason),
+                        },
+                    )
+                    _commit_or_flush(commit=commit)
+                    return _result(ok=True, code="project_invitation_rejected", message="Einladung wurde abgelehnt.", project=project, invitation=invitation, status_code=200, data={"local_committed": bool(commit)})
+                except Exception as exc:
+                    _rollback_safely()
+                    return _result(ok=False, code="project_invitation_reject_failed", message="Einladung konnte nicht abgelehnt werden.", project=project, invitation=invitation, status_code=500, error=str(exc))
+        except TimeoutError:
+            return _result(ok=False, code="project_invitation_busy", message="Diese Einladung wird bereits verarbeitet.", status_code=409, data={"retryable": True})
 
     def accept_invitation(
         self,
@@ -2480,191 +2904,175 @@ class ProjectInvitationService:
         actor_user_id: Any = None,
         commit: bool = True,
     ) -> ProjectInvitationServiceResult:
-        """
-        Nimmt eine Einladung an.
+        """Accept an invitation using only the server-side current Auth identity.
 
-        Wichtig:
-        - Erzeugt keinen AppUser.
-        - local_user_id muss bereits durch den Auth-Sync existieren
-          oder über auth_user_id/email auffindbar sein.
-        - Erst dann wird ProjectMembership erzeugt/aktiviert.
+        Local membership/invitation changes are committed before Chunk access is
+        synchronized. A Chunk failure never rolls back the accepted App membership.
         """
         if ProjectInvitation is None or db is None:
             return _model_unavailable_result()
-
         actor_context = get_actor_context(actor_user_id)
-
         if _context_auth_unavailable(actor_context):
             return _result(ok=False, code=_context_code(actor_context) or "auth_service_unavailable", message="vectoplan-auth ist nicht erreichbar.", status_code=503, data={"auth_unavailable": True})
-
         if _actor_is_blocked(actor_context):
             return _result(ok=False, code=_context_code(actor_context) or "auth_blocked", message="Der Zugriff ist gesperrt.", status_code=_context_denial_status(actor_context), data={"blocked": True})
-
         if _actor_is_demo(actor_context):
             return _result(ok=False, code="demo_mode_not_allowed", message="Im Demo-Modus können keine Projekteinladungen angenommen werden.", status_code=403, data={"demo_mode": True})
-
         if not _safe_bool(actor_context.get("authenticated"), False):
             return _result(ok=False, code="authentication_required", message="Zum Annehmen der Einladung ist Login erforderlich.", status_code=401)
-
-        invitation = _find_invitation_by_public_id(invitation_id)
-        if invitation is None:
-            return _result(ok=False, code="project_invitation_not_found", message="Einladung nicht gefunden.", status_code=404)
-
-        project = resolve_project(getattr(invitation, "project_id", None))
-
+        override_error = _identity_override_error(
+            actor_context, auth_user_id=auth_user_id, email=email, local_user_id=local_user_id
+        )
+        if override_error is not None:
+            return override_error
+        effective_auth_user_id = _actor_auth_user_id(actor_context)
+        effective_email = _actor_email(actor_context)
+        actor_local_user_id = _actor_user_id(actor_context)
+        if not effective_auth_user_id:
+            return _result(ok=False, code="auth_identity_required", message="Zum Annehmen der Einladung ist eine kanonische Auth-User-ID erforderlich.", status_code=401)
+        if not actor_local_user_id or not _safe_bool(actor_context.get("persistent"), False):
+            return _result(
+                ok=False, code="local_user_link_required",
+                message="Zum Annehmen der Einladung ist eine lokale AppUser-Verknüpfung erforderlich.",
+                status_code=409, data={"auth_user_id": effective_auth_user_id, "no_user_created": True},
+            )
         try:
-            if hasattr(invitation, "ensure_not_expired") and invitation.ensure_not_expired():
-                _write_audit_event(
-                    project,
-                    ACTION_INVITATION_EXPIRED,
-                    actor_user_id=None,
-                    message="Project invitation expired.",
-                    metadata={"invitation_id": getattr(invitation, "public_id", None), "email": getattr(invitation, "email_normalized", None)},
-                )
-                _commit_or_flush(commit=commit)
-                return _result(ok=False, code="project_invitation_expired", message="Diese Einladung ist abgelaufen.", project=project, invitation=invitation, status_code=410)
-        except Exception:
-            pass
-
-        if plain_token:
-            try:
-                if hasattr(invitation, "verify_plain_token") and not invitation.verify_plain_token(plain_token):
+            with _keyed_lock(f"accept:{_safe_str(invitation_id, '', 180)}"):
+                invitation = _find_invitation_by_public_id(invitation_id)
+                if invitation is None:
+                    return _result(ok=False, code="project_invitation_not_found", message="Einladung nicht gefunden.", status_code=404)
+                project = resolve_project(getattr(invitation, "project_id", None))
+                if project is None:
+                    return _result(ok=False, code="project_not_found", message="Projekt nicht gefunden.", invitation=invitation, status_code=404)
+                invitation_role, role_error = _strict_invitation_role(getattr(invitation, "role", DEFAULT_INVITATION_ROLE))
+                if role_error is not None:
+                    role_error.project = project
+                    role_error.invitation = invitation
+                    return role_error
+                try:
+                    if hasattr(invitation, "ensure_not_expired") and invitation.ensure_not_expired():
+                        _write_audit_event(project, ACTION_INVITATION_EXPIRED, actor_user_id=actor_local_user_id, message="Project invitation expired.", metadata={"invitation_id": getattr(invitation, "public_id", None)})
+                        _commit_or_flush(commit=commit)
+                        return _result(ok=False, code="project_invitation_expired", message="Diese Einladung ist abgelaufen.", project=project, invitation=invitation, status_code=410)
+                except Exception:
+                    pass
+                if not _verify_invitation_plain_token(invitation, plain_token):
                     return _result(ok=False, code="invalid_invitation_token", message="Der Einladungstoken ist ungültig.", project=project, invitation=invitation, status_code=403)
-            except Exception:
-                return _result(ok=False, code="invalid_invitation_token", message="Der Einladungstoken konnte nicht geprüft werden.", project=project, invitation=invitation, status_code=403)
-
-        effective_auth_user_id = _actor_auth_user_id(actor_context) or auth_user_id or getattr(invitation, "auth_user_id", None)
-        effective_email = _actor_email(actor_context) or email or getattr(invitation, "email_normalized", None)
-
-        if not effective_auth_user_id and not effective_email:
-            return _result(
-                ok=False,
-                code="auth_identity_required",
-                message="Zum Annehmen der Einladung ist eine Auth-Identität erforderlich.",
-                project=project,
-                invitation=invitation,
-                status_code=401,
-            )
-
-        if not _invitation_can_accept(invitation, auth_user_id=effective_auth_user_id, email=effective_email):
-            return _result(
-                ok=False,
-                code="project_invitation_identity_mismatch",
-                message="Diese Einladung gehört nicht zur aktuellen Auth-Identität.",
-                project=project,
-                invitation=invitation,
-                status_code=403,
-            )
-
-        resolved_local_user_id = _actor_user_id(actor_context)
-
-        if not resolved_local_user_id:
-            linked_user = find_linked_app_user(auth_user_id=effective_auth_user_id, email=effective_email)
-            if linked_user is not None:
-                resolved_local_user_id = _safe_int(getattr(linked_user, "id", None))
-
-        if not resolved_local_user_id and local_user_id:
-            linked_user = find_linked_app_user(auth_user_id=effective_auth_user_id, email=effective_email)
-            linked_user_id = _safe_int(getattr(linked_user, "id", None)) if linked_user is not None else None
-            requested_local_user_id = _safe_int(local_user_id)
-            if linked_user_id and requested_local_user_id == linked_user_id:
-                resolved_local_user_id = requested_local_user_id
-
-        if not resolved_local_user_id:
-            return _result(
-                ok=False,
-                code="local_user_link_required",
-                message=(
-                    "Die Einladung ist gültig, aber es existiert noch keine lokale "
-                    "AppUser-Verknüpfung. vectoplan-auth muss den User zuerst mit "
-                    "vectoplan-app synchronisieren."
-                ),
-                project=project,
-                invitation=invitation,
-                status_code=409,
-                data={"auth_user_id": effective_auth_user_id, "email": effective_email, "no_user_created": True},
-            )
-
-        refreshed_context = get_actor_context(resolved_local_user_id)
-        if not _safe_bool(refreshed_context.get("persistent"), False):
-            return _result(
-                ok=False,
-                code="persistent_user_required",
-                message="Zum Annehmen der Einladung ist ein persistenter AppUser-Link erforderlich.",
-                project=project,
-                invitation=invitation,
-                status_code=403,
-                data={"local_user_id": resolved_local_user_id},
-            )
-
-        try:
-            ok, membership, membership_code = _create_or_update_membership_from_invitation(
-                invitation,
-                local_user_id=resolved_local_user_id,
-                actor_context=refreshed_context,
-            )
-
-            if not ok or membership is None:
+                if not _invitation_can_accept(invitation, auth_user_id=effective_auth_user_id, email=effective_email):
+                    return _result(ok=False, code="project_invitation_identity_mismatch", message="Diese Einladung gehört nicht zur aktuellen Auth-Identität.", project=project, invitation=invitation, status_code=403)
+                linked_user = find_linked_app_user(auth_user_id=effective_auth_user_id, email=None)
+                linked_user_id = _safe_int(getattr(linked_user, "id", None), None) if linked_user is not None else None
+                linked_auth_user_id = _safe_str(getattr(linked_user, "auth_user_id", None), "", 160) if linked_user is not None else ""
+                if not linked_user_id or linked_user_id != actor_local_user_id or linked_auth_user_id != effective_auth_user_id:
+                    return _result(
+                        ok=False, code="local_user_link_mismatch",
+                        message="Die lokale AppUser-Verknüpfung passt nicht zur aktuellen Auth-Identität.",
+                        project=project, invitation=invitation, status_code=409,
+                        data={"auth_user_id": effective_auth_user_id, "no_user_created": True},
+                    )
+                current_status = _safe_str(getattr(invitation, "status", ""), "", 40).lower()
+                existing_membership = _find_membership(_project_id(project), actor_local_user_id)
+                if current_status == STATUS_ACCEPTED and existing_membership is not None and _membership_is_active(existing_membership):
+                    access_sync = _sync_access_after_invitation_accept(
+                        project, actor_auth_user_id=effective_auth_user_id, commit=commit
+                    )
+                    return _result(
+                        ok=True, code="project_invitation_already_accepted",
+                        message="Einladung wurde bereits angenommen.", project=project, invitation=invitation,
+                        membership=existing_membership, chunk_access_sync=access_sync, status_code=200,
+                        data={"idempotent": True, "local_committed": bool(commit)},
+                    )
+                try:
+                    _setattr_if_present(invitation, "role", invitation_role)
+                    ok, membership, membership_code = _create_or_update_membership_from_invitation(
+                        invitation, local_user_id=actor_local_user_id, actor_context=actor_context
+                    )
+                    if not ok or membership is None:
+                        return _result(ok=False, code=membership_code, message="Projektmitgliedschaft konnte nicht erstellt werden.", project=project, invitation=invitation, status_code=500)
+                    if hasattr(invitation, "mark_accepted"):
+                        invitation.mark_accepted(
+                            accepted_by_user_id=actor_local_user_id,
+                            accepted_by_auth_user_id=effective_auth_user_id,
+                            membership_id=getattr(membership, "id", None),
+                        )
+                    else:
+                        _setattr_if_present(invitation, "status", STATUS_ACCEPTED)
+                        _setattr_if_present(invitation, "accepted_at", utcnow())
+                        _setattr_if_present(invitation, "accepted_by_user_id", actor_local_user_id)
+                        _setattr_if_present(invitation, "accepted_by_auth_user_id", effective_auth_user_id)
+                        _setattr_if_present(invitation, "membership_id", getattr(membership, "id", None))
+                    _session_add(membership)
+                    _session_add(invitation)
+                    _write_audit_event(
+                        project, ACTION_INVITATION_ACCEPTED, actor_user_id=actor_local_user_id,
+                        message="Project invitation accepted.",
+                        metadata={
+                            "invitation_id": getattr(invitation, "public_id", None),
+                            "email": getattr(invitation, "email_normalized", None),
+                            "role": invitation_role, "membership_code": membership_code,
+                            "membership_id": getattr(membership, "id", None),
+                            "auth_user_id": effective_auth_user_id,
+                        },
+                    )
+                    _commit_or_flush(commit=commit)
+                except Exception as exc:
+                    _rollback_safely()
+                    _log_exception("accept_invitation local persistence failed", invitation_id=_safe_str(invitation_id))
+                    return _result(ok=False, code="project_invitation_accept_failed", message="Einladung konnte nicht angenommen werden.", project=project, invitation=invitation, status_code=500, error=str(exc))
+                access_sync = _sync_access_after_invitation_accept(
+                    project, actor_auth_user_id=effective_auth_user_id, commit=commit
+                )
+                sync_ok = _safe_bool(access_sync.get("ok"), False)
+                _write_audit_event(
+                    project, ACTION_INVITATION_ACCESS_SYNCED if sync_ok else ACTION_INVITATION_ACCESS_SYNC_FAILED,
+                    actor_user_id=actor_local_user_id,
+                    message="Chunk project access synchronized after invitation acceptance." if sync_ok else "Chunk project access synchronization pending after invitation acceptance.",
+                    metadata={
+                        "invitation_id": getattr(invitation, "public_id", None),
+                        "membership_id": getattr(membership, "id", None),
+                        "chunk_access_sync": _redact_sensitive(access_sync),
+                        "local_membership_committed": bool(commit),
+                    },
+                )
+                if commit:
+                    try:
+                        _commit_or_flush(commit=True)
+                    except Exception:
+                        _rollback_safely()
+                if sync_ok or not commit:
+                    return _result(
+                        ok=True,
+                        code="project_invitation_accepted" if sync_ok else "project_invitation_accepted_chunk_sync_deferred",
+                        message="Einladung wurde angenommen." if sync_ok else "Einladung wurde lokal angenommen; die Chunk-Synchronisierung ist bis nach dem Commit zurückgestellt.",
+                        project=project, invitation=invitation, membership=membership,
+                        chunk_access_sync=access_sync, status_code=200,
+                        data={
+                            "membership_code": membership_code,
+                            "local_committed": bool(commit),
+                            "invitation_accepted": True,
+                            "chunk_access_sync_deferred": not commit,
+                        },
+                    )
+                sync_status = _safe_int(access_sync.get("statusCode") or access_sync.get("status_code"), 502) or 502
+                required = _access_sync_required()
                 return _result(
-                    ok=False,
-                    code=membership_code,
-                    message="Projektmitgliedschaft konnte nicht erstellt werden.",
-                    project=project,
-                    invitation=invitation,
-                    status_code=500,
+                    ok=not required,
+                    code="project_invitation_accepted_chunk_sync_failed" if required else "project_invitation_accepted_chunk_sync_pending",
+                    message="Einladung wurde angenommen, aber der Chunk-Zugriff konnte noch nicht synchronisiert werden.",
+                    project=project, invitation=invitation, membership=membership,
+                    chunk_access_sync=access_sync, status_code=sync_status if required else 202,
+                    error=_safe_str(access_sync.get("message") or access_sync.get("code"), "Chunk access synchronization pending.", 2000) if required else None,
+                    data={
+                        "membership_code": membership_code,
+                        "local_committed": bool(commit),
+                        "invitation_accepted": True,
+                        "membership_persisted": bool(commit),
+                        "repair_required": _safe_bool(access_sync.get("repairRequired"), True),
+                        "retryable": _safe_bool(access_sync.get("retryable"), True),
+                    },
                 )
-
-            if hasattr(invitation, "mark_accepted"):
-                invitation.mark_accepted(
-                    accepted_by_user_id=resolved_local_user_id,
-                    accepted_by_auth_user_id=effective_auth_user_id,
-                    membership_id=getattr(membership, "id", None),
-                )
-            else:
-                _setattr_if_present(invitation, "status", STATUS_ACCEPTED)
-                _setattr_if_present(invitation, "accepted_at", utcnow())
-                _setattr_if_present(invitation, "accepted_by_user_id", resolved_local_user_id)
-                _setattr_if_present(invitation, "accepted_by_auth_user_id", effective_auth_user_id)
-                _setattr_if_present(invitation, "membership_id", getattr(membership, "id", None))
-
-            _write_audit_event(
-                project,
-                ACTION_INVITATION_ACCEPTED,
-                actor_user_id=resolved_local_user_id,
-                message="Project invitation accepted.",
-                metadata={
-                    "invitation_id": getattr(invitation, "public_id", None),
-                    "email": getattr(invitation, "email_normalized", None),
-                    "role": getattr(invitation, "role", None),
-                    "membership_code": membership_code,
-                    "membership_id": getattr(membership, "id", None),
-                },
-            )
-
-            _commit_or_flush(commit=commit)
-
-            return _result(
-                ok=True,
-                code="project_invitation_accepted",
-                message="Einladung wurde angenommen.",
-                project=project,
-                invitation=invitation,
-                membership=membership,
-                status_code=200,
-            )
-
-        except Exception as exc:
-            _rollback_safely()
-            _log_exception("accept_invitation failed", invitation_id=_safe_str(invitation_id), auth_user_id=_safe_str(effective_auth_user_id), local_user_id=resolved_local_user_id)
-            return _result(
-                ok=False,
-                code="project_invitation_accept_failed",
-                message="Einladung konnte nicht angenommen werden.",
-                project=project,
-                invitation=invitation,
-                status_code=500,
-                error=str(exc),
-            )
+        except TimeoutError:
+            return _result(ok=False, code="project_invitation_busy", message="Diese Einladung wird bereits verarbeitet.", status_code=409, data={"retryable": True})
 
     def expire_pending(self, project_or_id: Any = None, commit: bool = True) -> ProjectInvitationServiceResult:
         if ProjectInvitation is None or db is None:
@@ -2811,6 +3219,8 @@ __all__ = [
     "ACTION_INVITATION_CREATED",
     "ACTION_INVITATION_DISPATCHED",
     "ACTION_INVITATION_EXPIRED",
+    "ACTION_INVITATION_ACCESS_SYNCED",
+    "ACTION_INVITATION_ACCESS_SYNC_FAILED",
     "ACTION_INVITATION_FAILED",
     "ACTION_INVITATION_REJECTED",
     "ACTION_INVITATION_REVOKED",
@@ -2818,6 +3228,7 @@ __all__ = [
     "ProjectInvitationServiceResult",
     "accept_project_invitation",
     "build_invitation_url",
+    "clear_project_invitation_identity_cache",
     "dispatch_project_invitation_identity",
     "expire_project_invitations",
     "find_linked_app_user",

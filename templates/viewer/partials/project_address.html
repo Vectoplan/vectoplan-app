@@ -3,38 +3,21 @@
   VECTOPLAN Project Address Partial
 
   Zweck:
-  - Reduzierter Adressbereich für das Projektformular.
-  - Sichtbar ist nur eine einzige Adressbox: address_text.
-  - Strukturierte Adressfelder und Koordinaten werden hier bewusst nicht angezeigt.
-  - Späterer Geocoder kann serverseitig oder über einen eigenen Service aus address_text
-    street/city/lat/lon/geocode-Metadaten ableiten.
-  - Dieses Partial erzeugt keine Systemreferenzen und keine Koordinaten-Eingaben.
-  - Dieses Partial speichert keine Chunk-, Editor-, Map-, 2D- oder LV-Daten.
+  - Zeigt genau eine Adress-/Standortbox: address_text.
+  - Strukturierte Adressfelder und Koordinaten bleiben absichtlich unsichtbar.
+  - Die serverseitige Georeferenzierung darf aus address_text eine Earth-Referenz ableiten.
+  - Dieses Partial erzeugt keine Accounts, Service-Referenzen oder Fach-/Chunk-Daten.
+  - Backend-Guards bleiben die Berechtigungswahrheit.
 
-  Erwartete optionale Variablen:
-  - project / current_project / project_view / _project
-  - access / access_view / _access
-  - ui_flags
-  - can_edit / _can_edit
-  - can_mutate / _can_mutate
-  - is_new / _is_new
-  - demo_mode / _demo_mode
-  - read_only / _read_only
-  - public_viewer / _public_viewer
-  - persistent / _persistent
-  - auth_unavailable / _auth_unavailable
-  - user_blocked / _user_blocked
-  - access_blocked / _access_blocked
-
-  Robustheitsregel:
-  - Partial funktioniert auch ohne vorbereitete Parent-Variablen.
-  - Keine tief verschachtelte Jinja-Logik.
-  - Bei Dicts immer Mapping prüfen.
-  - Alle Werte haben Defaults.
-  - Frontend-Gating ist nur UX. Backend bleibt die Wahrheit.
+  Sicherheitsregeln:
+  - Bestehende Projekte sind nur für owner, admin und editor bearbeitbar.
+  - Viewer und Public Viewer bleiben unabhängig von widersprüchlichen Alt-Payloads read-only.
+  - Globale Account-/Plattformrollen werden nicht als Projektrollen verwendet.
+  - Auth-Ausfall, Blocked-Zustände und inkonsistente lokale Identitäten deaktivieren Änderungen.
+  - Keine Koordinaten, Providerdaten, Geocode-Scores, internen URLs oder Identitäten ausgeben.
 #}
 
-{% set _truthy_values = [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'Yes', 'YES', 'y', 'Y', 'on', 'On', 'ON', 'ja', 'Ja', 'JA', 'enabled', 'Enabled', 'ENABLED', 'ok', 'OK'] %}
+{% set _address_truthy = [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'Yes', 'YES', 'y', 'Y', 'on', 'On', 'ON', 'ja', 'Ja', 'JA', 'enabled', 'active', 'ready', 'ok', 'linked'] %}
 
 {# ------------------------------------------------------------------------- #}
 {# Defensive context extraction                                               #}
@@ -52,76 +35,163 @@
 {% set _address_ui_raw = ui_flags|default(_address_project.get('ui_flags', _address_project.get('uiFlags', {})), true) %}
 {% set _address_ui = _address_ui_raw if _address_ui_raw is mapping else {} %}
 
+{% set _address_user_raw = current_user_view|default(_current_user|default(current_user|default({}, true), true), true) %}
+{% set _address_user = _address_user_raw if _address_user_raw is mapping else {} %}
+
+{% set _address_auth_raw = auth_context|default(_auth|default(auth|default(_address_user.get('auth', {}), true), true), true) %}
+{% set _address_auth = _address_auth_raw if _address_auth_raw is mapping else {} %}
+
 {% set _address_obj_raw = _address_project.get('address', {}) %}
 {% set _address_obj = _address_obj_raw if _address_obj_raw is mapping else {} %}
 
-{% set _metadata_raw = _address_project.get('metadata', _address_project.get('metadata_json', _address_project.get('metadataJson', {}))) %}
-{% set _metadata = _metadata_raw if _metadata_raw is mapping else {} %}
+{% set _address_georef_raw = _address_project.get('georeference', _address_project.get('geoReference', {})) %}
+{% set _address_georef = _address_georef_raw if _address_georef_raw is mapping else {} %}
 
-{% set _geocode_raw = _address_project.get('geocode', _metadata.get('geocode', {})) %}
-{% set _geocode = _geocode_raw if _geocode_raw is mapping else {} %}
+{% set _address_chunk_raw = chunk_view|default(chunk|default(_address_project.get('chunk', {}), true), true) %}
+{% set _address_chunk = _address_chunk_raw if _address_chunk_raw is mapping else {} %}
 
 {# ------------------------------------------------------------------------- #}
-{# Address value                                                              #}
+{# Address and public project identity                                        #}
 {# ------------------------------------------------------------------------- #}
 
 {% set _address_text = _address_project.get('address_text', _address_project.get('addressText', _address_obj.get('text', _address_obj.get('address_text', _address_obj.get('addressText', ''))))) %}
-{% set _address_text = '' if _address_text is none else _address_text %}
-{% set _address_text_len = _address_text|string|length %}
+{% set _address_text = '' if _address_text is none else _address_text|string %}
 {% set _address_max_len = 2000 %}
+{% set _address_text_len = _address_text|length %}
+
+{% set _address_project_public_id_raw = _address_project.get('public_id', _address_project.get('publicId', _address_project.get('project_public_id', _address_project.get('projectPublicId', '')))) %}
+{% set _address_project_public_id_text = _address_project_public_id_raw|string|lower if _address_project_public_id_raw is not none else '' %}
+{% set _address_project_public_id = _address_project_public_id_raw if _address_project_public_id_raw and _address_project_public_id_text not in ['none', 'null'] else 'new' %}
+
+{% set _address_is_new_raw = _is_new|default(is_new|default(_address_ui.get('is_new', _address_ui.get('isNew', _address_project.get('is_new', _address_project.get('isNew', none)))), true), true) %}
+{% set _address_is_new = true if _address_is_new_raw in _address_truthy or _address_project_public_id_text in ['', 'new', 'create', 'neu', 'none', 'null'] else false %}
 
 {# ------------------------------------------------------------------------- #}
-{# Project identity                                                           #}
+{# Project role, identity and effective editability                           #}
 {# ------------------------------------------------------------------------- #}
 
-{% set _address_project_public_id = _address_project.get('public_id', _address_project.get('publicId', _address_project.get('project_public_id', _address_project.get('projectPublicId', _address_project.get('id', ''))))) %}
-{% set _address_project_public_id = 'new' if not _address_project_public_id else _address_project_public_id %}
+{% set _address_role_raw = _project_role|default(_address_ui.get('project_role', _address_ui.get('projectRole', _address_access.get('project_role', _address_access.get('projectRole', _address_access.get('membership_role', _address_access.get('membershipRole', _address_access.get('role', ''))))))), true) %}
+{% set _address_role = _address_role_raw|string|lower|replace('-', '_')|replace(' ', '_') %}
+{% if _address_role not in ['owner', 'admin', 'editor', 'viewer'] %}
+  {% set _address_role = '' %}
+{% endif %}
 
-{# ------------------------------------------------------------------------- #}
-{# Permission / mode flags                                                    #}
-{# ------------------------------------------------------------------------- #}
-
-{% set _address_can_edit_raw = _can_edit|default(can_edit|default(_address_ui.get('can_edit', _address_ui.get('canEdit', _address_access.get('can_edit', _address_access.get('canEdit', _address_permissions.get('edit', false))))), true), true) %}
-{% set _address_can_edit = true if _address_can_edit_raw in _truthy_values else false %}
-
-{% set _address_can_mutate_raw = _can_mutate|default(can_mutate|default(_address_ui.get('can_mutate', _address_ui.get('canMutate', _address_access.get('can_mutate', _address_access.get('canMutate', _address_can_edit)))), true), true) %}
-{% set _address_can_mutate = true if _address_can_mutate_raw in _truthy_values else false %}
-
-{% set _address_is_new_raw = _is_new|default(is_new|default(_address_ui.get('is_new', _address_ui.get('isNew', _address_project.get('is_new', _address_project.get('isNew', false)))), true), true) %}
-{% set _address_is_new = true if _address_is_new_raw in _truthy_values or _address_project_public_id == 'new' else false %}
-
-{% set _address_demo_raw = _demo_mode|default(demo_mode|default(_address_ui.get('demo_mode', _address_ui.get('demoMode', _address_project.get('demo_mode', _address_project.get('demoMode', _address_access.get('demo_mode', _address_access.get('demoMode', false)))))), true), true) %}
-{% set _address_demo_mode = true if _address_demo_raw in _truthy_values else false %}
-
-{% set _address_persistent_raw = _persistent|default(persistent|default(_address_ui.get('persistent', _address_access.get('persistent', true)), true), true) %}
-{% set _address_persistent = true if _address_persistent_raw in _truthy_values else false %}
+{% set _address_authenticated_raw = _authenticated|default(_address_ui.get('authenticated', _address_auth.get('authenticated', _address_auth.get('is_authenticated', _address_user.get('authenticated', false)))), true) %}
+{% set _address_authenticated = true if _address_authenticated_raw in _address_truthy else false %}
 
 {% set _address_public_viewer_raw = _public_viewer|default(public_viewer|default(_address_ui.get('public_viewer', _address_ui.get('publicViewer', _address_access.get('public_viewer', _address_access.get('publicViewer', false)))), true), true) %}
-{% set _address_public_viewer = true if _address_public_viewer_raw in _truthy_values else false %}
+{% set _address_public_viewer = true if _address_public_viewer_raw in _address_truthy or _address_access.get('access_mode', _address_access.get('accessMode', ''))|string|lower == 'public' else false %}
+
+{% set _address_demo_raw = _demo_mode|default(demo_mode|default(_address_ui.get('demo_mode', _address_ui.get('demoMode', _address_project.get('demo_mode', _address_project.get('demoMode', false)))), true), true) %}
+{% set _address_demo_mode = true if _address_demo_raw in _address_truthy and not _address_public_viewer else false %}
+
+{% set _address_persistent_raw = _persistent|default(persistent|default(_address_ui.get('persistent', _address_access.get('persistent', _address_user.get('persistent', false))), true), true) %}
+{% set _address_persistent = true if _address_persistent_raw in _address_truthy else false %}
 
 {% set _address_read_only_raw = _read_only|default(read_only|default(_address_ui.get('read_only', _address_ui.get('readOnly', _address_access.get('read_only', _address_access.get('readOnly', false)))), true), true) %}
-{% set _address_read_only = true if _address_read_only_raw in _truthy_values else false %}
+{% set _address_read_only = true if _address_read_only_raw in _address_truthy else false %}
 
-{% set _address_auth_unavailable_raw = _auth_unavailable|default(auth_unavailable|default(_address_ui.get('auth_unavailable', _address_ui.get('authUnavailable', _address_access.get('auth_unavailable', _address_access.get('authUnavailable', false)))), true), true) %}
-{% set _address_auth_unavailable = true if _address_auth_unavailable_raw in _truthy_values else false %}
+{% set _address_auth_unavailable_raw = _auth_unavailable|default(auth_unavailable|default(_address_ui.get('auth_unavailable', _address_ui.get('authUnavailable', _address_auth.get('auth_unavailable', _address_auth.get('authUnavailable', false)))), true), true) %}
+{% set _address_auth_unavailable = true if _address_auth_unavailable_raw in _address_truthy else false %}
 
-{% set _address_user_blocked_raw = _user_blocked|default(user_blocked|default(_address_ui.get('user_blocked', _address_ui.get('userBlocked', _address_access.get('user_blocked', _address_access.get('userBlocked', false)))), true), true) %}
-{% set _address_user_blocked = true if _address_user_blocked_raw in _truthy_values else false %}
+{% set _address_user_blocked_raw = _user_blocked|default(user_blocked|default(_address_ui.get('user_blocked', _address_ui.get('userBlocked', _address_auth.get('user_blocked', _address_auth.get('userBlocked', false)))), true), true) %}
+{% set _address_user_blocked = true if _address_user_blocked_raw in _address_truthy else false %}
 
 {% set _address_access_blocked_raw = _access_blocked|default(access_blocked|default(_address_ui.get('access_blocked', _address_ui.get('accessBlocked', _address_access.get('access_blocked', _address_access.get('accessBlocked', false)))), true), true) %}
-{% set _address_access_blocked = true if _address_access_blocked_raw in _truthy_values else false %}
+{% set _address_access_blocked = true if _address_access_blocked_raw in _address_truthy else false %}
 
-{% set _address_can_write = true if _address_can_edit and _address_can_mutate and not _address_read_only and not _address_public_viewer and not _address_auth_unavailable and not _address_user_blocked and not _address_access_blocked and (_address_persistent or _address_demo_mode) else false %}
+{% set _address_identity_consistent_raw = _identity_consistent|default(none) %}
+{% if _address_identity_consistent_raw is none %}
+  {% set _address_identity_consistent_raw = _address_ui.get('identity_consistent') %}
+{% endif %}
+{% if _address_identity_consistent_raw is none %}
+  {% set _address_identity_consistent_raw = _address_ui.get('identityConsistent') %}
+{% endif %}
+{% if _address_identity_consistent_raw is none %}
+  {% set _address_identity_consistent_raw = _address_auth.get('identity_consistent') %}
+{% endif %}
+{% if _address_identity_consistent_raw is none %}
+  {% set _address_identity_consistent_raw = _address_auth.get('identityConsistent') %}
+{% endif %}
+{% if _address_identity_consistent_raw is none %}
+  {% set _address_identity_consistent_raw = _address_user.get('identity_consistent') %}
+{% endif %}
+{% if _address_identity_consistent_raw is none %}
+  {% set _address_identity_consistent_raw = _address_user.get('identityConsistent', true) %}
+{% endif %}
+{% set _address_identity_consistent = true if _address_identity_consistent_raw in _address_truthy else false %}
+
+{% set _address_link_state_raw = _address_ui.get('local_link_state') %}
+{% if _address_link_state_raw is none %}
+  {% set _address_link_state_raw = _address_ui.get('localLinkState') %}
+{% endif %}
+{% if _address_link_state_raw is none %}
+  {% set _address_link_state_raw = _address_auth.get('local_link_state') %}
+{% endif %}
+{% if _address_link_state_raw is none %}
+  {% set _address_link_state_raw = _address_auth.get('localLinkState') %}
+{% endif %}
+{% if _address_link_state_raw is none %}
+  {% set _address_link_state_raw = _address_user.get('local_link_state') %}
+{% endif %}
+{% if _address_link_state_raw is none %}
+  {% set _address_link_state_raw = _address_user.get('localLinkState', 'unlinked' if _address_persistent else 'not_applicable') %}
+{% endif %}
+{% set _address_link_state = _address_link_state_raw|string|lower|replace('-', '_') %}
+{% set _address_identity_blocked_raw = _identity_blocked|default(false) %}
+{% set _address_identity_blocked = true if _address_identity_blocked_raw in _address_truthy or (_address_authenticated and not _address_identity_consistent) or (_address_persistent and _address_link_state not in ['linked', 'legacy_linked']) or _address_link_state in ['identity_mismatch', 'inactive', 'deleted', 'blocked', 'unavailable'] else false %}
+
+{% set _address_can_edit_raw = _form_can_edit|default(_can_edit|default(can_edit|default(_address_ui.get('can_edit', _address_ui.get('canEdit', _address_access.get('can_edit', _address_access.get('canEdit', _address_permissions.get('edit', false))))), true), true), true) %}
+{% set _address_can_edit = true if _address_can_edit_raw in _address_truthy else false %}
+
+{% set _address_can_mutate_raw = _can_mutate|default(can_mutate|default(_address_ui.get('can_mutate', _address_ui.get('canMutate', _address_access.get('can_mutate', _address_access.get('canMutate', _address_can_edit)))), true), true) %}
+{% set _address_can_mutate = true if _address_can_mutate_raw in _address_truthy else false %}
+
+{% if not _address_is_new and _address_role not in ['owner', 'admin', 'editor'] %}
+  {% set _address_can_edit = false %}
+  {% set _address_can_mutate = false %}
+{% endif %}
+
+{% if _address_role == 'viewer' or _address_public_viewer or _address_auth_unavailable or _address_user_blocked or _address_access_blocked or _address_identity_blocked %}
+  {% set _address_can_edit = false %}
+  {% set _address_can_mutate = false %}
+  {% set _address_read_only = true %}
+{% endif %}
+
+{% if _address_demo_mode %}
+  {% set _address_persistent = false %}
+{% endif %}
+
+{% set _address_can_write = true if _address_can_edit and _address_can_mutate and not _address_read_only and not _address_public_viewer and not _address_auth_unavailable and not _address_user_blocked and not _address_access_blocked and not _address_identity_blocked and (_address_persistent or _address_demo_mode) else false %}
 
 {# ------------------------------------------------------------------------- #}
-{# Geocode metadata                                                           #}
+{# Safe georeference/world status                                             #}
 {# ------------------------------------------------------------------------- #}
 
-{% set _geocode_status = _address_project.get('geocode_status', _address_project.get('geocodeStatus', _geocode.get('status', 'none'))) %}
-{% set _geocode_status = 'none' if not _geocode_status else _geocode_status %}
-{% set _geocode_source = _geocode.get('source', '') %}
-{% set _geocode_updated_at = _geocode.get('updated_at', _geocode.get('updatedAt', '')) %}
-{% set _geocode_confidence = _geocode.get('confidence', _geocode.get('score', '')) %}
+{% set _address_georef_status_raw = _address_ui.get('georeference_status', _address_ui.get('georeferenceStatus', _address_project.get('georeference_status', _address_project.get('georeferenceStatus', _address_project.get('geocode_status', _address_project.get('geocodeStatus', _address_georef.get('status', 'unavailable'))))))) %}
+{% set _address_georef_status_text = _address_georef_status_raw|string|lower|replace('-', '_')|replace(' ', '_') %}
+{% if _address_georef_status_text in ['available', 'ready', 'resolved', 'geocoded', 'ok', 'active'] %}
+  {% set _address_georef_status = 'available' %}
+{% elif _address_georef_status_text in ['pending', 'queued', 'processing', 'resolving', 'waiting'] %}
+  {% set _address_georef_status = 'pending' %}
+{% elif _address_georef_status_text in ['invalid', 'error', 'failed', 'repair_required'] %}
+  {% set _address_georef_status = 'repair_required' %}
+{% else %}
+  {% set _address_georef_status = 'unavailable' %}
+{% endif %}
+
+{% set _address_world_requested = _chunk_requested_template|default(_address_ui.get('chunk_world_template_requested', _address_ui.get('chunkWorldTemplateRequested', _address_chunk.get('requested_world_template', _address_chunk.get('requestedWorldTemplate', 'earth')))), true)|string|lower %}
+{% if _address_world_requested not in ['earth', 'flat'] %}
+  {% set _address_world_requested = 'earth' %}
+{% endif %}
+
+{% set _address_world_effective = _chunk_effective_template|default(_address_ui.get('chunk_world_template_effective', _address_ui.get('chunkWorldTemplateEffective', _address_chunk.get('effective_world_template', _address_chunk.get('effectiveWorldTemplate', '')))), true)|string|lower %}
+{% if _address_world_effective not in ['earth', 'flat'] %}
+  {% set _address_world_effective = '' %}
+{% endif %}
+
+{% set _address_fallback_raw = _chunk_fallback_used|default(_address_ui.get('chunk_fallback_used', _address_ui.get('chunkFallbackUsed', _address_chunk.get('fallback_used', _address_chunk.get('fallbackUsed', false)))), true) %}
+{% set _address_fallback_used = true if _address_fallback_raw in _address_truthy and _address_world_requested == 'earth' and _address_world_effective == 'flat' else false %}
 
 {# ------------------------------------------------------------------------- #}
 {# Disabled reason                                                            #}
@@ -129,21 +199,21 @@
 
 {% set _address_disabled_reason = '' %}
 {% if _address_auth_unavailable %}
-  {% set _address_disabled_reason = 'Auth-Service nicht erreichbar. Adresse kann nicht gespeichert werden.' %}
+  {% set _address_disabled_reason = 'Auth-Service nicht erreichbar. Die Adresse kann nicht gespeichert werden.' %}
 {% elif _address_user_blocked or _address_access_blocked %}
-  {% set _address_disabled_reason = 'Der Zugriff ist gesperrt. Adresse kann nicht gespeichert werden.' %}
+  {% set _address_disabled_reason = 'Der Zugriff ist gesperrt. Die Adresse kann nicht gespeichert werden.' %}
+{% elif _address_identity_blocked %}
+  {% set _address_disabled_reason = 'Die zentrale Identität ist nicht konsistent mit dem lokalen AppUser. Änderungen bleiben gesperrt.' %}
 {% elif _address_public_viewer %}
-  {% set _address_disabled_reason = 'Öffentliche Ansicht ist schreibgeschützt.' %}
+  {% set _address_disabled_reason = 'Öffentliche Ansicht: Die Adresse ist schreibgeschützt.' %}
 {% elif _address_read_only %}
   {% set _address_disabled_reason = 'Dieses Projekt ist schreibgeschützt.' %}
-{% elif not _address_can_edit %}
-  {% set _address_disabled_reason = 'Du hast keine Berechtigung, die Adresse zu ändern.' %}
-{% elif not _address_can_mutate %}
-  {% set _address_disabled_reason = 'Projektmutationen sind für deinen Kontext deaktiviert.' %}
+{% elif not _address_can_edit or not _address_can_mutate %}
+  {% set _address_disabled_reason = 'Du hast für dieses Projekt nur Leserechte.' %}
 {% elif not _address_persistent and not _address_demo_mode %}
-  {% set _address_disabled_reason = 'Für dauerhafte Adressänderungen ist ein persistenter AppUser-Kontext erforderlich.' %}
+  {% set _address_disabled_reason = 'Für dauerhafte Adressänderungen ist ein verknüpfter AppUser-Kontext erforderlich.' %}
 {% elif _address_demo_mode %}
-  {% set _address_disabled_reason = 'Demo-Modus: Die Adresse kann getestet werden, wird aber nicht dauerhaft gespeichert.' %}
+  {% set _address_disabled_reason = 'Demo-Modus: Die Adresse kann temporär geändert werden und wird nicht dauerhaft gespeichert.' %}
 {% endif %}
 
 <section
@@ -151,6 +221,7 @@
   aria-labelledby="projectAddressTitle"
   data-project-address-card
   data-project-public-id="{{ _address_project_public_id|e }}"
+  data-project-role="{{ _address_role|e }}"
   data-project-is-new="{{ 'true' if _address_is_new else 'false' }}"
   data-project-can-edit="{{ 'true' if _address_can_edit else 'false' }}"
   data-project-can-mutate="{{ 'true' if _address_can_mutate else 'false' }}"
@@ -162,11 +233,13 @@
   data-project-auth-unavailable="{{ 'true' if _address_auth_unavailable else 'false' }}"
   data-project-user-blocked="{{ 'true' if _address_user_blocked else 'false' }}"
   data-project-access-blocked="{{ 'true' if _address_access_blocked else 'false' }}"
+  data-project-identity-consistent="{{ 'true' if _address_identity_consistent else 'false' }}"
   data-project-address-disabled="{{ 'false' if _address_can_write else 'true' }}"
   data-project-address-disabled-reason="{{ _address_disabled_reason|e }}"
-  data-geocode-status="{{ _geocode_status|e }}"
-  data-geocode-source="{{ _geocode_source|e }}"
-  data-geocode-updated-at="{{ _geocode_updated_at|e }}"
+  data-georeference-status="{{ _address_georef_status|e }}"
+  data-world-template-requested="{{ _address_world_requested|e }}"
+  data-world-template-effective="{{ _address_world_effective|e }}"
+  data-world-fallback-used="{{ 'true' if _address_fallback_used else 'false' }}"
 >
   <header class="vp-project-card__header">
     <div>
@@ -175,23 +248,28 @@
       </h2>
 
       <p class="vp-project-card__text">
-        Gib die Adresse oder eine eindeutige Standortbeschreibung des Projekts ein.
+        Gib eine vollständige Adresse oder eine eindeutige Standortbeschreibung ein. Koordinaten werden nicht manuell gepflegt.
       </p>
     </div>
 
     <div class="vp-project-card__meta" aria-live="polite">
       <span
-        class="vp-project-chip {% if _address_auth_unavailable or _address_user_blocked or _address_access_blocked %}vp-project-chip--error{% elif _geocode_status in ['ready', 'ok', 'resolved', 'geocoded'] %}vp-project-chip--success{% elif _geocode_status in ['pending', 'queued', 'processing'] %}vp-project-chip--warning{% else %}vp-project-chip--muted{% endif %}"
+        class="vp-project-chip {% if _address_auth_unavailable or _address_user_blocked or _address_access_blocked or _address_identity_blocked %}vp-project-chip--error{% elif _address_georef_status == 'available' %}vp-project-chip--success{% elif _address_georef_status == 'pending' %}vp-project-chip--warning{% elif _address_georef_status == 'repair_required' %}vp-project-chip--error{% else %}vp-project-chip--muted{% endif %}"
         data-project-address-geocode-status
+        data-project-address-georeference-status
       >
         {% if _address_auth_unavailable %}
           Auth nicht erreichbar
         {% elif _address_user_blocked or _address_access_blocked %}
           Zugriff gesperrt
-        {% elif _geocode_status in ['ready', 'ok', 'resolved', 'geocoded'] %}
-          Standort erkannt
-        {% elif _geocode_status in ['pending', 'queued', 'processing'] %}
+        {% elif _address_identity_blocked %}
+          Identität prüfen
+        {% elif _address_georef_status == 'available' %}
+          Standortreferenz bereit
+        {% elif _address_georef_status == 'pending' %}
           Standort wird geprüft
+        {% elif _address_georef_status == 'repair_required' %}
+          Standort prüfen
         {% elif _address_text %}
           Adresse erfasst
         {% else %}
@@ -203,21 +281,39 @@
 
   {% if _address_disabled_reason %}
     <div
-      class="vp-project-inline-note {% if _address_auth_unavailable or _address_user_blocked or _address_access_blocked %}vp-project-inline-note--error{% elif _address_demo_mode %}vp-project-inline-note--demo{% else %}vp-project-inline-note--locked{% endif %}"
+      class="vp-project-inline-note {% if _address_auth_unavailable or _address_user_blocked or _address_access_blocked or _address_identity_blocked %}vp-project-inline-note--error{% elif _address_demo_mode %}vp-project-inline-note--demo{% else %}vp-project-inline-note--locked{% endif %}"
       data-project-address-disabled-note
     >
       {{ _address_disabled_reason }}
     </div>
   {% endif %}
 
+  {% if _address_fallback_used %}
+    <div class="vp-project-inline-note vp-project-inline-note--warning" data-project-address-world-fallback-note>
+      Für dieses Projekt wurde kontrolliert von Earth auf Flat zurückgefallen. Die gespeicherte Adresse bleibt erhalten.
+    </div>
+  {% elif _address_georef_status == 'repair_required' %}
+    <div class="vp-project-inline-note vp-project-inline-note--warning" data-project-address-georeference-repair-note>
+      Die Standortreferenz konnte nicht sicher aufgebaut werden. Prüfe die Adresse und speichere das Projekt erneut.
+    </div>
+  {% elif _address_georef_status == 'pending' %}
+    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-address-georeference-pending-note>
+      Die serverseitige Standortreferenz wird vorbereitet. Das App-Projekt bleibt dabei bereits gespeichert.
+    </div>
+  {% elif _address_world_requested == 'earth' and _address_text and _address_georef_status != 'available' %}
+    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-address-earth-note>
+      Für die Earth-Welt wird die Standortreferenz serverseitig aus dieser Adresse abgeleitet.
+    </div>
+  {% endif %}
+
   {% if _address_demo_mode %}
     <div class="vp-project-inline-note vp-project-inline-note--demo" data-project-address-demo-note>
       <strong>Demo-Modus:</strong>
-      Diese Adresse wird nicht dauerhaft gespeichert. Änderungen können nach Aktualisierung oder spätestens nach Ablauf der Demo-Sitzung verloren gehen.
+      Änderungen an der Adresse gelten nur für den temporären Demo-Kontext.
     </div>
   {% elif _address_public_viewer %}
     <div class="vp-project-inline-note vp-project-inline-note--info" data-project-address-public-note>
-      Öffentliche Ansicht: Die Adresse ist sichtbar, aber schreibgeschützt.
+      Öffentliche Ansicht: Die freigegebene Standortbeschreibung ist sichtbar, aber nicht bearbeitbar.
     </div>
   {% endif %}
 
@@ -241,13 +337,13 @@
         data-project-address-max-length="{{ _address_max_len }}"
         aria-describedby="projectAddressHelp projectAddressCounter"
         {% if not _address_can_write %}disabled{% endif %}
-        {% if _address_read_only %}aria-readonly="true"{% endif %}
+        {% if _address_read_only or not _address_can_write %}aria-readonly="true"{% endif %}
         {% if _address_disabled_reason %}title="{{ _address_disabled_reason|e }}"{% endif %}
-      >{{ _address_text|default('', true)|e }}</textarea>
+      >{{ _address_text|e }}</textarea>
 
       <div class="vp-project-field__meta">
         <p id="projectAddressHelp" class="vp-project-help">
-          Verwende eine vollständige Adresse oder eine eindeutige Standortbeschreibung. Strukturierte Adressfelder und Koordinaten werden hier bewusst nicht manuell gepflegt.
+          Es wird nur diese Standortbeschreibung gespeichert. Strukturierte Adressfelder, Koordinaten und Providerdaten werden nicht im Formular bearbeitet.
         </p>
 
         <p
@@ -263,54 +359,17 @@
     </div>
   </div>
 
-  {% if _geocode_status and _geocode_status != 'none' %}
-    <div class="vp-project-address-meta" data-project-address-geocode-meta>
-      <p class="vp-project-help">
-        Geocode-Status:
-        <strong>{{ _geocode_status }}</strong>{% if _geocode_source %} · Quelle: {{ _geocode_source }}{% endif %}{% if _geocode_confidence %} · Score: {{ _geocode_confidence }}{% endif %}{% if _geocode_updated_at %} · Aktualisiert: {{ _geocode_updated_at }}{% endif %}
-      </p>
-    </div>
-  {% endif %}
-
   <script type="application/json" data-project-address-initial-json>
     {
       "address_text": {{ _address_text|tojson }},
-      "addressText": {{ _address_text|tojson }},
-      "can_edit": {{ _address_can_edit|tojson }},
-      "canEdit": {{ _address_can_edit|tojson }},
-      "can_mutate": {{ _address_can_mutate|tojson }},
-      "canMutate": {{ _address_can_mutate|tojson }},
-      "can_write": {{ _address_can_write|tojson }},
-      "canWrite": {{ _address_can_write|tojson }},
-      "is_new": {{ _address_is_new|tojson }},
-      "isNew": {{ _address_is_new|tojson }},
-      "demo_mode": {{ _address_demo_mode|tojson }},
-      "demoMode": {{ _address_demo_mode|tojson }},
-      "persistent": {{ _address_persistent|tojson }},
-      "public_viewer": {{ _address_public_viewer|tojson }},
-      "publicViewer": {{ _address_public_viewer|tojson }},
-      "read_only": {{ _address_read_only|tojson }},
-      "readOnly": {{ _address_read_only|tojson }},
-      "auth_unavailable": {{ _address_auth_unavailable|tojson }},
-      "authUnavailable": {{ _address_auth_unavailable|tojson }},
-      "user_blocked": {{ _address_user_blocked|tojson }},
-      "userBlocked": {{ _address_user_blocked|tojson }},
-      "access_blocked": {{ _address_access_blocked|tojson }},
-      "accessBlocked": {{ _address_access_blocked|tojson }},
-      "geocode": {
-        "status": {{ _geocode_status|tojson }},
-        "source": {{ _geocode_source|tojson }},
-        "updated_at": {{ _geocode_updated_at|tojson }},
-        "confidence": {{ _geocode_confidence|tojson }}
-      },
       "max_length": {{ _address_max_len|tojson }},
-      "disabled_reason": {{ _address_disabled_reason|tojson }}
+      "georeference_status": {{ _address_georef_status|tojson }}
     }
   </script>
 
   <noscript>
     <p class="vp-project-help">
-      JavaScript ist deaktiviert. Die Adresse kann trotzdem gespeichert werden; Zeichenzähler und Live-Hinweise sind dann nicht verfügbar.
+      JavaScript ist erforderlich, um Änderungen über den Projekt-Workspace zu speichern.
     </p>
   </noscript>
 </section>

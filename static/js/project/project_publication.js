@@ -24,7 +24,7 @@
   "use strict";
 
   var EXPORT_NAME = "VectoplanProjectPublication";
-  var INTERNAL_VERSION = 4;
+  var INTERNAL_VERSION = 5;
 
   var ROOT_SELECTOR = "[data-project-workspace]";
   var CARD_SELECTOR = "[data-project-publication-card]";
@@ -43,6 +43,26 @@
   var CLASS_ERROR = "is-error";
   var CLASS_DIRTY = "is-dirty";
   var CLASS_DISABLED = "is-disabled";
+
+  var DEFAULT_REQUEST_TIMEOUT_MS = 30000;
+  var MAX_RESPONSE_TEXT_LENGTH = 2 * 1024 * 1024;
+
+  var VALID_PROJECT_ROLES = {
+    owner: true,
+    admin: true,
+    editor: true,
+    viewer: true
+  };
+
+  var ROLE_CAN_PUBLISH = {
+    owner: true,
+    admin: true
+  };
+
+  var READY_OPERATIONAL_STATUSES = {
+    ready: true,
+    fallback_ready: true
+  };
 
   var WORKSPACES = [
     "project",
@@ -104,6 +124,29 @@
     authUnavailable: false,
     userBlocked: false,
     accessBlocked: false,
+    identityConsistent: true,
+    localLinkState: "not_applicable",
+    projectRole: "viewer",
+    accessMode: "anonymous",
+
+    chunkReady: false,
+    chunkProvisioningStatus: "pending",
+    chunkAccessSyncStatus: "disabled",
+    chunkAccessRequired: false,
+    publicEditor3dVerified: false,
+    workspaceAvailability: {
+      project: true,
+      map: true,
+      editor3d: false,
+      cad2d: true,
+      lv: true,
+      versions: true
+    },
+    workspaceReasons: {
+      editor3d: "chunk_not_ready"
+    },
+
+    requestId: "",
     projectPublicId: "",
     endpoint: "",
     initialData: null,
@@ -259,47 +302,266 @@
     }
   }
 
+  function createRequestId() {
+    try {
+      var win = getWindow();
+      if (win.crypto && typeof win.crypto.randomUUID === "function") {
+        return "req_" + win.crypto.randomUUID().replace(/-/g, "");
+      }
+      if (win.crypto && typeof win.crypto.getRandomValues === "function") {
+        var bytes = new Uint8Array(16);
+        win.crypto.getRandomValues(bytes);
+        return "req_" + Array.prototype.map.call(bytes, function toHex(value) {
+          return value.toString(16).padStart(2, "0");
+        }).join("");
+      }
+    } catch (error) {}
+    return "req_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 14);
+  }
+
+  function currentOrigin() {
+    try {
+      var win = getWindow();
+      return win.location && win.location.origin ? win.location.origin : "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function normalizeSameOriginPath(value, fallback, allowedPrefix) {
+    try {
+      var candidate = trimString(value, fallback || "");
+      if (!candidate || candidate.indexOf("\\") !== -1 || candidate.indexOf("//") === 0) {
+        return fallback || "";
+      }
+      var origin = currentOrigin();
+      var parsed = new URL(candidate, origin || "http://localhost");
+      if (origin && parsed.origin !== origin) {
+        return fallback || "";
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return fallback || "";
+      }
+      var path = parsed.pathname + parsed.search;
+      if (!path.startsWith("/")) {
+        return fallback || "";
+      }
+      if (allowedPrefix && path !== allowedPrefix && path.indexOf(allowedPrefix + "/") !== 0 && path.indexOf(allowedPrefix + "?") !== 0) {
+        return fallback || "";
+      }
+      return path;
+    } catch (error) {
+      return fallback || "";
+    }
+  }
+
+  function normalizePublicationEndpoint(value, projectPublicId) {
+    try {
+      var publicId = trimString(projectPublicId, "");
+      var fallback = publicId && publicId !== "new"
+        ? "/v1/projects/" + encodeURIComponent(publicId) + "/publication"
+        : "";
+      var endpoint = normalizeSameOriginPath(value, fallback, "/v1/projects");
+      if (!endpoint) {
+        return "";
+      }
+      var pathOnly = endpoint.split("?", 1)[0];
+      var match = pathOnly.match(/^\/v1\/projects\/([^/]+)\/publication$/);
+      if (!match) {
+        return "";
+      }
+      if (publicId && publicId !== "new" && decodeURIComponent(match[1]) !== publicId) {
+        return fallback;
+      }
+      return endpoint;
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function normalizeProjectRole(value, fallback) {
+    try {
+      var role = trimString(value, fallback || "").toLowerCase().replace(/-/g, "_").replace(/\s+/g, "_");
+      if (role === "administrator" || role === "manager") {
+        role = "admin";
+      } else if (role === "write" || role === "edit") {
+        role = "editor";
+      } else if (role === "read" || role === "reader" || role === "readonly" || role === "read_only" || role === "public_viewer") {
+        role = "viewer";
+      }
+      return VALID_PROJECT_ROLES[role] ? role : fallback || "viewer";
+    } catch (error) {
+      return fallback || "viewer";
+    }
+  }
+
+  function normalizeOperationalStatus(value, fallback) {
+    try {
+      var text = trimString(value, fallback || "pending").toLowerCase().replace(/-/g, "_").replace(/\s+/g, "_");
+      var aliases = {
+        ready: "ready", active: "ready", complete: "ready", completed: "ready", success: "ready", succeeded: "ready", provisioned: "ready", linked: "ready", synced: "ready",
+        fallback_ready: "fallback_ready", ready_with_fallback: "fallback_ready", flat_fallback: "fallback_ready",
+        pending: "pending", waiting: "pending", queued: "pending", initializing: "pending", syncing: "pending", running: "pending", in_progress: "pending",
+        repair: "repair_required", repair_required: "repair_required", needs_repair: "repair_required", inconsistent: "repair_required",
+        failed: "failed", failure: "failed", error: "failed", unavailable: "failed",
+        disabled: "disabled", off: "disabled", not_required: "disabled", skipped: "disabled"
+      };
+      return aliases[text] || fallback || "pending";
+    } catch (error) {
+      return fallback || "pending";
+    }
+  }
+
+  function firstDefined(values, fallback) {
+    try {
+      for (var i = 0; i < values.length; i += 1) {
+        if (values[i] !== undefined && values[i] !== null && values[i] !== "") {
+          return values[i];
+        }
+      }
+    } catch (error) {}
+    return fallback;
+  }
+
+  function firstString(values, fallback) {
+    try {
+      for (var i = 0; i < values.length; i += 1) {
+        var value = trimString(values[i], "");
+        if (value) {
+          return value;
+        }
+      }
+    } catch (error) {}
+    return fallback || "";
+  }
+
+  function sanitizeBrowserText(value) {
+    try {
+      var text = trimString(value, "");
+      if (!text) return "";
+      text = text.replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]");
+      text = text.replace(/([?&](?:access_token|refresh_token|token|jwt|secret|password|api_key|apikey|session|csrf_token)=)[^&#\s]*/gi, "$1[redacted]");
+      text = text.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted-email]");
+      return text.length > 8000 ? text.slice(0, 8000) : text;
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function sanitizeBrowserValue(value, depth) {
+    var level = typeof depth === "number" ? depth : 0;
+    try {
+      if (level > 7) {
+        return "[truncated]";
+      }
+      if (value === null || value === undefined || typeof value === "boolean" || typeof value === "number") {
+        return value;
+      }
+      if (typeof value === "string") {
+        return sanitizeBrowserText(value);
+      }
+      if (Array.isArray(value)) {
+        return value.slice(0, 200).map(function sanitizeItem(item) {
+          return sanitizeBrowserValue(item, level + 1);
+        });
+      }
+      if (!isObject(value)) {
+        return trimString(value, "");
+      }
+      var blockedKeys = {
+        authorization: true, cookie: true, cookies: true, password: true, secret: true,
+        token: true, token_hash: true, access_token: true, refresh_token: true, jwt: true,
+        api_key: true, apikey: true, session: true, session_id: true, csrf: true, csrf_token: true,
+        raw_auth: true, raw: true, headers: true, stack: true, traceback: true,
+        auth_user_id: true, authuserid: true, canonical_user_id: true, user_id: true, userid: true,
+        local_user_id: true, localuserid: true, actor_user_id: true, target_user_id: true,
+        email: true, auth_email: true, account_id: true, owner_user_id: true, auth_owner_user_id: true,
+        metadata: true, metadata_json: true, settings: true, service_refs: true, service_links: true,
+        internal_url: true, internal_base_url: true, request_context: true
+      };
+      var result = {};
+      Object.keys(value).slice(0, 300).forEach(function sanitizeKey(key) {
+        var normalized = trimString(key, "").toLowerCase().replace(/[^a-z0-9_]/g, "");
+        if (!normalized || blockedKeys[normalized]) {
+          return;
+        }
+        result[key] = sanitizeBrowserValue(value[key], level + 1);
+      });
+      return result;
+    } catch (error) {
+      return {};
+    }
+  }
+
+  function sanitizePublicationForBrowser(value) {
+    try {
+      var data = isObject(value) ? value : {};
+      var visibility = normalizeVisibility(data.visibility, "private");
+      var published = sanitizeWorkspaceMap(data.published_workspaces || data.publishedWorkspaces || {});
+      var effective = effectiveWorkspaces(visibility, published);
+      return {
+        visibility: visibility,
+        published_workspaces: published,
+        publishedWorkspaces: safeClone(published),
+        effective_published_workspaces: effective,
+        effectivePublishedWorkspaces: safeClone(effective),
+        require_auth: toBooleanSafe(firstDefined([data.require_auth, data.requireAuth], visibility === "private"), visibility === "private"),
+        requireAuth: toBooleanSafe(firstDefined([data.require_auth, data.requireAuth], visibility === "private"), visibility === "private"),
+        require_project_permission: toBooleanSafe(firstDefined([data.require_project_permission, data.requireProjectPermission], visibility === "private"), visibility === "private"),
+        requireProjectPermission: toBooleanSafe(firstDefined([data.require_project_permission, data.requireProjectPermission], visibility === "private"), visibility === "private")
+      };
+    } catch (error) {
+      return {
+        visibility: "private",
+        published_workspaces: emptyWorkspaceMap(false),
+        publishedWorkspaces: emptyWorkspaceMap(false),
+        effective_published_workspaces: emptyWorkspaceMap(false),
+        effectivePublishedWorkspaces: emptyWorkspaceMap(false),
+        require_auth: true,
+        requireAuth: true,
+        require_project_permission: true,
+        requireProjectPermission: true
+      };
+    }
+  }
+
+  function isTrustedMessageEvent(event) {
+    try {
+      if (!event) {
+        return false;
+      }
+      var win = getWindow();
+      if (event.source && event.source !== win && event.source !== win.parent) {
+        return false;
+      }
+      var origin = currentOrigin();
+      if (origin && event.origin && event.origin !== origin) {
+        return false;
+      }
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
   function normalizeError(error) {
     try {
       if (!error) {
-        return {
-          name: "Error",
-          message: "Unknown error",
-          stack: "",
-          code: "",
-          status: null,
-          payload: null
-        };
+        return { name: "Error", message: "Unknown error", code: "", status: null, requestId: "" };
       }
-
       if (typeof error === "string") {
-        return {
-          name: "Error",
-          message: error,
-          stack: "",
-          code: "",
-          status: null,
-          payload: null
-        };
+        return { name: "Error", message: sanitizeBrowserText(error).slice(0, 1000), code: "", status: null, requestId: "" };
       }
-
+      var payload = isObject(error.payload) ? error.payload : {};
       return {
         name: trimString(error.name, "Error"),
-        message: trimString(error.message, String(error)),
-        stack: trimString(error.stack, ""),
-        code: trimString(error.code || (error.payload && error.payload.code), ""),
-        status: error.status || error.statusCode || (error.payload && error.payload.status_code) || null,
-        payload: error.payload || null
+        message: sanitizeBrowserText(trimString(error.message, String(error))).slice(0, 1000),
+        code: trimString(error.code || payload.code, ""),
+        status: error.status || error.statusCode || payload.status_code || payload.statusCode || null,
+        requestId: trimString(payload.request_id || payload.requestId || error.requestId, "")
       };
     } catch (innerError) {
-      return {
-        name: "Error",
-        message: "Unknown error",
-        stack: "",
-        code: "",
-        status: null,
-        payload: null
-      };
+      return { name: "Error", message: "Unknown error", code: "", status: null, requestId: "" };
     }
   }
 
@@ -546,13 +808,12 @@
   function sanitizeWorkspaceMap(value, fallback) {
     var normalized = normalizeWorkspaces(value, fallback);
     var result = emptyWorkspaceMap(false);
-
     try {
+      var availability = workspaceAvailability();
       WORKSPACES.forEach(function eachWorkspace(workspace) {
-        result[workspace] = !!normalized[workspace];
+        result[workspace] = !!normalized[workspace] && !!availability[workspace];
       });
     } catch (error) {}
-
     return result;
   }
 
@@ -567,15 +828,57 @@
     }
   }
 
+  function workspaceAvailability() {
+    try {
+      var source = isObject(state.workspaceAvailability) ? state.workspaceAvailability : {};
+      var result = emptyWorkspaceMap(true);
+      WORKSPACES.forEach(function eachWorkspace(workspace) {
+        result[workspace] = source[workspace] !== false;
+      });
+      return result;
+    } catch (error) {
+      return {
+        project: true,
+        map: true,
+        editor3d: false,
+        cad2d: true,
+        lv: true,
+        versions: true
+      };
+    }
+  }
+
+  function workspaceUnavailableReason(workspace) {
+    try {
+      var normalized = normalizeWorkspace(workspace);
+      var reasons = isObject(state.workspaceReasons) ? state.workspaceReasons : {};
+      return trimString(reasons[normalized], normalized === "editor3d" ? "chunk_not_ready" : "workspace_unavailable");
+    } catch (error) {
+      return "workspace_unavailable";
+    }
+  }
+
+  function applyWorkspaceAvailability(value) {
+    try {
+      var normalized = normalizeWorkspaces(value);
+      var availability = workspaceAvailability();
+      var result = emptyWorkspaceMap(false);
+      WORKSPACES.forEach(function eachWorkspace(workspace) {
+        result[workspace] = !!normalized[workspace] && !!availability[workspace];
+      });
+      return result;
+    } catch (error) {
+      return emptyWorkspaceMap(false);
+    }
+  }
+
   function effectiveWorkspaces(visibility, published) {
     try {
       var normalizedVisibility = normalizeVisibility(visibility, "private");
-      var desired = normalizeWorkspaces(published);
-
+      var desired = applyWorkspaceAvailability(published);
       if (normalizedVisibility === "private") {
         return emptyWorkspaceMap(false);
       }
-
       return desired;
     } catch (error) {
       return emptyWorkspaceMap(false);
@@ -610,7 +913,6 @@
     try {
       var win = getWindow();
       var config = win.VECTOPLAN_PROJECT_WORKSPACE_CONFIG || win.PROJECT_WORKSPACE_CONFIG || {};
-
       if (!isObject(config)) {
         config = {};
       }
@@ -621,97 +923,144 @@
       var access = isObject(config.access) ? config.access : (isObject(project.access) ? project.access : {});
       var publication = isObject(config.publication) ? config.publication : (isObject(project.publication) ? project.publication : {});
       var uiFlags = isObject(config.uiFlags) ? config.uiFlags : (isObject(project.ui_flags) ? project.ui_flags : {});
+      var workspaceRuntime = isObject(config.workspaceRuntime) ? config.workspaceRuntime :
+        isObject(config.workspace_runtime) ? config.workspace_runtime :
+          isObject(project.workspace_runtime) ? project.workspace_runtime :
+            isObject(project.workspaceRuntime) ? project.workspaceRuntime : {};
+      var chunk = isObject(config.chunk) ? config.chunk : isObject(project.chunk) ? project.chunk : {};
+      var accessSync = isObject(project.chunk_access_sync) ? project.chunk_access_sync :
+        isObject(project.chunkAccessSync) ? project.chunkAccessSync :
+          isObject(chunk.access_sync) ? chunk.access_sync : {};
 
-      var demoMode = toBooleanSafe(
-        config.demoMode !== undefined ? config.demoMode :
-          config.demo_mode !== undefined ? config.demo_mode :
-            uiFlags.demo_mode !== undefined ? uiFlags.demo_mode :
-              currentUser.demo_mode !== undefined ? currentUser.demo_mode :
-                currentUser.demoMode !== undefined ? currentUser.demoMode :
-                  currentUser.is_demo,
-        false
-      );
+      var publicId = firstString([
+        config.projectPublicId, config.project_public_id,
+        project.public_id, project.publicId, project.project_public_id, project.projectPublicId
+      ], "");
+      var isNew = toBooleanSafe(firstDefined([config.isNew, project.is_new, project.isNew], !publicId || publicId === "new"), !publicId || publicId === "new");
 
-      var persistent = toBooleanSafe(
-        config.persistent !== undefined ? config.persistent :
-          uiFlags.persistent !== undefined ? uiFlags.persistent :
-            currentUser.persistent,
-        !demoMode
-      );
+      var projectRole = normalizeProjectRole(firstString([
+        config.projectRole, config.project_role,
+        access.role, access.project_role, access.projectRole,
+        access.membership_role, access.membershipRole,
+        project.project_role, project.projectRole
+      ], isNew ? "owner" : "viewer"), isNew ? "owner" : "viewer");
 
-      var publicViewer = toBooleanSafe(
-        config.publicViewer !== undefined ? config.publicViewer :
-          config.isPublicViewer !== undefined ? config.isPublicViewer :
-            uiFlags.public_viewer !== undefined ? uiFlags.public_viewer :
-              access.public_viewer !== undefined ? access.public_viewer :
-                access.publicViewer,
-        false
-      );
+      var accessMode = lowerString(firstString([
+        config.accessMode, config.access_mode,
+        uiFlags.access_mode, uiFlags.accessMode,
+        access.access_mode, access.accessMode,
+        project.access_mode, project.accessMode
+      ], ""), "");
 
-      var readOnly = toBooleanSafe(
-        config.readOnly !== undefined ? config.readOnly :
-          config.readonly !== undefined ? config.readonly :
-            uiFlags.read_only !== undefined ? uiFlags.read_only :
-              access.read_only !== undefined ? access.read_only :
-                access.readOnly,
-        false
-      );
+      var identityConsistent = toBooleanSafe(firstDefined([
+        config.identityConsistent, config.identity_consistent,
+        uiFlags.identity_consistent, uiFlags.identityConsistent,
+        currentUser.identity_consistent, currentUser.identityConsistent
+      ], true), true);
+      var localLinkState = lowerString(firstString([
+        config.localLinkState, config.local_link_state,
+        uiFlags.local_link_state, uiFlags.localLinkState,
+        currentUser.local_link_state, currentUser.localLinkState
+      ], "not_applicable"), "not_applicable");
+      var identityMismatch = !identityConsistent || localLinkState === "identity_mismatch" || localLinkState === "inactive" || accessMode === "identity_mismatch";
 
-      var authUnavailable = toBooleanSafe(
-        config.authUnavailable !== undefined ? config.authUnavailable :
-          uiFlags.auth_unavailable !== undefined ? uiFlags.auth_unavailable :
-            currentUser.auth_unavailable !== undefined ? currentUser.auth_unavailable :
-              currentUser.authUnavailable,
-        false
-      );
-
-      var userBlocked = toBooleanSafe(
-        config.userBlocked !== undefined ? config.userBlocked :
-          uiFlags.user_blocked !== undefined ? uiFlags.user_blocked :
-            currentUser.user_blocked !== undefined ? currentUser.user_blocked :
-              currentUser.userBlocked,
-        false
-      );
-
-      var accessBlocked = toBooleanSafe(
-        config.accessBlocked !== undefined ? config.accessBlocked :
-          uiFlags.access_blocked !== undefined ? uiFlags.access_blocked :
-            currentUser.access_blocked !== undefined ? currentUser.access_blocked :
-              currentUser.accessBlocked,
-        false
-      );
-
-      var publicId = trimString(
-        config.projectPublicId ||
-          config.project_public_id ||
-          project.public_id ||
-          project.publicId ||
-          project.project_public_id ||
-          project.projectPublicId ||
-          "",
-        ""
-      );
-
-      var endpoint = trimString(paths.publication || paths.projectPublication || paths.project_publication, "");
-      if (!endpoint && publicId && publicId !== "new") {
-        endpoint = "/v1/projects/" + encodeURIComponent(publicId) + "/publication";
+      var authUnavailable = toBooleanSafe(firstDefined([
+        config.authUnavailable, uiFlags.auth_unavailable, currentUser.auth_unavailable, currentUser.authUnavailable
+      ], false), false);
+      var userBlocked = toBooleanSafe(firstDefined([
+        config.userBlocked, uiFlags.user_blocked, currentUser.user_blocked, currentUser.userBlocked
+      ], false), false);
+      var accessBlocked = toBooleanSafe(firstDefined([
+        config.accessBlocked, uiFlags.access_blocked, currentUser.access_blocked, currentUser.accessBlocked
+      ], false), false);
+      var publicViewer = toBooleanSafe(firstDefined([
+        config.publicViewer, config.isPublicViewer, uiFlags.public_viewer, access.public_viewer, access.publicViewer
+      ], accessMode === "public"), accessMode === "public") || projectRole === "viewer" && accessMode === "public";
+      var demoMode = toBooleanSafe(firstDefined([
+        config.demoMode, config.demo_mode, uiFlags.demo_mode, currentUser.demo_mode, currentUser.demoMode, currentUser.is_demo
+      ], false), false);
+      if (publicViewer || authUnavailable || userBlocked || accessBlocked || identityMismatch) {
+        demoMode = false;
       }
 
-      var canManage = toBooleanSafe(
-        config.canManage !== undefined ? config.canManage :
-          uiFlags.can_manage !== undefined ? uiFlags.can_manage :
-            access.can_manage !== undefined ? access.can_manage :
-              access.canManage,
-        false
-      );
+      var readOnly = toBooleanSafe(firstDefined([
+        config.readOnly, config.readonly, uiFlags.read_only, access.read_only, access.readOnly
+      ], publicViewer || projectRole === "viewer" || authUnavailable || userBlocked || accessBlocked || identityMismatch), true);
+      if (publicViewer || projectRole === "viewer" || authUnavailable || userBlocked || accessBlocked || identityMismatch) {
+        readOnly = true;
+      }
 
-      var canPublish = toBooleanSafe(
-        config.canPublish !== undefined ? config.canPublish :
-          config.canManagePublication !== undefined ? config.canManagePublication :
-            uiFlags.can_publish !== undefined ? uiFlags.can_publish :
-              access.can_publish !== undefined ? access.can_publish :
-                access.canPublish,
-        canManage
+      var authenticated = toBooleanSafe(firstDefined([
+        config.authenticated, currentUser.authenticated, currentUser.is_authenticated, currentUser.isAuthenticated
+      ], false), false);
+      var persistent = toBooleanSafe(firstDefined([
+        config.persistent, uiFlags.persistent, currentUser.persistent
+      ], authenticated && !demoMode && !publicViewer && !authUnavailable && !userBlocked && !accessBlocked && !identityMismatch), false);
+      if (demoMode || publicViewer || authUnavailable || userBlocked || accessBlocked || identityMismatch) {
+        persistent = false;
+      }
+
+      var roleCanPublish = !!ROLE_CAN_PUBLISH[projectRole];
+      var canManage = toBooleanSafe(firstDefined([
+        config.canManage, uiFlags.can_manage, access.can_manage, access.canManage
+      ], false), false) && roleCanPublish;
+      var canPublish = toBooleanSafe(firstDefined([
+        config.canPublish, config.canManagePublication, uiFlags.can_publish, access.can_publish, access.canPublish
+      ], canManage), false) && roleCanPublish;
+      var canEdit = toBooleanSafe(firstDefined([config.canEdit, access.can_edit, access.canEdit], false), false) && projectRole !== "viewer";
+      var canMutate = toBooleanSafe(firstDefined([config.canMutate, access.can_mutate, access.canMutate], canPublish), false) && roleCanPublish;
+
+      if (readOnly || publicViewer || demoMode || authUnavailable || userBlocked || accessBlocked || identityMismatch) {
+        canManage = false;
+        canPublish = false;
+        canMutate = false;
+      }
+
+      var provisioningStatus = normalizeOperationalStatus(firstString([
+        workspaceRuntime.chunk_provisioning_status, workspaceRuntime.chunkProvisioningStatus,
+        chunk.provisioning_status, chunk.provisioningStatus, chunk.status,
+        project.chunk_provisioning_status, project.chunkProvisioningStatus
+      ], "pending"), "pending");
+      var chunkReady = toBooleanSafe(firstDefined([
+        workspaceRuntime.chunk_ready, workspaceRuntime.chunkReady,
+        workspaceRuntime.ready, chunk.ready, chunk.chunk_ready, chunk.chunkReady,
+        project.chunk_ready, project.chunkReady
+      ], READY_OPERATIONAL_STATUSES[provisioningStatus] === true), READY_OPERATIONAL_STATUSES[provisioningStatus] === true);
+      if (!READY_OPERATIONAL_STATUSES[provisioningStatus]) {
+        chunkReady = false;
+      }
+
+      var accessSyncStatus = normalizeOperationalStatus(firstString([
+        workspaceRuntime.chunk_access_sync_status, workspaceRuntime.chunkAccessSyncStatus,
+        accessSync.status, project.chunk_access_sync_status, project.chunkAccessSyncStatus
+      ], "disabled"), "disabled");
+      var accessRequired = toBooleanSafe(firstDefined([
+        workspaceRuntime.chunk_access_sync_required, workspaceRuntime.chunkAccessSyncRequired,
+        chunk.access_sync_required, chunk.accessSyncRequired,
+        project.chunk_access_sync_required, project.chunkAccessSyncRequired
+      ], false), false);
+      var accessReady = !accessRequired || accessSyncStatus === "ready";
+
+      var publicEditor3dVerified = toBooleanSafe(firstDefined([
+        workspaceRuntime.public_editor3d_verified, workspaceRuntime.publicEditor3dVerified,
+        workspaceRuntime.public_embed_verified, workspaceRuntime.publicEmbedVerified,
+        publication.public_editor3d_verified, publication.publicEditor3dVerified,
+        publication.editor3d_publication_allowed, publication.editor3dPublicationAllowed,
+        uiFlags.public_editor3d_verified, uiFlags.publicEditor3dVerified
+      ], false), false);
+
+      var editor3dAvailable = !!(chunkReady && accessReady && publicEditor3dVerified);
+      var editor3dReason = !chunkReady
+        ? (provisioningStatus === "repair_required" || provisioningStatus === "failed" ? "chunk_repair_required" : "chunk_not_ready")
+        : !accessReady
+          ? "chunk_access_not_ready"
+          : !publicEditor3dVerified
+            ? "public_editor3d_not_verified"
+            : "ready";
+
+      var endpoint = normalizePublicationEndpoint(
+        firstString([paths.publication, paths.projectPublication, paths.project_publication], ""),
+        publicId
       );
 
       return {
@@ -720,60 +1069,65 @@
         access: access,
         publication: publication,
         uiFlags: uiFlags,
+        workspaceRuntime: workspaceRuntime,
         projectPublicId: publicId,
         projectVisibility: normalizeVisibility(config.projectVisibility || config.project_visibility || project.visibility || publication.visibility, "private"),
-        isNew: toBooleanSafe(config.isNew !== undefined ? config.isNew : (project.is_new !== undefined ? project.is_new : project.isNew), !publicId || publicId === "new"),
+        isNew: isNew,
+        projectRole: projectRole,
+        project_role: projectRole,
         canManage: canManage,
         canPublish: canPublish,
-        canEdit: toBooleanSafe(config.canEdit !== undefined ? config.canEdit : access.can_edit, false),
-        canMutate: toBooleanSafe(config.canMutate !== undefined ? config.canMutate : access.can_mutate, canPublish),
+        canEdit: canEdit,
+        canMutate: canMutate,
         demoMode: demoMode,
         persistent: persistent,
         publicViewer: publicViewer,
         readOnly: readOnly,
+        authenticated: authenticated,
         authUnavailable: authUnavailable,
         userBlocked: userBlocked,
         accessBlocked: accessBlocked,
+        identityConsistent: identityConsistent,
+        localLinkState: localLinkState,
+        accessMode: identityMismatch ? "identity_mismatch" : accessMode || (authenticated ? "authenticated" : "anonymous"),
+        chunkReady: chunkReady,
+        chunkProvisioningStatus: provisioningStatus,
+        chunkAccessSyncStatus: accessSyncStatus,
+        chunkAccessRequired: accessRequired,
+        publicEditor3dVerified: publicEditor3dVerified,
+        workspaceAvailability: {
+          project: true,
+          map: true,
+          editor3d: editor3dAvailable,
+          cad2d: true,
+          lv: true,
+          versions: true
+        },
+        workspaceReasons: {
+          editor3d: editor3dReason
+        },
         endpoint: endpoint,
         paths: paths,
         parentEvents: {
-          publicationChanged: trimString(
-            config.parentEvents && config.parentEvents.publicationChanged,
-            EVENT_PUBLICATION_CHANGED
-          ),
-          error: trimString(
-            config.parentEvents && config.parentEvents.error,
-            EVENT_PROJECT_ERROR
-          )
+          publicationChanged: trimString(config.parentEvents && config.parentEvents.publicationChanged, EVENT_PUBLICATION_CHANGED),
+          error: trimString(config.parentEvents && config.parentEvents.error, EVENT_PROJECT_ERROR)
         }
       };
     } catch (error) {
       return {
-        project: {},
-        currentUser: {},
-        access: {},
-        publication: {},
-        uiFlags: {},
-        projectPublicId: "",
-        projectVisibility: "private",
-        isNew: true,
-        canManage: false,
-        canPublish: false,
-        canEdit: false,
-        canMutate: false,
-        demoMode: false,
-        persistent: false,
-        publicViewer: false,
-        readOnly: true,
-        authUnavailable: false,
-        userBlocked: false,
-        accessBlocked: true,
-        endpoint: "",
-        paths: {},
-        parentEvents: {
-          publicationChanged: EVENT_PUBLICATION_CHANGED,
-          error: EVENT_PROJECT_ERROR
-        }
+        project: {}, currentUser: {}, access: {}, publication: {}, uiFlags: {}, workspaceRuntime: {},
+        projectPublicId: "", projectVisibility: "private", isNew: true,
+        projectRole: "viewer", project_role: "viewer",
+        canManage: false, canPublish: false, canEdit: false, canMutate: false,
+        demoMode: false, persistent: false, publicViewer: false, readOnly: true, authenticated: false,
+        authUnavailable: false, userBlocked: false, accessBlocked: true,
+        identityConsistent: false, localLinkState: "unavailable", accessMode: "blocked",
+        chunkReady: false, chunkProvisioningStatus: "pending", chunkAccessSyncStatus: "disabled",
+        chunkAccessRequired: false, publicEditor3dVerified: false,
+        workspaceAvailability: { project: true, map: true, editor3d: false, cad2d: true, lv: true, versions: true },
+        workspaceReasons: { editor3d: "context_error" },
+        endpoint: "", paths: {},
+        parentEvents: { publicationChanged: EVENT_PUBLICATION_CHANGED, error: EVENT_PROJECT_ERROR }
       };
     }
   }
@@ -1160,69 +1514,57 @@
   function updateStatus(data) {
     try {
       var status = state.refs.status;
-      if (!status) {
-        return;
-      }
-
+      if (!status) return;
       var publication = isObject(data) ? data : collectData();
       var visibility = normalizeVisibility(publication.visibility, "private");
       var effective = normalizeWorkspaces(publication.effective_published_workspaces || publication.effectivePublishedWorkspaces);
       var hasEffective = anyWorkspaceEnabled(effective);
-
       setStatusClasses(status, visibility, hasEffective);
 
-      if (state.authUnavailable) {
-        status.textContent = "Auth nicht erreichbar";
-      } else if (state.userBlocked || state.accessBlocked) {
-        status.textContent = "Zugriff gesperrt";
-      } else if (visibility === "private") {
-        status.textContent = "Privat";
-      } else if (hasEffective) {
-        status.textContent = "Reiter veröffentlicht";
-      } else {
-        status.textContent = "Keine Reiter veröffentlicht";
-      }
+      if (state.authUnavailable) status.textContent = "Auth nicht erreichbar";
+      else if (!state.identityConsistent || state.localLinkState === "identity_mismatch") status.textContent = "Identität inkonsistent";
+      else if (state.userBlocked || state.accessBlocked) status.textContent = "Zugriff gesperrt";
+      else if (visibility === "private") status.textContent = "Privat";
+      else if (hasEffective) status.textContent = "Reiter veröffentlicht";
+      else status.textContent = "Keine Reiter veröffentlicht";
     } catch (error) {}
   }
 
   function updateSummary(data) {
     try {
       var summary = state.refs.summary;
-      if (!summary) {
-        return;
-      }
-
+      if (!summary) return;
       var publication = isObject(data) ? data : collectData();
       var visibility = normalizeVisibility(publication.visibility, "private");
       var effective = normalizeWorkspaces(publication.effective_published_workspaces || publication.effectivePublishedWorkspaces);
       var enabledLabels = [];
-
       WORKSPACES.forEach(function eachWorkspace(workspace) {
-        if (effective[workspace]) {
-          enabledLabels.push(workspaceLabel(workspace));
-        }
+        if (effective[workspace]) enabledLabels.push(workspaceLabel(workspace));
       });
 
-      if (visibility === "private") {
-        summary.textContent = "Private Projekte veröffentlichen keine Workspaces.";
-      } else if (enabledLabels.length) {
-        summary.textContent = "Öffentlich sichtbar: " + enabledLabels.join(", ") + ".";
-      } else {
-        summary.textContent = "Projekt ist " + visibility + ", aber kein Workspace ist veröffentlicht.";
+      var suffix = "";
+      if (!workspaceAvailability().editor3d) {
+        var reason = workspaceUnavailableReason("editor3d");
+        if (reason === "chunk_not_ready") suffix = " 3D bleibt bis zur vollständigen Chunk-Provisionierung deaktiviert.";
+        else if (reason === "chunk_access_not_ready") suffix = " 3D bleibt bis zur Access-Synchronisation deaktiviert.";
+        else if (reason === "public_editor3d_not_verified") suffix = " 3D benötigt einen verifizierten öffentlichen Read-only-Vertrag.";
+        else if (reason === "chunk_repair_required") suffix = " 3D ist wegen eines reparaturbedürftigen Chunk-Zustands deaktiviert.";
       }
+
+      if (visibility === "private") summary.textContent = "Private Projekte veröffentlichen keine Workspaces." + suffix;
+      else if (enabledLabels.length) summary.textContent = "Öffentlich sichtbar: " + enabledLabels.join(", ") + "." + suffix;
+      else summary.textContent = "Projekt ist " + visibility + ", aber kein Workspace ist veröffentlicht." + suffix;
     } catch (error) {}
   }
 
   function applyData(data, options) {
     try {
       var opts = isObject(options) ? options : {};
-      var publication = isObject(data) ? data : {};
-      var visibility = normalizeVisibility(publication.visibility || currentVisibility(), "private");
-      var published = sanitizeWorkspaceMap(publication.published_workspaces || publication.publishedWorkspaces, emptyWorkspaceMap(false));
-      var effective = sanitizeWorkspaceMap(
-        publication.effective_published_workspaces || publication.effectivePublishedWorkspaces || effectiveWorkspaces(visibility, published),
-        effectiveWorkspaces(visibility, published)
-      );
+      var publication = sanitizePublicationForBrowser(isObject(data) ? data : {});
+      var visibility = publication.visibility;
+      var published = sanitizeWorkspaceMap(publication.published_workspaces, emptyWorkspaceMap(false));
+      var effective = effectiveWorkspaces(visibility, published);
+      var availability = workspaceAvailability();
 
       if (state.refs.card) {
         state.refs.card.setAttribute("data-project-visibility", visibility);
@@ -1231,86 +1573,68 @@
       (state.refs.checkboxes || []).forEach(function applyCheckbox(input) {
         try {
           var workspace = normalizeWorkspace(input.getAttribute("data-workspace") || input.name || input.value || "");
-          if (!isAllowedWorkspace(workspace)) {
-            input.checked = false;
-            input.disabled = true;
-            return;
-          }
-
-          input.checked = !!published[workspace];
+          var allowed = isAllowedWorkspace(workspace) && availability[workspace] !== false;
+          input.checked = allowed ? !!published[workspace] : false;
+          input.disabled = !allowed || !canWritePublication();
           input.setAttribute("data-effective-published", effective[workspace] ? "true" : "false");
+          input.setAttribute("data-workspace-available", allowed ? "true" : "false");
+          if (!allowed) {
+            input.setAttribute("title", workspaceUnavailableReason(workspace));
+          }
         } catch (error) {}
       });
 
       (state.refs.optionCards || []).forEach(function applyCard(card) {
         try {
           var workspace = normalizeWorkspace(card.getAttribute("data-workspace") || card.getAttribute("data-value") || "");
-          if (!isAllowedWorkspace(workspace)) {
-            card.classList.remove(CLASS_SELECTED);
-            card.classList.remove(CLASS_EFFECTIVE);
-            card.setAttribute("aria-disabled", "true");
-            return;
+          var allowed = isAllowedWorkspace(workspace) && availability[workspace] !== false;
+          card.classList.toggle(CLASS_SELECTED, allowed && !!published[workspace]);
+          card.classList.toggle(CLASS_EFFECTIVE, allowed && !!effective[workspace]);
+          card.classList.toggle(CLASS_DISABLED, !allowed || !canWritePublication());
+          card.setAttribute("aria-disabled", !allowed || !canWritePublication() ? "true" : "false");
+          card.setAttribute("data-published", allowed && published[workspace] ? "true" : "false");
+          card.setAttribute("data-effective-published", allowed && effective[workspace] ? "true" : "false");
+          card.setAttribute("data-workspace-available", allowed ? "true" : "false");
+          if (!allowed) {
+            card.setAttribute("title", workspaceUnavailableReason(workspace));
+          } else {
+            card.removeAttribute("title");
           }
-
-          card.classList.toggle(CLASS_SELECTED, !!published[workspace]);
-          card.classList.toggle(CLASS_EFFECTIVE, !!effective[workspace]);
-          card.setAttribute("data-published", published[workspace] ? "true" : "false");
-          card.setAttribute("data-effective-published", effective[workspace] ? "true" : "false");
         } catch (error) {}
       });
 
-      setChecked(state.refs.requireAuth, toBooleanSafe(publication.require_auth !== undefined ? publication.require_auth : publication.requireAuth, visibility === "private"));
-      setChecked(
-        state.refs.requirePermission,
-        toBooleanSafe(
-          publication.require_project_permission !== undefined ? publication.require_project_permission : publication.requireProjectPermission,
-          visibility === "private"
-        )
-      );
+      setChecked(state.refs.requireAuth, publication.require_auth);
+      setChecked(state.refs.requirePermission, publication.require_project_permission);
 
       updateDisabledState();
-      updateStatus({
-        visibility: visibility,
-        published_workspaces: published,
-        effective_published_workspaces: effective
-      });
-      updateSummary({
-        visibility: visibility,
-        published_workspaces: published,
-        effective_published_workspaces: effective
-      });
+      updateStatus({ visibility: visibility, published_workspaces: published, effective_published_workspaces: effective });
+      updateSummary({ visibility: visibility, published_workspaces: published, effective_published_workspaces: effective });
 
-      state.currentData = {
+      state.currentData = sanitizePublicationForBrowser({
         visibility: visibility,
         published_workspaces: published,
-        publishedWorkspaces: safeClone(published),
         effective_published_workspaces: effective,
-        effectivePublishedWorkspaces: safeClone(effective),
         require_auth: getChecked(state.refs.requireAuth),
-        requireAuth: getChecked(state.refs.requireAuth),
-        require_project_permission: getChecked(state.refs.requirePermission),
-        requireProjectPermission: getChecked(state.refs.requirePermission)
-      };
+        require_project_permission: getChecked(state.refs.requirePermission)
+      });
 
       if (!opts.keepDirty) {
         setDirty(false);
       }
-
       return state.currentData;
     } catch (error) {
-      return data || {};
+      return sanitizePublicationForBrowser(data || {});
     }
   }
 
   function collectData() {
     var published = emptyWorkspaceMap(false);
-
     try {
+      var availability = workspaceAvailability();
       (state.refs.checkboxes || []).forEach(function collectCheckbox(input) {
         try {
           var workspace = normalizeWorkspace(input.getAttribute("data-workspace") || input.name || input.value || "");
-
-          if (isAllowedWorkspace(workspace)) {
+          if (isAllowedWorkspace(workspace) && availability[workspace] !== false) {
             published[workspace] = !!input.checked;
           }
         } catch (error) {}
@@ -1319,153 +1643,136 @@
       var visibility = currentVisibility();
       var requireAuth = getChecked(state.refs.requireAuth);
       var requirePermission = getChecked(state.refs.requirePermission);
-
       if (visibility === "private") {
         requireAuth = true;
         requirePermission = true;
       }
-
       var effective = effectiveWorkspaces(visibility, published);
-
-      return {
+      return sanitizePublicationForBrowser({
         visibility: visibility,
-        published_workspaces: sanitizeWorkspaceMap(published),
-        publishedWorkspaces: sanitizeWorkspaceMap(published),
+        published_workspaces: published,
         effective_published_workspaces: effective,
-        effectivePublishedWorkspaces: safeClone(effective),
         require_auth: requireAuth,
-        requireAuth: requireAuth,
-        require_project_permission: requirePermission,
-        requireProjectPermission: requirePermission
-      };
+        require_project_permission: requirePermission
+      });
     } catch (error) {
-      return {
-        visibility: "private",
-        published_workspaces: emptyWorkspaceMap(false),
-        publishedWorkspaces: emptyWorkspaceMap(false),
-        effective_published_workspaces: emptyWorkspaceMap(false),
-        effectivePublishedWorkspaces: emptyWorkspaceMap(false),
-        require_auth: true,
-        requireAuth: true,
-        require_project_permission: true,
-        requireProjectPermission: true
-      };
+      return sanitizePublicationForBrowser({ visibility: "private" });
     }
   }
 
   function buildPayloadForSave() {
     try {
       var data = collectData();
-      var published = sanitizeWorkspaceMap(data.published_workspaces);
-      var effective = effectiveWorkspaces(data.visibility, published);
-
       return {
-        visibility: data.visibility,
-        published_workspaces: published,
-        publishedWorkspaces: safeClone(published),
-        workspaces: safeClone(published),
-        effective_published_workspaces: effective,
-        effectivePublishedWorkspaces: safeClone(effective),
-        require_auth: data.require_auth,
-        requireAuth: data.require_auth,
-        require_project_permission: data.require_project_permission,
-        requireProjectPermission: data.require_project_permission,
-        source: "vectoplan-app.project-publication",
-        client_version: INTERNAL_VERSION,
-        clientVersion: INTERNAL_VERSION
+        visibility: normalizeVisibility(data.visibility, "private"),
+        published_workspaces: sanitizeWorkspaceMap(data.published_workspaces),
+        require_auth: !!data.require_auth,
+        require_project_permission: !!data.require_project_permission
       };
     } catch (error) {
       return {
         visibility: "private",
         published_workspaces: emptyWorkspaceMap(false),
-        publishedWorkspaces: emptyWorkspaceMap(false),
-        workspaces: emptyWorkspaceMap(false),
-        effective_published_workspaces: emptyWorkspaceMap(false),
-        effectivePublishedWorkspaces: emptyWorkspaceMap(false),
         require_auth: true,
-        requireAuth: true,
-        require_project_permission: true,
-        requireProjectPermission: true,
-        source: "vectoplan-app.project-publication",
-        client_version: INTERNAL_VERSION,
-        clientVersion: INTERNAL_VERSION
+        require_project_permission: true
       };
     }
   }
 
   function buildEndpoint() {
     try {
-      if (state.endpoint) {
-        return state.endpoint;
-      }
-
-      var publicId =
-        trimString(state.projectPublicId, "") ||
+      var publicId = trimString(state.projectPublicId, "") ||
         (state.config && trimString(state.config.projectPublicId, "")) ||
         (state.refs.card && trimString(state.refs.card.getAttribute("data-project-public-id"), ""));
-
-      if (publicId && publicId !== "new") {
-        return "/v1/projects/" + encodeURIComponent(publicId) + "/publication";
-      }
-
-      return "";
+      return normalizePublicationEndpoint(state.endpoint || (state.config && state.config.endpoint), publicId);
     } catch (error) {
       return "";
     }
   }
 
   async function requestJson(url, options) {
+    var controller = null;
+    var timer = null;
     try {
-      var target = trimString(url, "");
-
+      var target = normalizePublicationEndpoint(url, state.projectPublicId);
       if (!target) {
-        throw new Error("request URL missing");
+        var endpointError = new Error("Unsicherer oder fehlender Publication-Endpunkt.");
+        endpointError.code = "unsafe_publication_endpoint";
+        throw endpointError;
       }
 
       var opts = isObject(options) ? options : {};
-      var headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "X-Requested-With": "fetch",
-        "X-VECTOPLAN-Client": "project_publication.js"
-      };
+      var method = trimString(opts.method, "GET").toUpperCase();
+      if (["GET", "PATCH", "PUT"].indexOf(method) === -1) {
+        var methodError = new Error("Nicht unterstützte Request-Methode.");
+        methodError.code = "unsupported_request_method";
+        throw methodError;
+      }
+
+      var requestId = createRequestId();
+      state.requestId = requestId;
+      if (typeof AbortController === "function") {
+        controller = new AbortController();
+        timer = setTimeout(function abortRequest() {
+          try { controller.abort(); } catch (_) {}
+        }, DEFAULT_REQUEST_TIMEOUT_MS);
+      }
 
       var response = await fetch(target, {
-        method: opts.method || "GET",
-        headers: headers,
+        method: method,
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "X-Requested-With": "fetch",
+          "X-VECTOPLAN-Client": "project_publication.js",
+          "X-Request-ID": requestId,
+          "X-Correlation-ID": requestId
+        },
         credentials: "same-origin",
         cache: "no-store",
+        redirect: "error",
+        referrerPolicy: "no-referrer",
+        signal: controller ? controller.signal : undefined,
         body: opts.body !== undefined ? opts.body : undefined
       });
 
       var text = await response.text();
+      if (text.length > MAX_RESPONSE_TEXT_LENGTH) {
+        var sizeError = new Error("Publication-Antwort ist zu groß.");
+        sizeError.code = "response_too_large";
+        sizeError.status = response.status;
+        throw sizeError;
+      }
       var data = safeJsonParse(text, null);
-
       if (!response.ok) {
-        var message = data && (data.error || data.message)
-          ? data.error || data.message
-          : "Request failed with status " + response.status;
-
-        var error = new Error(message);
+        var message = data && (data.error || data.message) ? data.error || data.message : "Request failed with status " + response.status;
+        var error = new Error(trimString(message, "Publication-Request fehlgeschlagen.").slice(0, 1000));
         error.status = response.status;
         error.statusCode = response.status;
-        error.payload = data;
+        error.payload = sanitizeBrowserValue(data || {}, 0);
         error.code = data && data.code ? data.code : "request_failed";
+        error.requestId = trimString(data && (data.request_id || data.requestId), requestId);
         throw error;
       }
-
-      if (data === null) {
-        return {};
-      }
-
-      return data;
+      return data === null ? {} : sanitizeBrowserValue(data, 0);
     } catch (error) {
+      if (error && error.name === "AbortError") {
+        var timeoutError = new Error("Publication-Request hat das Zeitlimit überschritten.");
+        timeoutError.code = "request_timeout";
+        timeoutError.requestId = state.requestId;
+        throw timeoutError;
+      }
       throw error;
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
     }
   }
 
   function canWritePublication() {
     try {
+      var roleAllowed = !!ROLE_CAN_PUBLISH[state.projectRole];
       return !!(
         !state.isSaving &&
         !state.isLoading &&
@@ -1476,9 +1783,13 @@
         !state.authUnavailable &&
         !state.userBlocked &&
         !state.accessBlocked &&
+        state.identityConsistent &&
+        state.localLinkState !== "identity_mismatch" &&
+        state.localLinkState !== "inactive" &&
         state.persistent &&
-        (state.canPublish || state.canManage || state.canMutate) &&
-        buildEndpoint()
+        roleAllowed &&
+        (state.canPublish || state.canManage) &&
+        !!buildEndpoint()
       );
     } catch (error) {
       return false;
@@ -1487,42 +1798,18 @@
 
   function disabledReason() {
     try {
-      if (state.authUnavailable) {
-        return "Auth-Service nicht erreichbar. Veröffentlichung kann nicht gespeichert werden.";
-      }
-
-      if (state.userBlocked || state.accessBlocked) {
-        return "Der Zugriff ist gesperrt. Veröffentlichung kann nicht gespeichert werden.";
-      }
-
-      if (state.publicViewer) {
-        return "Öffentliche Ansicht ist schreibgeschützt.";
-      }
-
-      if (state.readOnly) {
-        return "Dieses Projekt ist schreibgeschützt.";
-      }
-
-      if (state.isNew) {
-        return "Speichere das Projekt zuerst. Danach kannst du Reiter veröffentlichen.";
-      }
-
-      if (state.demoMode) {
-        return "Im Demo-Modus werden Veröffentlichungseinstellungen nicht dauerhaft gespeichert.";
-      }
-
-      if (!state.persistent) {
-        return "Für Veröffentlichungseinstellungen ist ein persistenter AppUser-Kontext erforderlich.";
-      }
-
-      if (!(state.canPublish || state.canManage || state.canMutate)) {
-        return "Du hast keine Berechtigung, Veröffentlichungseinstellungen zu ändern.";
-      }
-
-      if (!buildEndpoint()) {
-        return "Publication-Endpunkt fehlt.";
-      }
-
+      if (state.authUnavailable) return "Auth-Service nicht erreichbar. Veröffentlichung kann nicht gespeichert werden.";
+      if (!state.identityConsistent || state.localLinkState === "identity_mismatch") return "Die lokale und kanonische Benutzeridentität stimmen nicht überein.";
+      if (state.localLinkState === "inactive") return "Der lokale Benutzerlink ist inaktiv.";
+      if (state.userBlocked || state.accessBlocked) return "Der Zugriff ist gesperrt. Veröffentlichung kann nicht gespeichert werden.";
+      if (state.publicViewer || state.projectRole === "viewer") return "Öffentliche oder reine Viewer-Ansichten sind schreibgeschützt.";
+      if (state.readOnly) return "Dieses Projekt ist schreibgeschützt.";
+      if (state.isNew) return "Speichere das Projekt zuerst. Danach kannst du Reiter veröffentlichen.";
+      if (state.demoMode) return "Im Demo-Modus werden Veröffentlichungseinstellungen nicht dauerhaft gespeichert.";
+      if (!state.persistent) return "Für Veröffentlichungseinstellungen ist ein persistenter AppUser-Kontext erforderlich.";
+      if (!ROLE_CAN_PUBLISH[state.projectRole]) return "Nur Projekt-Owner und Projekt-Admins dürfen Workspaces veröffentlichen.";
+      if (!(state.canPublish || state.canManage)) return "Du hast keine Berechtigung, Veröffentlichungseinstellungen zu ändern.";
+      if (!buildEndpoint()) return "Publication-Endpunkt fehlt oder ist unsicher.";
       return "";
     } catch (error) {
       return "Veröffentlichung kann nicht gespeichert werden.";
@@ -1580,7 +1867,7 @@
 
       var publication = extractPublicationPayload(response);
 
-      state.lastResponse = response;
+      state.lastResponse = sanitizeBrowserValue({ ok: response && response.ok !== false, code: response && response.code, status_code: response && (response.status_code || response.statusCode), request_id: response && (response.request_id || response.requestId) }, 0);
       state.lastError = null;
       state.initialData = safeClone(publication);
       applyData(publication, { keepDirty: false });
@@ -1645,7 +1932,7 @@
       var response = await requestJson(endpoint, { method: "GET" });
       var publication = extractPublicationPayload(response);
 
-      state.lastResponse = response;
+      state.lastResponse = sanitizeBrowserValue({ ok: response && response.ok !== false, code: response && response.code, status_code: response && (response.status_code || response.statusCode), request_id: response && (response.request_id || response.requestId) }, 0);
       state.initialData = safeClone(publication);
       applyData(publication, { keepDirty: false });
 
@@ -1662,19 +1949,12 @@
   function emitLocal(type, detail) {
     try {
       var root = state.refs && state.refs.root;
-
-      if (!root || typeof CustomEvent !== "function") {
-        return false;
-      }
-
-      root.dispatchEvent(
-        new CustomEvent(type, {
-          bubbles: true,
-          cancelable: false,
-          detail: detail || {}
-        })
-      );
-
+      if (!root || typeof CustomEvent !== "function") return false;
+      root.dispatchEvent(new CustomEvent(type, {
+        bubbles: true,
+        cancelable: false,
+        detail: sanitizeBrowserValue(detail || {}, 0)
+      }));
       return true;
     } catch (error) {
       return false;
@@ -1683,30 +1963,20 @@
 
   function postParentMessage(type, detail) {
     try {
-      if (!window.parent || window.parent === window) {
-        return false;
-      }
-
+      var win = getWindow();
+      if (!win.parent || win.parent === win) return false;
+      var origin = currentOrigin();
+      if (!origin) return false;
       var message = {
         type: type,
         kind: type,
         source: "vectoplan-app.project-publication",
         version: INTERNAL_VERSION,
-        detail: detail || {},
+        detail: sanitizeBrowserValue(detail || {}, 0),
         ts: Date.now()
       };
-
-      try {
-        window.parent.postMessage(message, window.location.origin);
-        return true;
-      } catch (originError) {
-        try {
-          window.parent.postMessage(message, "*");
-          return true;
-        } catch (fallbackError) {
-          return false;
-        }
-      }
+      win.parent.postMessage(message, origin);
+      return true;
     } catch (error) {
       return false;
     }
@@ -1714,48 +1984,43 @@
 
   function dispatchParentEvent(type, detail) {
     try {
-      if (
-        window.parent &&
-        window.parent !== window &&
-        window.parent.dispatchEvent &&
-        typeof window.parent.CustomEvent === "function"
-      ) {
-        window.parent.dispatchEvent(
-          new window.parent.CustomEvent(type, {
-            detail: detail || {}
-          })
-        );
+      var win = getWindow();
+      if (win.parent && win.parent !== win && win.parent.dispatchEvent && typeof win.parent.CustomEvent === "function") {
+        win.parent.dispatchEvent(new win.parent.CustomEvent(type, { detail: sanitizeBrowserValue(detail || {}, 0) }));
         return true;
       }
     } catch (error) {}
-
     return false;
   }
 
   function emitChangeEvent(response, publication) {
     try {
+      var safePublication = sanitizePublicationForBrowser(publication || collectData());
       var detail = {
-        response: response || {},
-        publication: publication || collectData(),
+        response: sanitizeBrowserValue({
+          ok: !response || response.ok !== false,
+          code: response && response.code,
+          status_code: response && (response.status_code || response.statusCode),
+          request_id: response && (response.request_id || response.requestId)
+        }, 0),
+        publication: safePublication,
         projectPublicId: state.projectPublicId,
-        endpoint: buildEndpoint(),
-        visibility: publication && publication.visibility ? publication.visibility : currentVisibility()
+        visibility: safePublication.visibility,
+        projectRole: state.projectRole,
+        editor3dAvailable: !!workspaceAvailability().editor3d,
+        chunkProvisioningStatus: state.chunkProvisioningStatus,
+        chunkAccessSyncStatus: state.chunkAccessSyncStatus
       };
-
       var type = state.config && state.config.parentEvents
         ? state.config.parentEvents.publicationChanged || EVENT_PUBLICATION_CHANGED
         : EVENT_PUBLICATION_CHANGED;
-
-      emitLocal(type, detail);
+      emitLocal(type, sanitizeBrowserValue(detail, 0));
       postParentMessage(type, detail);
       dispatchParentEvent(type, detail);
-
       try {
-        if (window.parent && window.parent !== window) {
-          window.parent.dispatchEvent(new window.parent.Event("project-sidebar:refresh"));
-        }
+        var win = getWindow();
+        if (win.parent && win.parent !== win) win.parent.dispatchEvent(new win.parent.Event("project-sidebar:refresh"));
       } catch (error) {}
-
       return true;
     } catch (error) {
       return false;
@@ -1767,13 +2032,24 @@
       var visibility = currentVisibility();
       var disabled = !canWritePublication();
       var reason = disabled ? disabledReason() : "";
+      var availability = workspaceAvailability();
 
       (state.refs.checkboxes || []).forEach(function disableCheckbox(input) {
         try {
           var workspace = normalizeWorkspace(input.getAttribute("data-workspace") || input.name || input.value || "");
-          var itemDisabled = disabled || !isAllowedWorkspace(workspace);
+          var workspaceAvailable = isAllowedWorkspace(workspace) && availability[workspace] !== false;
+          var itemDisabled = disabled || !workspaceAvailable;
           input.disabled = itemDisabled;
           input.setAttribute("aria-disabled", itemDisabled ? "true" : "false");
+          input.setAttribute("data-workspace-available", workspaceAvailable ? "true" : "false");
+          if (!workspaceAvailable) {
+            input.checked = false;
+            input.setAttribute("title", workspaceUnavailableReason(workspace));
+          } else if (reason) {
+            input.setAttribute("title", reason);
+          } else {
+            input.removeAttribute("title");
+          }
         } catch (error) {}
       });
 
@@ -1781,22 +2057,15 @@
         state.refs.requireAuth.disabled = disabled || visibility === "private";
         state.refs.requireAuth.setAttribute("aria-disabled", state.refs.requireAuth.disabled ? "true" : "false");
       }
-
       if (state.refs.requirePermission) {
         state.refs.requirePermission.disabled = disabled || visibility === "private";
         state.refs.requirePermission.setAttribute("aria-disabled", state.refs.requirePermission.disabled ? "true" : "false");
       }
-
       if (state.refs.save) {
         state.refs.save.disabled = disabled;
         state.refs.save.setAttribute("aria-disabled", disabled ? "true" : "false");
-        if (reason) {
-          state.refs.save.setAttribute("title", reason);
-        } else {
-          state.refs.save.removeAttribute("title");
-        }
+        if (reason) state.refs.save.setAttribute("title", reason); else state.refs.save.removeAttribute("title");
       }
-
       if (state.refs.reset) {
         state.refs.reset.disabled = disabled;
         state.refs.reset.setAttribute("aria-disabled", disabled ? "true" : "false");
@@ -1805,9 +2074,14 @@
       (state.refs.optionCards || []).forEach(function disableCard(card) {
         try {
           var workspace = normalizeWorkspace(card.getAttribute("data-workspace") || card.getAttribute("data-value") || "");
-          var cardDisabled = disabled || !isAllowedWorkspace(workspace);
+          var workspaceAvailable = isAllowedWorkspace(workspace) && availability[workspace] !== false;
+          var cardDisabled = disabled || !workspaceAvailable;
           card.classList.toggle(CLASS_DISABLED, cardDisabled);
           card.setAttribute("aria-disabled", cardDisabled ? "true" : "false");
+          card.setAttribute("data-workspace-available", workspaceAvailable ? "true" : "false");
+          if (!workspaceAvailable) card.setAttribute("title", workspaceUnavailableReason(workspace));
+          else if (reason) card.setAttribute("title", reason);
+          else card.removeAttribute("title");
         } catch (error) {}
       });
 
@@ -1815,29 +2089,22 @@
         state.refs.card.setAttribute("data-project-visibility", visibility);
         state.refs.card.setAttribute("data-project-publication-disabled", disabled ? "true" : "false");
         state.refs.card.setAttribute("data-project-publication-disabled-reason", reason || "");
+        state.refs.card.setAttribute("data-project-role", state.projectRole);
+        state.refs.card.setAttribute("data-editor3d-publication-available", availability.editor3d ? "true" : "false");
+        state.refs.card.setAttribute("data-editor3d-publication-reason", workspaceUnavailableReason("editor3d"));
       }
     } catch (error) {}
   }
 
   function onInputChange() {
     try {
+      if (!canWritePublication()) {
+        updateDisabledState();
+        if (disabledReason()) setAlert("info", disabledReason());
+        return;
+      }
       var data = collectData();
-
-      applyData(
-        {
-          visibility: data.visibility,
-          published_workspaces: data.published_workspaces,
-          publishedWorkspaces: data.publishedWorkspaces,
-          effective_published_workspaces: data.effective_published_workspaces,
-          effectivePublishedWorkspaces: data.effectivePublishedWorkspaces,
-          require_auth: data.require_auth,
-          requireAuth: data.requireAuth,
-          require_project_permission: data.require_project_permission,
-          requireProjectPermission: data.requireProjectPermission
-        },
-        { keepDirty: true }
-      );
-
+      applyData(data, { keepDirty: true });
       setDirty(true);
       setAlert("", "");
     } catch (error) {}
@@ -1889,44 +2156,31 @@
     try {
       var detail = event && event.detail ? event.detail : {};
       var visibility = normalizeVisibility(detail.visibility || detail.value || currentVisibility(), "private");
-
-      if (state.refs.card) {
-        state.refs.card.setAttribute("data-project-visibility", visibility);
-      }
-
-      if (state.refs.root) {
-        state.refs.root.setAttribute("data-project-visibility", visibility);
-      }
-
+      if (state.refs.card) state.refs.card.setAttribute("data-project-visibility", visibility);
+      if (state.refs.root) state.refs.root.setAttribute("data-project-visibility", visibility);
       var data = collectData();
       data.visibility = visibility;
       data.effective_published_workspaces = effectiveWorkspaces(visibility, data.published_workspaces);
       data.effectivePublishedWorkspaces = safeClone(data.effective_published_workspaces);
-
       if (visibility === "private") {
         data.require_auth = true;
         data.requireAuth = true;
         data.require_project_permission = true;
         data.requireProjectPermission = true;
       }
-
       applyData(data, { keepDirty: true });
-      setDirty(true);
+      if (canWritePublication()) setDirty(true);
     } catch (error) {}
   }
 
   function onMessage(event) {
     try {
+      if (!isTrustedMessageEvent(event)) return;
       var data = event && event.data;
-
-      if (!data || typeof data !== "object") {
-        return;
-      }
-
+      if (!data || typeof data !== "object") return;
       var type = trimString(data.type || data.kind, "");
-
       if (type === EVENT_VISIBILITY_CHANGED) {
-        onVisibilityChanged({ detail: data.detail || data });
+        onVisibilityChanged({ detail: sanitizeBrowserValue(data.detail || data, 0) });
       }
     } catch (error) {}
   }
@@ -1974,77 +2228,54 @@
 
   function syncInitialStateFromRefs() {
     try {
-      state.projectPublicId =
-        trimString(state.refs.card && state.refs.card.getAttribute("data-project-public-id"), "") ||
-        state.config.projectPublicId;
-
-      state.endpoint =
-        trimString(state.refs.card && state.refs.card.getAttribute("data-publication-url"), "") ||
-        state.config.endpoint;
-
-      state.isNew = toBooleanSafe(
-        state.refs.card && state.refs.card.getAttribute("data-project-is-new"),
-        state.config.isNew
+      state.projectPublicId = trimString(state.refs.card && state.refs.card.getAttribute("data-project-public-id"), "") || state.config.projectPublicId;
+      state.endpoint = normalizePublicationEndpoint(
+        trimString(state.refs.card && state.refs.card.getAttribute("data-publication-url"), "") || state.config.endpoint,
+        state.projectPublicId
       );
-
-      state.canManage = toBooleanSafe(
-        state.refs.card && state.refs.card.getAttribute("data-project-can-manage"),
-        state.config.canManage
+      state.isNew = toBooleanSafe(state.refs.card && state.refs.card.getAttribute("data-project-is-new"), state.config.isNew);
+      state.projectRole = normalizeProjectRole(
+        trimString(state.refs.card && state.refs.card.getAttribute("data-project-role"), "") || state.config.projectRole,
+        state.isNew ? "owner" : "viewer"
       );
+      state.identityConsistent = toBooleanSafe(state.config.identityConsistent, true);
+      state.localLinkState = lowerString(state.config.localLinkState, "not_applicable");
+      state.accessMode = lowerString(state.config.accessMode, "anonymous");
+      state.canManage = toBooleanSafe(state.refs.card && state.refs.card.getAttribute("data-project-can-manage"), state.config.canManage) && !!ROLE_CAN_PUBLISH[state.projectRole];
+      state.canPublish = toBooleanSafe(state.refs.card && state.refs.card.getAttribute("data-project-can-publish"), state.config.canPublish || state.config.canManage) && !!ROLE_CAN_PUBLISH[state.projectRole];
+      state.canMutate = toBooleanSafe(state.refs.card && state.refs.card.getAttribute("data-project-can-mutate"), state.config.canMutate || state.config.canPublish || state.config.canManage) && !!ROLE_CAN_PUBLISH[state.projectRole];
+      state.canEdit = toBooleanSafe(state.refs.card && state.refs.card.getAttribute("data-project-can-edit"), state.config.canEdit) && state.projectRole !== "viewer";
+      state.demoMode = toBooleanSafe(state.refs.card && state.refs.card.getAttribute("data-project-demo-mode"), state.config.demoMode);
+      state.persistent = toBooleanSafe(state.refs.card && state.refs.card.getAttribute("data-project-persistent"), state.config.persistent);
+      state.publicViewer = toBooleanSafe(state.refs.card && state.refs.card.getAttribute("data-project-public-viewer"), state.config.publicViewer);
+      state.readOnly = toBooleanSafe(state.refs.card && state.refs.card.getAttribute("data-project-read-only"), state.config.readOnly);
+      state.authUnavailable = toBooleanSafe(state.refs.card && state.refs.card.getAttribute("data-project-auth-unavailable"), state.config.authUnavailable);
+      state.userBlocked = toBooleanSafe(state.refs.card && state.refs.card.getAttribute("data-project-user-blocked"), state.config.userBlocked);
+      state.accessBlocked = toBooleanSafe(state.refs.card && state.refs.card.getAttribute("data-project-access-blocked"), state.config.accessBlocked);
 
-      state.canPublish = toBooleanSafe(
-        state.refs.card && state.refs.card.getAttribute("data-project-can-publish"),
-        state.config.canPublish || state.config.canManage
-      );
+      state.chunkReady = !!state.config.chunkReady;
+      state.chunkProvisioningStatus = normalizeOperationalStatus(state.config.chunkProvisioningStatus, "pending");
+      state.chunkAccessSyncStatus = normalizeOperationalStatus(state.config.chunkAccessSyncStatus, "disabled");
+      state.chunkAccessRequired = !!state.config.chunkAccessRequired;
+      state.publicEditor3dVerified = !!state.config.publicEditor3dVerified;
+      state.workspaceAvailability = safeClone(state.config.workspaceAvailability || state.workspaceAvailability);
+      state.workspaceReasons = safeClone(state.config.workspaceReasons || state.workspaceReasons);
 
-      state.canMutate = toBooleanSafe(
-        state.refs.card && state.refs.card.getAttribute("data-project-can-mutate"),
-        state.config.canMutate || state.config.canPublish || state.config.canManage
-      );
-
-      state.canEdit = toBooleanSafe(
-        state.refs.card && state.refs.card.getAttribute("data-project-can-edit"),
-        state.config.canEdit
-      );
-
-      state.demoMode = toBooleanSafe(
-        state.refs.card && state.refs.card.getAttribute("data-project-demo-mode"),
-        state.config.demoMode
-      );
-
-      state.persistent = toBooleanSafe(
-        state.refs.card && state.refs.card.getAttribute("data-project-persistent"),
-        state.config.persistent
-      );
-
-      state.publicViewer = toBooleanSafe(
-        state.refs.card && state.refs.card.getAttribute("data-project-public-viewer"),
-        state.config.publicViewer
-      );
-
-      state.readOnly = toBooleanSafe(
-        state.refs.card && state.refs.card.getAttribute("data-project-read-only"),
-        state.config.readOnly
-      );
-
-      state.authUnavailable = toBooleanSafe(
-        state.refs.card && state.refs.card.getAttribute("data-project-auth-unavailable"),
-        state.config.authUnavailable
-      );
-
-      state.userBlocked = toBooleanSafe(
-        state.refs.card && state.refs.card.getAttribute("data-project-user-blocked"),
-        state.config.userBlocked
-      );
-
-      state.accessBlocked = toBooleanSafe(
-        state.refs.card && state.refs.card.getAttribute("data-project-access-blocked"),
-        state.config.accessBlocked
-      );
+      var identityMismatch = !state.identityConsistent || state.localLinkState === "identity_mismatch" || state.localLinkState === "inactive";
+      if (state.publicViewer || state.projectRole === "viewer" || state.authUnavailable || state.userBlocked || state.accessBlocked || identityMismatch) {
+        state.readOnly = true;
+        state.canManage = false;
+        state.canPublish = false;
+        state.canMutate = false;
+      }
+      if (state.demoMode || state.publicViewer || state.authUnavailable || state.userBlocked || state.accessBlocked || identityMismatch) {
+        state.persistent = false;
+      }
 
       if (state.refs.card) {
         state.refs.card.setAttribute("data-project-public-id", state.projectPublicId || "");
         state.refs.card.setAttribute("data-project-publication-version", String(INTERNAL_VERSION));
+        state.refs.card.setAttribute("data-project-role", state.projectRole);
       }
     } catch (error) {}
   }
@@ -2087,7 +2318,9 @@
       });
 
       try {
-        window.__VECTOPLAN_PROJECT_PUBLICATION_STATE__ = state;
+        if (window.__VECTOPLAN_DEBUG_ENABLED__ === true) {
+          window.__VECTOPLAN_PROJECT_PUBLICATION_STATE__ = getSnapshot();
+        }
       } catch (error) {}
 
       return state;
@@ -2110,7 +2343,7 @@
 
   function getSnapshot() {
     try {
-      return {
+      return sanitizeBrowserValue({
         version: INTERNAL_VERSION,
         initialized: state.initialized,
         destroyed: state.destroyed,
@@ -2129,20 +2362,24 @@
         authUnavailable: state.authUnavailable,
         userBlocked: state.userBlocked,
         accessBlocked: state.accessBlocked,
+        identityConsistent: state.identityConsistent,
+        localLinkState: state.localLinkState,
+        projectRole: state.projectRole,
+        accessMode: state.accessMode,
         disabledReason: disabledReason(),
         projectPublicId: state.projectPublicId,
         endpoint: buildEndpoint(),
-        initialData: safeClone(state.initialData),
+        chunkReady: state.chunkReady,
+        chunkProvisioningStatus: state.chunkProvisioningStatus,
+        chunkAccessSyncStatus: state.chunkAccessSyncStatus,
+        publicEditor3dVerified: state.publicEditor3dVerified,
+        workspaceAvailability: workspaceAvailability(),
+        initialData: sanitizePublicationForBrowser(state.initialData || {}),
         currentData: collectData(),
-        lastResponse: safeClone(state.lastResponse),
         lastError: state.lastError
-      };
+      }, 0);
     } catch (error) {
-      return {
-        version: INTERNAL_VERSION,
-        initialized: false,
-        error: normalizeError(error)
-      };
+      return { version: INTERNAL_VERSION, initialized: false, error: normalizeError(error) };
     }
   }
 
@@ -2170,18 +2407,24 @@
       effectiveWorkspaces: effectiveWorkspaces,
       requestJson: requestJson,
       normalizeError: normalizeError,
-      extractPublicationPayload: extractPublicationPayload
+      extractPublicationPayload: extractPublicationPayload,
+      normalizePublicationEndpoint: normalizePublicationEndpoint,
+      normalizeProjectRole: normalizeProjectRole,
+      workspaceAvailability: workspaceAvailability,
+      sanitizeBrowserValue: sanitizeBrowserValue,
+      isTrustedMessageEvent: isTrustedMessageEvent
     }
   };
 
   try {
     global[EXPORT_NAME] = api;
 
-    if (!global.__VECTOPLAN_DEBUG__) {
-      global.__VECTOPLAN_DEBUG__ = {};
+    if (global.__VECTOPLAN_DEBUG_ENABLED__ === true) {
+      if (!global.__VECTOPLAN_DEBUG__) {
+        global.__VECTOPLAN_DEBUG__ = {};
+      }
+      global.__VECTOPLAN_DEBUG__.projectPublication = api;
     }
-
-    global.__VECTOPLAN_DEBUG__.projectPublication = api;
   } catch (error) {}
 
   try {
