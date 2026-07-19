@@ -3,74 +3,309 @@
   VECTOPLAN Project Visibility Partial
 
   Zweck:
-  - Ersetzt das alte Sichtbarkeits-Dropdown durch drei Auswahlkarten.
-  - Sichtbare Optionen:
-      private  = Privat
-      unlisted = Nicht gelistet / Linkfreigabe
-      public   = Öffentlich
-  - shared wird bewusst nicht mehr als eigene Sichtbarkeit angeboten.
-    Teilen erfolgt künftig über Team/Mitglieder/Einladungen.
-  - is_public wird nicht mehr separat angezeigt, sondern serverseitig aus
-    visibility abgeleitet.
-  - Veröffentlichung einzelner Workspace-Reiter wird in project_publication.html
-    geregelt, nicht hier.
+  - Stellt die drei App-Sichtbarkeiten private, unlisted und public dar.
+  - Verwaltet ausschließlich das Feld visibility des App-Projekts.
+  - is_public wird serverseitig aus visibility abgeleitet.
+  - Teamfreigaben und veröffentlichte Workspace-Reiter bleiben getrennte Verträge.
+  - Das Partial sendet selbst keine Requests; project_form.js übernimmt Persistenz.
+  - Backend-Berechtigungen bleiben die endgültige Wahrheit.
 
-  Erwartete optionale Variablen:
-  - project
-  - current_project
-  - _project
-  - can_edit
-  - _can_edit
-  - demo_mode
-  - _demo_mode
-
-  Robustheitsregel:
-  - Partial funktioniert auch ohne vorbereitete Parent-Variablen.
+  Sicherheitsregeln:
+  - Nur Projektrollen owner, admin und editor dürfen Sichtbarkeit bearbeiten.
+  - Eine globale Account- oder Plattformrolle ist keine Projektrolle.
+  - Viewer und Public Viewer bleiben unabhängig von alten canEdit-Flags read-only.
+  - Identity-Mismatch, Auth-Ausfall, Blocked- und Read-only-Kontexte sind fail-closed.
+  - Persistente Änderungen benötigen einen konsistent verknüpften lokalen AppUser.
+  - Demo darf nur bei explizitem Backend-canEdit temporär arbeiten.
+  - Keine User-, Auth-, Account-, Token-, Session- oder Service-Identitäten im Markup.
 #}
 
-{% set _visibility_project_raw = _project|default(project|default(current_project|default({}, true), true), true) %}
+{% set _visibility_truthy = [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'Yes', 'YES', 'y', 'Y', 'on', 'On', 'ON', 'ja', 'Ja', 'JA', 'enabled', 'Enabled', 'ENABLED', 'ok', 'OK', 'ready', 'Ready', 'READY'] %}
+
+{# ------------------------------------------------------------------------- #}
+{# Defensive context extraction                                               #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _visibility_project_raw = project_view|default(_project|default(project|default(current_project|default({}, true), true), true), true) %}
 {% set _visibility_project = _visibility_project_raw if _visibility_project_raw is mapping else {} %}
 
-{% set _visibility_raw = _visibility_project.get('visibility', 'private') %}
-{% set _visibility = 'private' %}
-{% if _visibility_raw in ['public', 'öffentlich', 'oeffentlich', 'open'] %}
-  {% set _visibility = 'public' %}
-{% elif _visibility_raw in ['unlisted', 'not_listed', 'nicht_gelistet', 'link', 'link_shared'] %}
-  {% set _visibility = 'unlisted' %}
-{% else %}
-  {% set _visibility = 'private' %}
+{% set _visibility_access_raw = access_view|default(access|default(_access|default(_visibility_project.get('access', {}), true), true), true) %}
+{% set _visibility_access = _visibility_access_raw if _visibility_access_raw is mapping else {} %}
+
+{% set _visibility_permissions_raw = _visibility_access.get('permissions', {}) %}
+{% set _visibility_permissions = _visibility_permissions_raw if _visibility_permissions_raw is mapping else {} %}
+
+{% set _visibility_ui_raw = ui_flags|default(_visibility_project.get('ui_flags', _visibility_project.get('uiFlags', {})), true) %}
+{% set _visibility_ui = _visibility_ui_raw if _visibility_ui_raw is mapping else {} %}
+
+{% set _visibility_user_raw = current_user_view|default(current_user|default(auth|default(auth_context|default({}, true), true), true), true) %}
+{% set _visibility_user = _visibility_user_raw if _visibility_user_raw is mapping else {} %}
+
+{% set _visibility_publication_raw = publication_view|default(publication|default(_visibility_project.get('publication', {}), true), true) %}
+{% set _visibility_publication_candidate = _visibility_publication_raw if _visibility_publication_raw is mapping else {} %}
+{% set _visibility_publication_nested_raw = _visibility_publication_candidate.get('publication', {}) %}
+{% set _visibility_publication_nested = _visibility_publication_nested_raw if _visibility_publication_nested_raw is mapping else {} %}
+{% set _visibility_publication = _visibility_publication_nested if _visibility_publication_nested else _visibility_publication_candidate %}
+
+{# ------------------------------------------------------------------------- #}
+{# Public project identity and visibility                                      #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _visibility_project_public_id = _visibility_project.get('public_id') %}
+{% if not _visibility_project_public_id %}
+  {% set _visibility_project_public_id = _visibility_project.get('publicId') %}
+{% endif %}
+{% if not _visibility_project_public_id %}
+  {% set _visibility_project_public_id = _visibility_project.get('project_public_id') %}
+{% endif %}
+{% if not _visibility_project_public_id %}
+  {% set _visibility_project_public_id = _visibility_project.get('projectPublicId') %}
+{% endif %}
+{% if not _visibility_project_public_id %}
+  {% set _visibility_project_public_id = 'new' %}
 {% endif %}
 
-{% set _visibility_can_edit_raw = _can_edit|default(can_edit|default(true, true), true) %}
-{% set _visibility_can_edit = true if _visibility_can_edit_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _visibility_raw = _visibility_project.get('visibility', _visibility_publication.get('visibility', 'private')) %}
+{% set _visibility_text = _visibility_raw|string|lower|replace('-', '_')|replace(' ', '_') %}
+{% set _visibility = 'private' %}
 
-{% set _visibility_demo_raw = _demo_mode|default(demo_mode|default(_visibility_project.get('demo_mode', _visibility_project.get('demoMode', false)), true), true) %}
-{% set _visibility_demo_mode = true if _visibility_demo_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% if _visibility_text in ['public', 'öffentlich', 'oeffentlich', 'open', 'listed'] %}
+  {% set _visibility = 'public' %}
+{% elif _visibility_text in ['unlisted', 'not_listed', 'notlisted', 'nicht_gelistet', 'hidden_link', 'link', 'link_shared', 'share_link'] %}
+  {% set _visibility = 'unlisted' %}
+{% endif %}
+
+{# ------------------------------------------------------------------------- #}
+{# Effective project role                                                     #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _visibility_role_raw = _visibility_access.get('project_role') %}
+{% if not _visibility_role_raw %}
+  {% set _visibility_role_raw = _visibility_access.get('projectRole') %}
+{% endif %}
+{% if not _visibility_role_raw %}
+  {% set _visibility_role_raw = _visibility_access.get('membership_role') %}
+{% endif %}
+{% if not _visibility_role_raw %}
+  {% set _visibility_role_raw = _visibility_access.get('membershipRole') %}
+{% endif %}
+{% if not _visibility_role_raw %}
+  {% set _visibility_role_raw = _visibility_access.get('role') %}
+{% endif %}
+{% if not _visibility_role_raw %}
+  {% set _visibility_role_raw = _visibility_project.get('project_role', _visibility_project.get('projectRole', '')) %}
+{% endif %}
+
+{% set _visibility_role_text = _visibility_role_raw|string|lower|replace('-', '_')|replace(' ', '_') %}
+{% set _visibility_role = '' %}
+{% if _visibility_role_text == 'owner' %}
+  {% set _visibility_role = 'owner' %}
+{% elif _visibility_role_text in ['admin', 'administrator', 'manager'] %}
+  {% set _visibility_role = 'admin' %}
+{% elif _visibility_role_text in ['editor', 'edit', 'write'] %}
+  {% set _visibility_role = 'editor' %}
+{% elif _visibility_role_text in ['viewer', 'view', 'reader', 'readonly', 'read_only'] %}
+  {% set _visibility_role = 'viewer' %}
+{% endif %}
+
+{% set _visibility_role_can_edit = true if _visibility_role in ['owner', 'admin', 'editor'] else false %}
+{% set _visibility_is_viewer = true if _visibility_role == 'viewer' else false %}
+
+{# ------------------------------------------------------------------------- #}
+{# Auth, identity and mutation flags                                           #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _visibility_is_new_raw = _is_new|default(is_new|default(_visibility_ui.get('is_new', _visibility_ui.get('isNew', _visibility_project.get('is_new', _visibility_project.get('isNew', false)))), true), true) %}
+{% set _visibility_is_new = true if _visibility_is_new_raw in _visibility_truthy or _visibility_project_public_id == 'new' else false %}
+
+{% set _visibility_demo_raw = _demo_mode|default(demo_mode|default(_visibility_ui.get('demo_mode', _visibility_ui.get('demoMode', _visibility_project.get('demo_mode', _visibility_project.get('demoMode', _visibility_access.get('demo_mode', _visibility_access.get('demoMode', false)))))), true), true) %}
+{% set _visibility_demo_mode = true if _visibility_demo_raw in _visibility_truthy else false %}
+
+{% set _visibility_public_viewer_raw = _public_viewer|default(public_viewer|default(_visibility_ui.get('public_viewer', _visibility_ui.get('publicViewer', _visibility_access.get('public_viewer', _visibility_access.get('publicViewer', false)))), true), true) %}
+{% set _visibility_public_viewer = true if _visibility_public_viewer_raw in _visibility_truthy else false %}
+
+{% set _visibility_read_only_raw = _read_only|default(read_only|default(_visibility_ui.get('read_only', _visibility_ui.get('readOnly', _visibility_access.get('read_only', _visibility_access.get('readOnly', false)))), true), true) %}
+{% set _visibility_read_only = true if _visibility_read_only_raw in _visibility_truthy else false %}
+
+{% set _visibility_auth_unavailable_raw = _auth_unavailable|default(auth_unavailable|default(_visibility_ui.get('auth_unavailable', _visibility_ui.get('authUnavailable', _visibility_access.get('auth_unavailable', _visibility_access.get('authUnavailable', _visibility_user.get('auth_unavailable', _visibility_user.get('authUnavailable', false)))))), true), true) %}
+{% set _visibility_auth_unavailable = true if _visibility_auth_unavailable_raw in _visibility_truthy else false %}
+
+{% set _visibility_user_blocked_raw = _user_blocked|default(user_blocked|default(_visibility_ui.get('user_blocked', _visibility_ui.get('userBlocked', _visibility_access.get('user_blocked', _visibility_access.get('userBlocked', _visibility_user.get('user_blocked', _visibility_user.get('userBlocked', false)))))), true), true) %}
+{% set _visibility_user_blocked = true if _visibility_user_blocked_raw in _visibility_truthy else false %}
+
+{% set _visibility_access_blocked_raw = _access_blocked|default(access_blocked|default(_visibility_ui.get('access_blocked', _visibility_ui.get('accessBlocked', _visibility_access.get('access_blocked', _visibility_access.get('accessBlocked', _visibility_user.get('access_blocked', _visibility_user.get('accessBlocked', false)))))), true), true) %}
+{% set _visibility_access_blocked = true if _visibility_access_blocked_raw in _visibility_truthy else false %}
+
+{% set _visibility_persistent_raw = _persistent|default(persistent|default(_visibility_ui.get('persistent', _visibility_access.get('persistent', _visibility_user.get('persistent', false))), true), true) %}
+{% set _visibility_persistent = true if _visibility_persistent_raw in _visibility_truthy else false %}
+
+{% set _visibility_identity_consistent_raw = _visibility_ui.get('identity_consistent') %}
+{% if _visibility_identity_consistent_raw is none %}
+  {% set _visibility_identity_consistent_raw = _visibility_ui.get('identityConsistent') %}
+{% endif %}
+{% if _visibility_identity_consistent_raw is none %}
+  {% set _visibility_identity_consistent_raw = _visibility_access.get('identity_consistent') %}
+{% endif %}
+{% if _visibility_identity_consistent_raw is none %}
+  {% set _visibility_identity_consistent_raw = _visibility_access.get('identityConsistent') %}
+{% endif %}
+{% if _visibility_identity_consistent_raw is none %}
+  {% set _visibility_identity_consistent_raw = _visibility_user.get('identity_consistent') %}
+{% endif %}
+{% if _visibility_identity_consistent_raw is none %}
+  {% set _visibility_identity_consistent_raw = _visibility_user.get('identityConsistent', false) %}
+{% endif %}
+{% set _visibility_identity_consistent = true if _visibility_identity_consistent_raw in _visibility_truthy else false %}
+
+{% set _visibility_link_state = _visibility_ui.get('local_link_state', _visibility_ui.get('localLinkState', _visibility_access.get('local_link_state', _visibility_access.get('localLinkState', _visibility_user.get('local_link_state', _visibility_user.get('localLinkState', '')))))) %}
+{% set _visibility_link_state = _visibility_link_state|string|lower|replace('-', '_')|replace(' ', '_') %}
+
+{% set _visibility_identity_mismatch_raw = _visibility_ui.get('identity_mismatch', _visibility_ui.get('identityMismatch', _visibility_access.get('identity_mismatch', _visibility_access.get('identityMismatch', false)))) %}
+{% set _visibility_identity_mismatch = true if _visibility_identity_mismatch_raw in _visibility_truthy or _visibility_link_state == 'identity_mismatch' else false %}
+
+{% set _visibility_local_link_ready = true if _visibility_link_state == 'linked' else false %}
+{% set _visibility_identity_ready = true if _visibility_demo_mode or (_visibility_persistent and _visibility_identity_consistent and _visibility_local_link_ready and not _visibility_identity_mismatch) else false %}
+
+{% set _visibility_can_edit_raw = _can_edit|default(can_edit|default(_visibility_ui.get('can_edit', _visibility_ui.get('canEdit', _visibility_access.get('can_edit', _visibility_access.get('canEdit', _visibility_permissions.get('edit', false))))), true), true) %}
+{% set _visibility_can_edit_flag = true if _visibility_can_edit_raw in _visibility_truthy else false %}
+
+{% set _visibility_can_mutate_raw = _can_mutate|default(can_mutate|default(_visibility_ui.get('can_mutate', _visibility_ui.get('canMutate', _visibility_access.get('can_mutate', _visibility_access.get('canMutate', _visibility_can_edit_flag)))), true), true) %}
+{% set _visibility_can_mutate_flag = true if _visibility_can_mutate_raw in _visibility_truthy else false %}
+
+{% if _visibility_public_viewer or _visibility_is_viewer or _visibility_auth_unavailable or _visibility_user_blocked or _visibility_access_blocked or _visibility_identity_mismatch %}
+  {% set _visibility_read_only = true %}
+  {% set _visibility_demo_mode = false %}
+  {% set _visibility_persistent = false %}
+{% endif %}
+
+{% set _visibility_can_write = true if _visibility_role_can_edit and _visibility_can_edit_flag and _visibility_can_mutate_flag and _visibility_identity_ready and not _visibility_read_only and not _visibility_public_viewer and not _visibility_auth_unavailable and not _visibility_user_blocked and not _visibility_access_blocked and not _visibility_identity_mismatch else false %}
+
+{# ------------------------------------------------------------------------- #}
+{# Disabled reason                                                            #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _visibility_disabled_reason = '' %}
+{% if _visibility_auth_unavailable %}
+  {% set _visibility_disabled_reason = 'Auth-Service nicht erreichbar. Sichtbarkeit kann nicht gespeichert werden.' %}
+{% elif _visibility_user_blocked or _visibility_access_blocked %}
+  {% set _visibility_disabled_reason = 'Der Zugriff ist gesperrt. Sichtbarkeit kann nicht gespeichert werden.' %}
+{% elif _visibility_identity_mismatch %}
+  {% set _visibility_disabled_reason = 'Die lokale Benutzerverknüpfung stimmt nicht mit der zentralen Identität überein. Änderungen bleiben gesperrt.' %}
+{% elif _visibility_public_viewer %}
+  {% set _visibility_disabled_reason = 'Öffentliche Ansicht ist schreibgeschützt.' %}
+{% elif _visibility_is_viewer %}
+  {% set _visibility_disabled_reason = 'Viewer dürfen die Projektsichtbarkeit nicht ändern.' %}
+{% elif _visibility_read_only %}
+  {% set _visibility_disabled_reason = 'Dieses Projekt ist schreibgeschützt.' %}
+{% elif not _visibility_role_can_edit %}
+  {% set _visibility_disabled_reason = 'Eine Projektrolle mit Bearbeitungsrecht ist erforderlich.' %}
+{% elif not _visibility_can_edit_flag or not _visibility_can_mutate_flag %}
+  {% set _visibility_disabled_reason = 'Projektmutationen sind für diesen Kontext deaktiviert.' %}
+{% elif not _visibility_demo_mode and not _visibility_persistent %}
+  {% set _visibility_disabled_reason = 'Für dauerhafte Sichtbarkeitsänderungen ist ein persistenter AppUser-Kontext erforderlich.' %}
+{% elif not _visibility_demo_mode and not _visibility_identity_consistent %}
+  {% set _visibility_disabled_reason = 'Die zentrale Identität konnte nicht konsistent mit dem AppUser verknüpft werden.' %}
+{% elif not _visibility_demo_mode and not _visibility_local_link_ready %}
+  {% set _visibility_disabled_reason = 'Der Login ist noch nicht mit einem aktiven lokalen AppUser verknüpft.' %}
+{% elif _visibility_demo_mode %}
+  {% set _visibility_disabled_reason = 'Demo-Modus: Änderungen gelten nur temporär und werden nicht dauerhaft gespeichert.' %}
+{% endif %}
+
+{% set _visibility_options = [
+  {
+    'key': 'private',
+    'label': 'Privat',
+    'eyebrow': 'Nur Mitglieder',
+    'text': 'Nur berechtigte Projektmitglieder können das Projekt öffnen.',
+    'note': 'Keine öffentlichen Workspace-Reiter.'
+  },
+  {
+    'key': 'unlisted',
+    'label': 'Nicht gelistet',
+    'eyebrow': 'Linkfreigabe',
+    'text': 'Das Projekt erscheint nicht in öffentlichen Listen, kann aber über einen Link erreichbar sein.',
+    'note': 'Workspace-Reiter müssen separat veröffentlicht werden.'
+  },
+  {
+    'key': 'public',
+    'label': 'Öffentlich',
+    'eyebrow': 'Öffentliche Sichtbarkeit',
+    'text': 'Das Projekt darf öffentlich auffindbar sein. Die einzelnen Reiter bleiben separat gesteuert.',
+    'note': 'Admin, Team und System bleiben privat.'
+  }
+] %}
 
 <section
-  class="vp-project-card vp-project-card--visibility"
+  class="vp-project-card vp-project-card--visibility{% if not _visibility_can_write %} is-disabled{% endif %}{% if _visibility_read_only %} is-readonly{% endif %}"
   aria-labelledby="projectVisibilityTitle"
   data-project-visibility-card
   data-current-visibility="{{ _visibility|e }}"
+  data-project-public-id="{{ _visibility_project_public_id|e }}"
+  data-project-role="{{ _visibility_role|e }}"
+  data-project-is-new="{{ 'true' if _visibility_is_new else 'false' }}"
+  data-project-can-edit="{{ 'true' if _visibility_can_edit_flag else 'false' }}"
+  data-project-can-mutate="{{ 'true' if _visibility_can_mutate_flag else 'false' }}"
+  data-project-visibility-can-write="{{ 'true' if _visibility_can_write else 'false' }}"
+  data-project-demo-mode="{{ 'true' if _visibility_demo_mode else 'false' }}"
+  data-project-persistent="{{ 'true' if _visibility_persistent else 'false' }}"
+  data-project-public-viewer="{{ 'true' if _visibility_public_viewer else 'false' }}"
+  data-project-read-only="{{ 'true' if _visibility_read_only else 'false' }}"
+  data-project-auth-unavailable="{{ 'true' if _visibility_auth_unavailable else 'false' }}"
+  data-project-user-blocked="{{ 'true' if _visibility_user_blocked else 'false' }}"
+  data-project-access-blocked="{{ 'true' if _visibility_access_blocked else 'false' }}"
+  data-project-identity-consistent="{{ 'true' if _visibility_identity_consistent else 'false' }}"
+  data-project-local-link-state="{{ _visibility_link_state|e }}"
+  data-project-visibility-disabled="{{ 'false' if _visibility_can_write else 'true' }}"
+  data-project-visibility-disabled-reason="{{ _visibility_disabled_reason|e }}"
 >
   <header class="vp-project-card__header">
     <div>
-      <h2 id="projectVisibilityTitle" class="vp-project-card__title">
-        Sichtbarkeit
-      </h2>
-
+      <h2 id="projectVisibilityTitle" class="vp-project-card__title">Sichtbarkeit</h2>
       <p class="vp-project-card__text">
-        Lege fest, ob das Projekt privat bleibt, per Link erreichbar ist oder öffentlich sichtbar sein darf.
+        Lege fest, ob das Projekt privat bleibt, nur per Link erreichbar ist oder öffentlich sichtbar sein darf.
       </p>
     </div>
 
-
+    <div class="vp-project-card__meta" aria-live="polite">
+      <span
+        class="vp-project-chip {% if _visibility_auth_unavailable or _visibility_user_blocked or _visibility_access_blocked or _visibility_identity_mismatch %}vp-project-chip--error{% elif _visibility == 'private' %}vp-project-chip--muted{% elif _visibility == 'unlisted' %}vp-project-chip--warning{% else %}vp-project-chip--success{% endif %}"
+        data-project-visibility-status
+      >
+        {% if _visibility_auth_unavailable %}
+          Auth nicht erreichbar
+        {% elif _visibility_user_blocked or _visibility_access_blocked %}
+          Zugriff gesperrt
+        {% elif _visibility_identity_mismatch %}
+          Identität inkonsistent
+        {% elif _visibility == 'private' %}
+          Privat
+        {% elif _visibility == 'unlisted' %}
+          Nicht gelistet
+        {% else %}
+          Öffentlich
+        {% endif %}
+      </span>
+    </div>
   </header>
 
-  {% if _visibility_demo_mode %}
-    <div class="vp-project-inline-note vp-project-inline-note--demo" data-project-visibility-demo-note>
-      <strong>Demo-Modus:</strong>
-      Die Sichtbarkeit wird in der Demo nicht dauerhaft gespeichert.
+  {% if _visibility_disabled_reason %}
+    <div
+      class="vp-project-inline-note {% if _visibility_auth_unavailable or _visibility_user_blocked or _visibility_access_blocked or _visibility_identity_mismatch %}vp-project-inline-note--error{% elif _visibility_demo_mode %}vp-project-inline-note--demo{% else %}vp-project-inline-note--locked{% endif %}"
+      data-project-visibility-disabled-note
+    >
+      {{ _visibility_disabled_reason }}
+    </div>
+  {% elif _visibility == 'private' %}
+    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-visibility-private-note>
+      Private Projekte veröffentlichen keine Workspaces. Ausgewählte Reiter werden erst bei „Nicht gelistet“ oder „Öffentlich“ wirksam.
+    </div>
+  {% elif _visibility == 'unlisted' %}
+    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-visibility-unlisted-note>
+      Nicht gelistet bedeutet: Das Projekt erscheint nicht in öffentlichen Listen. Nur ausdrücklich veröffentlichte Reiter sind über den Link erreichbar.
+    </div>
+  {% else %}
+    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-visibility-public-note>
+      Öffentlich bedeutet nicht automatisch, dass alle Workspaces sichtbar sind. Reiter werden separat unter „Veröffentlichte Reiter“ freigegeben.
     </div>
   {% endif %}
 
@@ -80,6 +315,7 @@
     name="visibility"
     value="{{ _visibility|e }}"
     data-project-visibility
+    data-project-visibility-input
   >
 
   <div
@@ -87,97 +323,157 @@
     role="radiogroup"
     aria-labelledby="projectVisibilityTitle"
     data-project-visibility-options
+    data-current-visibility="{{ _visibility|e }}"
   >
-    <button
-      type="button"
-      class="vp-project-choice-card {% if _visibility == 'private' %}is-selected{% endif %}"
-      role="radio"
-      aria-checked="{{ 'true' if _visibility == 'private' else 'false' }}"
-      data-project-visibility-option
-      data-value="private"
-      {% if not _visibility_can_edit %}disabled{% endif %}
-    >
-      <span class="vp-project-choice-card__header">
-        <span class="vp-project-choice-card__icon" aria-hidden="true">
-          🔒
+    {% for item in _visibility_options %}
+      <button
+        type="button"
+        class="vp-project-choice-card{% if _visibility == item.key %} is-selected{% endif %}{% if not _visibility_can_write %} is-disabled{% endif %}"
+        role="radio"
+        aria-checked="{{ 'true' if _visibility == item.key else 'false' }}"
+        aria-disabled="{{ 'false' if _visibility_can_write else 'true' }}"
+        data-project-visibility-option
+        data-value="{{ item.key|e }}"
+        data-visibility="{{ item.key|e }}"
+        data-selected="{{ 'true' if _visibility == item.key else 'false' }}"
+        tabindex="{{ '0' if _visibility_can_write else '-1' }}"
+        {% if not _visibility_can_write %}disabled{% endif %}
+        {% if _visibility_disabled_reason %}title="{{ _visibility_disabled_reason|e }}"{% endif %}
+      >
+        <span class="vp-project-choice-card__header">
+          <span class="vp-project-choice-card__eyebrow">{{ item.eyebrow }}</span>
+          <span class="vp-project-choice-card__title">{{ item.label }}</span>
         </span>
-        <span class="vp-project-choice-card__title">
-          Privat
-        </span>
-      </span>
 
-      <span class="vp-project-choice-card__text">
-        Nur Projektmitglieder mit Berechtigung können das Projekt sehen.
-      </span>
-
-
-    </button>
-
-    <button
-      type="button"
-      class="vp-project-choice-card {% if _visibility == 'unlisted' %}is-selected{% endif %}"
-      role="radio"
-      aria-checked="{{ 'true' if _visibility == 'unlisted' else 'false' }}"
-      data-project-visibility-option
-      data-value="unlisted"
-      {% if not _visibility_can_edit %}disabled{% endif %}
-    >
-      <span class="vp-project-choice-card__header">
-        <span class="vp-project-choice-card__icon" aria-hidden="true">
-          🔗
-        </span>
-        <span class="vp-project-choice-card__title">
-          Nicht gelistet
-        </span>
-      </span>
-
-      <span class="vp-project-choice-card__text">
-        Das Projekt wird nicht öffentlich gelistet, kann aber über freigegebene Links oder veröffentlichte Reiter erreichbar sein.
-      </span>
-
-
-    </button>
-
-    <button
-      type="button"
-      class="vp-project-choice-card {% if _visibility == 'public' %}is-selected{% endif %}"
-      role="radio"
-      aria-checked="{{ 'true' if _visibility == 'public' else 'false' }}"
-      data-project-visibility-option
-      data-value="public"
-      {% if not _visibility_can_edit %}disabled{% endif %}
-    >
-      <span class="vp-project-choice-card__header">
-        <span class="vp-project-choice-card__icon" aria-hidden="true">
-          🌐
-        </span>
-        <span class="vp-project-choice-card__title">
-          Öffentlich
-        </span>
-      </span>
-
-      <span class="vp-project-choice-card__text">
-        Das Projekt darf öffentlich sichtbar sein. Welche Reiter tatsächlich sichtbar sind, wird separat über Veröffentlichung gesteuert.
-      </span>
-
-
-    </button>
+        <span class="vp-project-choice-card__text">{{ item.text }}</span>
+        <span class="vp-project-choice-card__meta">{{ item.note }}</span>
+      </button>
+    {% endfor %}
   </div>
 
+  <p class="vp-project-help" data-project-visibility-help>
+    {% if _visibility_public_viewer %}
+      Öffentliche Ansicht: Die Sichtbarkeit kann hier nicht geändert werden.
+    {% elif _visibility_is_viewer %}
+      Viewer können die Projektsichtbarkeit ansehen, aber nicht ändern.
+    {% elif _visibility == 'private' %}
+      Privat ist der sichere Standard. Zugriff erhalten ausschließlich berechtigte Projektmitglieder.
+    {% elif _visibility == 'unlisted' %}
+      Nicht gelistet eignet sich für Linkfreigaben. Veröffentlichte Reiter werden weiterhin einzeln gesteuert.
+    {% else %}
+      Öffentlich macht nur die grundsätzlich freigegebenen Bereiche erreichbar. Team-, Admin- und Systemdaten bleiben privat.
+    {% endif %}
+  </p>
 
+  <span class="vp-project-sr-only" data-project-visibility-current-label aria-live="polite">
+    {% if _visibility == 'public' %}Öffentlich{% elif _visibility == 'unlisted' %}Nicht gelistet{% else %}Privat{% endif %}
+  </span>
 
+  <script type="application/json" data-project-visibility-initial-json>
+    {
+      "visibility": {{ _visibility|tojson }}
+    }
+  </script>
+
+  <script>
+    (function exposeVectoplanProjectVisibility() {
+      "use strict";
+
+      function normalizeVisibility(value) {
+        try {
+          var text = String(value || "private").trim().toLowerCase().replace(/-/g, "_").replace(/\s+/g, "_");
+
+          if (text === "public" || text === "öffentlich" || text === "oeffentlich" || text === "open" || text === "listed") {
+            return "public";
+          }
+
+          if (
+            text === "unlisted" ||
+            text === "not_listed" ||
+            text === "notlisted" ||
+            text === "nicht_gelistet" ||
+            text === "hidden_link" ||
+            text === "link" ||
+            text === "link_shared" ||
+            text === "share_link"
+          ) {
+            return "unlisted";
+          }
+
+          return "private";
+        } catch (error) {
+          return "private";
+        }
+      }
+
+      function inputElement() {
+        try {
+          return document.getElementById("projectVisibility");
+        } catch (error) {
+          return null;
+        }
+      }
+
+      function canWrite() {
+        try {
+          var card = document.querySelector("[data-project-visibility-card]");
+          return !!card && card.getAttribute("data-project-visibility-can-write") === "true";
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function setVisibility(value, options) {
+        var visibility = normalizeVisibility(value);
+        var opts = options && typeof options === "object" ? options : {};
+
+        try {
+          var formApi = window.VectoplanProjectForm;
+          if (formApi && typeof formApi.setVisibility === "function") {
+            return formApi.setVisibility(visibility, opts);
+          }
+        } catch (error) {}
+
+        try {
+          var input = inputElement();
+          if (!input || (!canWrite() && !opts.silent)) {
+            return normalizeVisibility(input && input.value);
+          }
+
+          input.value = visibility;
+          input.setAttribute("value", visibility);
+          return visibility;
+        } catch (error) {
+          return "private";
+        }
+      }
+
+      try {
+        window.VectoplanProjectVisibility = {
+          version: 2,
+          get: function getProjectVisibility() {
+            var input = inputElement();
+            return normalizeVisibility(input && input.value);
+          },
+          set: setVisibility,
+          refresh: function refreshProjectVisibility() {
+            var input = inputElement();
+            return setVisibility(input && input.value, { silent: true });
+          },
+          canWrite: canWrite
+        };
+      } catch (error) {}
+    })();
+  </script>
 
   <noscript>
     <div class="vp-project-field">
-      <label class="vp-project-label" for="projectVisibilityFallback">
-        Sichtbarkeit
-      </label>
-
+      <label class="vp-project-label" for="projectVisibilityFallback">Sichtbarkeit</label>
       <select
         id="projectVisibilityFallback"
         class="vp-project-select"
         name="visibility"
-        {% if not _visibility_can_edit %}disabled{% endif %}
+        {% if not _visibility_can_write %}disabled{% endif %}
       >
         <option value="private" {% if _visibility == 'private' %}selected{% endif %}>Privat</option>
         <option value="unlisted" {% if _visibility == 'unlisted' %}selected{% endif %}>Nicht gelistet</option>

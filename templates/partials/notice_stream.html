@@ -1,0 +1,141 @@
+{# services/vectoplan-app/templates/partials/notice_stream.html #}
+{#
+  Backend-driven global notice stream.
+
+  Expected context:
+    notice_stream = {
+      "enabled": true,
+      "kind": "demo",
+      "severity": "warning",
+      "label": "DEMO",
+      "title": "Demo-Modus",
+      "messages": [...],
+      "marquee_text": "DEMO · ...",
+      "aria_label": "...",
+      "dismissible": false,
+      "access_mode": "demo",
+      "demo_mode": true,
+      "public_viewer": false,
+      "read_only": false,
+      "metadata": {...}
+    }
+
+  Rules:
+    - No HTML from routes.
+    - Text is rendered escaped.
+    - This partial should not break the shell if notice_stream is missing.
+    - CSS is provided by static/css/notice_stream.css.
+#}
+
+{%- set ns = namespace(
+  notice={},
+  enabled=false,
+  kind='',
+  severity='',
+  label='',
+  title='',
+  marquee_text='',
+  aria_label='',
+  access_mode='',
+  messages=[],
+  dismissible=false,
+  demo_mode=false,
+  public_viewer=false,
+  read_only=false,
+  request_path='',
+  project_public_id=''
+) -%}
+
+{%- if notice_stream is defined and notice_stream -%}
+  {%- set ns.notice = notice_stream -%}
+{%- endif -%}
+
+{%- if ns.notice -%}
+  {%- set ns.enabled = ns.notice.get('enabled', false) -%}
+  {%- set ns.kind = ns.notice.get('kind', '') -%}
+  {%- set ns.severity = ns.notice.get('severity', '') -%}
+  {%- set ns.label = ns.notice.get('label', '') -%}
+  {%- set ns.title = ns.notice.get('title', '') -%}
+  {%- set ns.marquee_text = ns.notice.get('marquee_text', '') -%}
+  {%- set ns.aria_label = ns.notice.get('aria_label', '') -%}
+  {%- set ns.access_mode = ns.notice.get('access_mode', '') -%}
+  {%- set ns.messages = ns.notice.get('messages', []) -%}
+  {%- set ns.dismissible = ns.notice.get('dismissible', false) -%}
+  {%- set ns.demo_mode = ns.notice.get('demo_mode', false) -%}
+  {%- set ns.public_viewer = ns.notice.get('public_viewer', false) -%}
+  {%- set ns.read_only = ns.notice.get('read_only', false) -%}
+
+  {%- if ns.notice.get('metadata') -%}
+    {%- set ns.request_path = ns.notice.get('metadata', {}).get('request_path', '') -%}
+    {%- set ns.project_public_id = ns.notice.get('metadata', {}).get('project_public_id', '') -%}
+  {%- endif -%}
+{%- endif -%}
+
+{%- if ns.enabled and ns.marquee_text -%}
+<section
+  class="vp-notice-stream vp-notice-stream--{{ ns.kind|default('notice', true)|e }} vp-notice-stream--{{ ns.severity|default('info', true)|e }}"
+  data-vp-notice-stream="true"
+  data-notice-kind="{{ ns.kind|default('', true)|e }}"
+  data-notice-severity="{{ ns.severity|default('', true)|e }}"
+  data-notice-access-mode="{{ ns.access_mode|default('', true)|e }}"
+  data-notice-demo-mode="{{ '1' if ns.demo_mode else '0' }}"
+  data-notice-public-viewer="{{ '1' if ns.public_viewer else '0' }}"
+  data-notice-read-only="{{ '1' if ns.read_only else '0' }}"
+  data-notice-project-public-id="{{ ns.project_public_id|default('', true)|e }}"
+  data-notice-request-path="{{ ns.request_path|default('', true)|e }}"
+  role="status"
+  aria-live="polite"
+  aria-atomic="true"
+  aria-label="{{ ns.aria_label|default(ns.title, true)|e }}"
+>
+  <div class="vp-notice-stream__inner">
+    <div class="vp-notice-stream__badge-wrap" aria-hidden="true">
+      <span class="vp-notice-stream__badge">
+        {{ ns.label|default('INFO', true)|e }}
+      </span>
+    </div>
+
+    <div class="vp-notice-stream__viewport">
+      <div class="vp-notice-stream__track">
+        <span class="vp-notice-stream__line">
+          {{ ns.marquee_text|e }}
+        </span>
+        <span class="vp-notice-stream__line" aria-hidden="true">
+          {{ ns.marquee_text|e }}
+        </span>
+        <span class="vp-notice-stream__line" aria-hidden="true">
+          {{ ns.marquee_text|e }}
+        </span>
+      </div>
+    </div>
+
+    {%- if ns.dismissible -%}
+    <button
+      class="vp-notice-stream__dismiss"
+      type="button"
+      data-vp-notice-dismiss="true"
+      aria-label="Hinweis ausblenden"
+      title="Hinweis ausblenden"
+    >
+      ×
+    </button>
+    {%- endif -%}
+  </div>
+
+  <div class="vp-notice-stream__sr-only">
+    {%- if ns.title -%}
+      <strong>{{ ns.title|e }}</strong>
+    {%- endif -%}
+
+    {%- if ns.messages -%}
+      <ul>
+        {%- for message in ns.messages -%}
+          {%- if message -%}
+          <li>{{ message|e }}</li>
+          {%- endif -%}
+        {%- endfor -%}
+      </ul>
+    {%- endif -%}
+  </div>
+</section>
+{%- endif -%}

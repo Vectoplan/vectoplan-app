@@ -184,6 +184,29 @@ except Exception:  # pragma: no cover
     get_project_publication = None  # type: ignore
 
 
+try:
+    from services.ui_notice_service import (
+        build_notice_stream,
+        get_notice_stream_status,
+    )
+except Exception:  # pragma: no cover
+    build_notice_stream = None  # type: ignore
+    get_notice_stream_status = None  # type: ignore
+
+
+try:
+    from services.project_access_context import (
+        ProjectAccessContext,
+        apply_project_access_context,
+        get_project_access_context_status,
+        resolve_project_shell_access,
+    )
+except Exception:  # pragma: no cover
+    ProjectAccessContext = None  # type: ignore
+    apply_project_access_context = None  # type: ignore
+    get_project_access_context_status = None  # type: ignore
+    resolve_project_shell_access = None  # type: ignore
+
 bp = Blueprint("ui_projects", __name__)
 
 ui_projects_bp = bp
@@ -1630,11 +1653,15 @@ def _project_payload_for_template(
     *,
     current_user: Mapping[str, Any],
     is_new: bool = False,
+    access_context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     user_id = _current_user_id_optional()
 
     if project is None:
-        return _new_project_payload(current_user)
+        payload = _new_project_payload(current_user)
+        if access_context:
+            payload = _apply_access_context_to_project_payload(payload, access_context)
+        return payload
 
     try:
         payload = _serialize_project_safe(project, user_id=user_id)
@@ -1644,6 +1671,9 @@ def _project_payload_for_template(
 
         payload = _attach_publication(project, payload, user_id)
         payload = _attach_demo_payload(project, payload, current_user)
+
+        if access_context:
+            payload = _apply_access_context_to_project_payload(payload, access_context)
 
         public_id = _project_public_id(project, "new")
         paths = _project_paths(public_id, is_demo=_project_is_demo(project))
@@ -1827,11 +1857,60 @@ def _project_sidebar_context(
     selected_project: Optional[Any],
     conversation: Any,
     current_user: Mapping[str, Any],
+    access_context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     try:
         user_id = _current_user_id_optional()
         chat_id = _conversation_id(conversation)
         selected_public_id = _project_public_id(selected_project, "new")
+        access_data = _safe_dict(access_context)
+        is_public_viewer = _access_context_public_viewer(access_data)
+
+        if is_public_viewer:
+            title = getattr(selected_project, "name", None) if selected_project is not None else "Öffentliches Projekt"
+            subtitle = getattr(selected_project, "address_text", None) if selected_project is not None else ""
+            public_item = {
+                "id": selected_public_id,
+                "projectId": selected_public_id,
+                "public_id": selected_public_id,
+                "title": title or "Öffentliches Projekt",
+                "subtitle": subtitle or "Öffentliche Ansicht",
+                "href": f"/project={_safe_quote(selected_public_id)}",
+                "project_url": f"/project={_safe_quote(selected_public_id)}",
+                "isActive": True,
+                "is_active": True,
+                "isDemo": False,
+                "is_demo": False,
+                "isPublic": True,
+                "is_public": True,
+                "isPublicViewer": True,
+                "is_public_viewer": True,
+                "readOnly": True,
+                "read_only": True,
+                "source": "public_viewer",
+            }
+
+            return {
+                "enabled": True,
+                "currentChatId": chat_id,
+                "currentProjectId": selected_public_id,
+                "current_project_id": selected_public_id,
+                "currentTitle": title or "Öffentliches Projekt",
+                "currentSubtitle": subtitle or "Öffentliche Ansicht",
+                "defaultCollapsed": False,
+                "defaultWidth": 280,
+                "minWidth": 220,
+                "maxWidth": 420,
+                "collapsedWidth": 64,
+                "storageKey": "vectoplan.projectSidebar.v1",
+                "routeBase": "/",
+                "apiPath": "/v1/projects/sidebar",
+                "items": [public_item] if selected_project is not None else [],
+                "demo_mode": False,
+                "public_viewer": True,
+                "read_only": True,
+                "access_mode": "public",
+            }
 
         if _is_auth_unavailable_context(current_user):
             return {
@@ -1990,6 +2069,600 @@ def _project_sidebar_context(
         }
 
 
+def _notice_access_context(
+    *,
+    selected_project: Optional[Any],
+    project_payload: Mapping[str, Any],
+    workspace: Mapping[str, Any],
+    current_user: Mapping[str, Any],
+) -> Dict[str, Any]:
+    try:
+        access = _safe_dict(project_payload.get("access"))
+        permissions = _safe_dict(access.get("permissions"))
+
+        public_viewer = _safe_bool(
+            access.get("public_viewer")
+            or access.get("publicViewer")
+            or access.get("is_public_viewer")
+            or access.get("isPublicViewer")
+            or access.get("is_unlisted_viewer")
+            or access.get("isUnlistedViewer"),
+            False,
+        )
+
+        read_only = _safe_bool(
+            access.get("read_only")
+            or access.get("readOnly")
+            or access.get("readonly"),
+            public_viewer,
+        )
+
+        if _is_demo_context(current_user):
+            access_mode = "demo"
+        elif public_viewer:
+            access_mode = "public"
+        elif _is_authenticated_context(current_user):
+            access_mode = "authenticated"
+        else:
+            access_mode = "anonymous"
+
+        return {
+            "access_mode": access_mode,
+            "mode": access_mode,
+            "demo_mode": _is_demo_context(current_user),
+            "public_viewer": public_viewer,
+            "is_public_viewer": public_viewer,
+            "read_only": read_only,
+            "authenticated": _is_authenticated_context(current_user),
+            "persistent": _is_persistent_context(current_user),
+            "auth_unavailable": _is_auth_unavailable_context(current_user),
+            "user_blocked": _is_user_blocked_context(current_user),
+            "access_blocked": _is_access_blocked_context(current_user),
+            "project_public_id": (
+                _safe_str(project_payload.get("public_id"), "", 160)
+                or _safe_str(project_payload.get("publicId"), "", 160)
+                or _project_public_id(selected_project, "new")
+            ),
+            "project_id": project_payload.get("id") or project_payload.get("project_id"),
+            "workspace_mode": _safe_str(workspace.get("workspace_mode"), "project", 80),
+            "default_mode": _safe_str(workspace.get("default_mode"), "project", 80),
+            "can_view": _safe_bool(access.get("can_view") or permissions.get("view"), False),
+            "can_edit": _safe_bool(access.get("can_edit") or permissions.get("edit"), False),
+            "can_manage": _safe_bool(
+                access.get("can_manage")
+                or permissions.get("manage")
+                or permissions.get("manage_settings"),
+                False,
+            ),
+            "source": "routes.ui.projects",
+        }
+
+    except Exception as exc:
+        _log_warning("notice access context failed: %s", exc.__class__.__name__)
+        return {
+            "access_mode": "demo" if _is_demo_context(current_user) else "anonymous",
+            "demo_mode": _is_demo_context(current_user),
+            "public_viewer": False,
+            "read_only": False,
+            "authenticated": _is_authenticated_context(current_user),
+            "auth_unavailable": _is_auth_unavailable_context(current_user),
+            "user_blocked": _is_user_blocked_context(current_user),
+            "access_blocked": _is_access_blocked_context(current_user),
+            "project_public_id": _project_public_id(selected_project, "new"),
+            "source": "routes.ui.projects.fallback",
+        }
+
+
+def _fallback_notice_stream(
+    *,
+    current_user: Mapping[str, Any],
+    access_context: Mapping[str, Any],
+) -> Dict[str, Any]:
+    try:
+        if not _is_demo_context(current_user):
+            return {
+                "ok": True,
+                "enabled": False,
+                "kind": "",
+                "severity": "",
+                "label": "",
+                "title": "",
+                "messages": [],
+                "marquee_text": "",
+                "access_mode": _safe_str(access_context.get("access_mode"), "", 80),
+                "demo_mode": False,
+                "public_viewer": _safe_bool(access_context.get("public_viewer"), False),
+                "read_only": _safe_bool(access_context.get("read_only"), False),
+                "source": "routes.ui.projects.fallback_notice",
+                "reason": "no_active_notice",
+                "metadata": {},
+            }
+
+        messages = [
+            "Du befindest dich im Demo-Modus.",
+            "Änderungen werden nur temporär gespeichert.",
+            "Keine dauerhafte Projektspeicherung.",
+            "Keine echten Team-Einladungen.",
+            "Kein Zugriff auf Bigdata-/Abo-Datenquellen.",
+            "Kein echter Account-Kontext.",
+        ]
+        label = "DEMO"
+        marquee_text = "  ·  ".join([label] + messages)
+
+        return {
+            "ok": True,
+            "enabled": True,
+            "kind": "demo",
+            "severity": "warning",
+            "label": label,
+            "title": "Demo-Modus",
+            "messages": messages,
+            "marquee_text": marquee_text,
+            "separator": "  ·  ",
+            "dismissible": False,
+            "aria_label": ". ".join(["DEMO", "Demo-Modus"] + messages),
+            "access_mode": "demo",
+            "demo_mode": True,
+            "public_viewer": False,
+            "read_only": False,
+            "source": "routes.ui.projects.fallback_notice",
+            "metadata": {
+                "project_public_id": _safe_str(access_context.get("project_public_id"), "", 160),
+            },
+        }
+
+    except Exception:
+        return {
+            "ok": True,
+            "enabled": False,
+            "kind": "",
+            "severity": "",
+            "label": "",
+            "title": "",
+            "messages": [],
+            "marquee_text": "",
+            "source": "routes.ui.projects.fallback_notice_failed",
+            "reason": "fallback_failed",
+            "metadata": {},
+        }
+
+
+def _notice_stream_context(
+    *,
+    selected_project: Optional[Any],
+    project_payload: Mapping[str, Any],
+    workspace: Mapping[str, Any],
+    current_user: Mapping[str, Any],
+) -> Dict[str, Any]:
+    try:
+        access_context = _notice_access_context(
+            selected_project=selected_project,
+            project_payload=project_payload,
+            workspace=workspace,
+            current_user=current_user,
+        )
+
+        if callable(build_notice_stream):
+            notice = build_notice_stream(
+                current_user_context=current_user,
+                access_context=access_context,
+                project=selected_project if selected_project is not None else project_payload,
+                force_refresh=False,
+            )
+            notice_payload = _safe_dict(notice)
+            if notice_payload:
+                return notice_payload
+
+        return _fallback_notice_stream(
+            current_user=current_user,
+            access_context=access_context,
+        )
+
+    except Exception as exc:
+        _log_warning("notice stream context failed: %s", exc.__class__.__name__)
+        return _fallback_notice_stream(
+            current_user=current_user,
+            access_context={
+                "access_mode": "demo" if _is_demo_context(current_user) else "anonymous",
+                "project_public_id": _project_public_id(selected_project, "new"),
+            },
+        )
+
+
+
+def _access_context_to_dict(access_context: Any) -> Dict[str, Any]:
+    try:
+        if access_context is None:
+            return {}
+
+        if hasattr(access_context, "to_dict") and callable(access_context.to_dict):
+            return _safe_dict(access_context.to_dict())
+
+        return _safe_dict(access_context)
+
+    except Exception:
+        return {}
+
+
+def _access_context_allowed(access_context: Mapping[str, Any]) -> bool:
+    return _safe_bool(access_context.get("allowed") or access_context.get("ok"), False)
+
+
+def _access_context_public_viewer(access_context: Mapping[str, Any]) -> bool:
+    return _safe_bool(
+        access_context.get("public_viewer")
+        or access_context.get("publicViewer")
+        or access_context.get("is_public_viewer")
+        or access_context.get("isPublicViewer"),
+        False,
+    )
+
+
+def _access_context_demo_mode(access_context: Mapping[str, Any]) -> bool:
+    return _safe_bool(access_context.get("demo_mode") or access_context.get("demoMode"), False)
+
+
+def _access_context_read_only(access_context: Mapping[str, Any]) -> bool:
+    return _safe_bool(access_context.get("read_only") or access_context.get("readOnly"), True)
+
+
+def _access_context_status_code(access_context: Mapping[str, Any], default: int = 403) -> int:
+    status = _safe_int(access_context.get("status_code") or access_context.get("statusCode"), default)
+    if status <= 0:
+        return default
+    return status
+
+
+def _access_context_code(access_context: Mapping[str, Any], default: str = "project_permission_denied") -> str:
+    return _safe_str(access_context.get("code") or access_context.get("reason"), default, 160)
+
+
+def _access_context_message(access_context: Mapping[str, Any], default: str = "Zugriff verweigert.") -> str:
+    return _safe_str(access_context.get("message") or access_context.get("error"), default, 500)
+
+
+def _fallback_project_access_context(project: Any, current_user: Mapping[str, Any]) -> Dict[str, Any]:
+    try:
+        if project is None:
+            return {
+                "ok": True,
+                "allowed": True,
+                "access_mode": "demo" if _is_demo_context(current_user) else "authenticated" if _is_authenticated_context(current_user) else "anonymous",
+                "code": "new_project_shell_allowed",
+                "message": "Projekt-Shell erlaubt.",
+                "status_code": 200,
+                "workspace": "project",
+                "action": "view",
+                "read_only": False if _is_demo_context(current_user) or _is_persistent_context(current_user) else True,
+                "public_viewer": False,
+                "demo_mode": _is_demo_context(current_user),
+                "authenticated": _is_authenticated_context(current_user),
+                "persistent": _is_persistent_context(current_user),
+                "permissions": {
+                    "view": True,
+                    "edit": bool(_is_demo_context(current_user) or _is_persistent_context(current_user)),
+                    "manage": bool(_is_persistent_context(current_user) and not _is_demo_context(current_user)),
+                    "delete": False,
+                    "transfer": False,
+                    "embed": bool(_is_demo_context(current_user) or _is_persistent_context(current_user)),
+                    "view_settings": bool(_is_persistent_context(current_user) and not _is_demo_context(current_user)),
+                    "manage_settings": bool(_is_persistent_context(current_user) and not _is_demo_context(current_user)),
+                    "view_team": bool(_is_persistent_context(current_user) and not _is_demo_context(current_user)),
+                    "manage_team": bool(_is_persistent_context(current_user) and not _is_demo_context(current_user)),
+                    "view_admin": bool(_is_persistent_context(current_user) and not _is_demo_context(current_user)),
+                },
+                "source": "routes.ui.projects.fallback_project_access_context",
+            }
+
+        if _is_auth_unavailable_context(current_user):
+            return {
+                "ok": False,
+                "allowed": False,
+                "access_mode": "auth_unavailable",
+                "code": _context_code(current_user) or "auth_service_unavailable",
+                "message": "vectoplan-auth ist nicht erreichbar.",
+                "status_code": 503,
+                "read_only": True,
+                "public_viewer": False,
+                "demo_mode": False,
+                "permissions": {},
+                "source": "routes.ui.projects.fallback_project_access_context",
+            }
+
+        if _is_user_blocked_context(current_user):
+            return {
+                "ok": False,
+                "allowed": False,
+                "access_mode": "blocked",
+                "code": _context_code(current_user) or "auth_blocked",
+                "message": "Dieser Zugang ist gesperrt.",
+                "status_code": 403,
+                "read_only": True,
+                "public_viewer": False,
+                "demo_mode": False,
+                "permissions": {},
+                "source": "routes.ui.projects.fallback_project_access_context",
+            }
+
+        if _project_is_demo(project) and _is_demo_context(current_user):
+            return {
+                "ok": True,
+                "allowed": True,
+                "access_mode": "demo",
+                "code": "demo_project_allowed",
+                "message": "Demo-Projektzugriff erlaubt.",
+                "status_code": 200,
+                "workspace": "project",
+                "action": "view",
+                "read_only": False,
+                "public_viewer": False,
+                "demo_mode": True,
+                "authenticated": False,
+                "persistent": False,
+                "permissions": {
+                    "view": True,
+                    "edit": True,
+                    "manage": False,
+                    "delete": False,
+                    "transfer": False,
+                    "embed": True,
+                    "view_settings": False,
+                    "manage_settings": False,
+                    "view_team": False,
+                    "manage_team": False,
+                    "view_admin": False,
+                },
+                "source": "routes.ui.projects.fallback_project_access_context",
+            }
+
+        try:
+            user_id = _current_user_id_optional()
+            result = require_project_permission(
+                project,
+                PERMISSION_VIEW,
+                user_id,
+                allow_public_view=True,
+            )
+
+            if result is False:
+                return {
+                    "ok": False,
+                    "allowed": False,
+                    "access_mode": "demo" if _is_demo_context(current_user) else "anonymous",
+                    "code": "project_permission_denied",
+                    "message": "permission denied",
+                    "status_code": 403,
+                    "read_only": True,
+                    "public_viewer": False,
+                    "demo_mode": _is_demo_context(current_user),
+                    "permissions": {},
+                    "source": "routes.ui.projects.fallback_project_access_context",
+                }
+
+            data = _safe_dict(result)
+            if data and data.get("ok") is False:
+                data.setdefault("allowed", False)
+                data.setdefault("access_mode", "demo" if _is_demo_context(current_user) else "anonymous")
+                data.setdefault("status_code", 403)
+                data.setdefault("source", "routes.ui.projects.fallback_project_access_context")
+                return data
+
+            access = _serialize_permissions(project, user_id)
+            permissions = _safe_dict(access.get("permissions"))
+            if not permissions:
+                permissions = {
+                    "view": True,
+                    "edit": _safe_bool(access.get("can_edit"), False),
+                    "manage": _safe_bool(access.get("can_manage"), False),
+                    "delete": False,
+                    "transfer": False,
+                    "embed": True,
+                    "view_settings": _safe_bool(access.get("can_view_settings"), False),
+                    "manage_settings": _safe_bool(access.get("can_manage_settings"), False),
+                    "view_team": _safe_bool(access.get("can_view_team"), False),
+                    "manage_team": _safe_bool(access.get("can_manage_team"), False),
+                    "view_admin": _safe_bool(access.get("can_view_admin"), False),
+                }
+
+            return {
+                "ok": True,
+                "allowed": True,
+                "access_mode": "authenticated" if _is_authenticated_context(current_user) else "demo" if _is_demo_context(current_user) else "anonymous",
+                "code": "project_permission_allowed",
+                "message": "Projektzugriff erlaubt.",
+                "status_code": 200,
+                "workspace": "project",
+                "action": "view",
+                "read_only": not _safe_bool(permissions.get("edit") or permissions.get("manage"), False),
+                "public_viewer": False,
+                "demo_mode": _is_demo_context(current_user),
+                "authenticated": _is_authenticated_context(current_user),
+                "persistent": _is_persistent_context(current_user),
+                "permissions": permissions,
+                "source": "routes.ui.projects.fallback_project_access_context",
+            }
+
+        except TypeError:
+            result = require_project_permission(project, PERMISSION_VIEW, _current_user_id_optional())
+            if result is False:
+                return {
+                    "ok": False,
+                    "allowed": False,
+                    "access_mode": "demo" if _is_demo_context(current_user) else "anonymous",
+                    "code": "project_permission_denied",
+                    "message": "permission denied",
+                    "status_code": 403,
+                    "read_only": True,
+                    "public_viewer": False,
+                    "demo_mode": _is_demo_context(current_user),
+                    "permissions": {},
+                    "source": "routes.ui.projects.fallback_project_access_context",
+                }
+            return {
+                "ok": True,
+                "allowed": True,
+                "access_mode": "authenticated" if _is_authenticated_context(current_user) else "anonymous",
+                "code": "project_permission_allowed",
+                "message": "Projektzugriff erlaubt.",
+                "status_code": 200,
+                "read_only": True,
+                "public_viewer": False,
+                "demo_mode": _is_demo_context(current_user),
+                "permissions": {"view": True, "embed": True},
+                "source": "routes.ui.projects.fallback_project_access_context",
+            }
+
+    except Exception as exc:
+        _log_warning("fallback project access context failed: %s", exc.__class__.__name__)
+        return {
+            "ok": False,
+            "allowed": False,
+            "access_mode": "error",
+            "code": "project_access_context_failed",
+            "message": "Projektzugriff konnte nicht geprüft werden.",
+            "status_code": 500,
+            "read_only": True,
+            "public_viewer": False,
+            "demo_mode": False,
+            "permissions": {},
+            "source": "routes.ui.projects.fallback_project_access_context",
+            "error": str(exc),
+        }
+
+
+def _resolve_shell_access_context(project: Optional[Any], current_user: Mapping[str, Any]) -> Dict[str, Any]:
+    try:
+        if callable(resolve_project_shell_access):
+            resolved = resolve_project_shell_access(
+                project,
+                current_user_context=current_user,
+                action="view",
+                use_cache=True,
+            )
+            data = _access_context_to_dict(resolved)
+            if data:
+                return data
+
+        return _fallback_project_access_context(project, current_user)
+
+    except Exception as exc:
+        _log_warning("resolve shell access context failed: %s", exc.__class__.__name__)
+        return _fallback_project_access_context(project, current_user)
+
+
+def _effective_current_user_for_access(
+    current_user: Mapping[str, Any],
+    access_context: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    user = _safe_dict(current_user)
+    access = _safe_dict(access_context)
+
+    try:
+        if _access_context_public_viewer(access):
+            user["demo_mode"] = False
+            user["demoMode"] = False
+            user["is_demo"] = False
+            user["isDemo"] = False
+            user["public_viewer"] = True
+            user["publicViewer"] = True
+            user["is_public_viewer"] = True
+            user["isPublicViewer"] = True
+            user["read_only"] = True
+            user["readOnly"] = True
+            user["persistent"] = False
+            user["can_persist_projects"] = False
+            user["canPersistProjects"] = False
+            user["access_mode"] = "public"
+            user["accessMode"] = "public"
+
+            if not _safe_bool(user.get("authenticated") or user.get("is_authenticated") or user.get("isAuthenticated"), False):
+                user["authenticated"] = False
+                user["is_authenticated"] = False
+                user["isAuthenticated"] = False
+                user["id"] = None
+                user["user_id"] = None
+                user["userId"] = None
+
+        elif access:
+            user["access_mode"] = _safe_str(access.get("access_mode") or access.get("accessMode"), "", 80)
+            user["accessMode"] = user["access_mode"]
+            user["read_only"] = _access_context_read_only(access)
+            user["readOnly"] = user["read_only"]
+
+        return user
+
+    except Exception:
+        return user
+
+
+def _apply_access_context_to_project_payload(
+    project_payload: Mapping[str, Any],
+    access_context: Mapping[str, Any],
+) -> Dict[str, Any]:
+    payload = dict(project_payload or {})
+    access = _safe_dict(access_context)
+
+    try:
+        if callable(apply_project_access_context):
+            applied = apply_project_access_context(payload, access)
+            payload = _safe_dict(applied) or payload
+        else:
+            existing_access = _safe_dict(payload.get("access"))
+            permissions = _safe_dict(existing_access.get("permissions"))
+            permissions.update(_safe_dict(access.get("permissions")))
+
+            existing_access.update(
+                {
+                    "role": access.get("role") or existing_access.get("role") or "viewer",
+                    "source": access.get("source") or existing_access.get("source") or "project_access_context",
+                    "access_mode": access.get("access_mode") or access.get("accessMode") or "",
+                    "accessMode": access.get("access_mode") or access.get("accessMode") or "",
+                    "read_only": _access_context_read_only(access),
+                    "readOnly": _access_context_read_only(access),
+                    "public_viewer": _access_context_public_viewer(access),
+                    "publicViewer": _access_context_public_viewer(access),
+                    "is_public_viewer": _access_context_public_viewer(access),
+                    "isPublicViewer": _access_context_public_viewer(access),
+                    "demo_mode": _access_context_demo_mode(access),
+                    "demoMode": _access_context_demo_mode(access),
+                    "permissions": permissions,
+                    "can_view": _safe_bool(access.get("can_view") or access.get("canView") or permissions.get("view"), False),
+                    "can_edit": _safe_bool(access.get("can_edit") or access.get("canEdit") or permissions.get("edit"), False),
+                    "can_manage": _safe_bool(access.get("can_manage") or access.get("canManage") or permissions.get("manage"), False),
+                }
+            )
+            payload["access"] = existing_access
+
+        if _access_context_public_viewer(access):
+            payload["demo_mode"] = False
+            payload["demoMode"] = False
+            payload["is_demo"] = False
+            payload["isDemo"] = False
+            payload["public_viewer"] = True
+            payload["publicViewer"] = True
+            payload["read_only"] = True
+            payload["readOnly"] = True
+
+        if access.get("publication"):
+            payload["publication"] = _safe_dict(access.get("publication"))
+
+        payload["access_context"] = access
+        payload["accessContext"] = access
+
+        return payload
+
+    except Exception as exc:
+        _log_warning("apply access context to project payload failed: %s", exc.__class__.__name__)
+        return payload
+
+
+def _permission_denied_from_access_context(access_context: Mapping[str, Any]) -> PermissionDenied:
+    return _make_permission_denied(
+        _access_context_message(access_context),
+        code=_access_context_code(access_context),
+        status_code=_access_context_status_code(access_context),
+    )
+
 def _make_permission_denied(
     message: str,
     *,
@@ -2009,56 +2682,12 @@ def _make_permission_denied(
 
 
 def _assert_project_view_allowed(project: Any, current_user: Mapping[str, Any]) -> None:
-    if _is_auth_unavailable_context(current_user):
-        raise _make_permission_denied(
-            "vectoplan-auth ist nicht erreichbar.",
-            code=_context_code(current_user) or "auth_service_unavailable",
-            status_code=503,
-        )
+    access_context = _resolve_shell_access_context(project, current_user)
 
-    if _is_user_blocked_context(current_user):
-        raise _make_permission_denied(
-            "Dieser Zugang ist gesperrt.",
-            code=_context_code(current_user) or "auth_blocked",
-            status_code=403,
-        )
-
-    if _project_is_demo(project) and _is_demo_context(current_user):
+    if _access_context_allowed(access_context):
         return
 
-    try:
-        user_id = _current_user_id_optional()
-
-        result = require_project_permission(
-            project,
-            PERMISSION_VIEW,
-            user_id,
-            allow_public_view=True,
-        )
-
-        if result is False:
-            raise _make_permission_denied(
-                "permission denied",
-                code="project_permission_denied",
-                status_code=403,
-            )
-
-        data = _safe_dict(result)
-        if data and data.get("ok") is False:
-            raise _make_permission_denied(
-                _safe_str(data.get("message") or data.get("error"), "permission denied", 500),
-                code=_safe_str(data.get("code"), "project_permission_denied", 120),
-                status_code=_safe_int(data.get("status_code"), 403),
-            )
-
-    except TypeError:
-        result = require_project_permission(project, PERMISSION_VIEW, _current_user_id_optional())
-        if result is False:
-            raise _make_permission_denied(
-                "permission denied",
-                code="project_permission_denied",
-                status_code=403,
-            )
+    raise _permission_denied_from_access_context(access_context)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2077,22 +2706,30 @@ def _render_project_shell(
         if _is_access_blocked_context(current_user):
             return _blocked_response(current_user)
 
-        if selected_project is not None:
-            _assert_project_view_allowed(selected_project, current_user)
+        access_context: Dict[str, Any] = {}
 
-        conversation = _ensure_project_conversation(selected_project, current_user=current_user)
+        if selected_project is not None:
+            access_context = _resolve_shell_access_context(selected_project, current_user)
+
+            if not _access_context_allowed(access_context):
+                raise _permission_denied_from_access_context(access_context)
+
+        effective_current_user = _effective_current_user_for_access(current_user, access_context)
+
+        conversation = _ensure_project_conversation(selected_project, current_user=effective_current_user)
 
         project_payload = _project_payload_for_template(
             selected_project,
-            current_user=current_user,
+            current_user=effective_current_user,
             is_new=is_new,
+            access_context=access_context,
         )
 
         workspace = _workspace_context_for_project(
             project=selected_project,
             project_payload=project_payload,
             conversation=conversation,
-            current_user=current_user,
+            current_user=effective_current_user,
             is_new=is_new,
         )
 
@@ -2101,7 +2738,15 @@ def _render_project_shell(
         project_sidebar = _project_sidebar_context(
             selected_project=selected_project,
             conversation=conversation,
-            current_user=current_user,
+            current_user=effective_current_user,
+            access_context=access_context,
+        )
+
+        notice_stream = _notice_stream_context(
+            selected_project=selected_project,
+            project_payload=project_payload,
+            workspace=workspace,
+            current_user=effective_current_user,
         )
 
         resp = make_response(
@@ -2125,10 +2770,11 @@ def _render_project_shell(
                 project=project_payload,
                 current_project=project_payload,
                 project_sidebar=project_sidebar,
-                current_user=current_user,
-                auth=current_user,
-                auth_context=current_user,
-                demo_mode=_is_demo_context(current_user),
+                notice_stream=notice_stream,
+                current_user=effective_current_user,
+                auth=effective_current_user,
+                auth_context=effective_current_user,
+                demo_mode=_is_demo_context(effective_current_user),
             ),
             status_code,
         )
@@ -2150,6 +2796,7 @@ def _render_project_shell(
         )
         resp.status_code = 500
         return _finalize_json_response(resp, no_store=True)
+
 
 
 def _render_demo_shell_or_new(current_user: Mapping[str, Any]) -> Response:
@@ -2176,9 +2823,6 @@ def project_root() -> Response:
         if _is_access_blocked_context(current_user):
             return _blocked_response(current_user)
 
-        if _is_demo_context(current_user):
-            return _render_demo_shell_or_new(current_user)
-
         project_id = _current_project_identifier_from_request()
 
         if project_id:
@@ -2186,6 +2830,9 @@ def project_root() -> Response:
 
             if project is not None:
                 return _render_project_shell(selected_project=project, is_new=False)
+
+        if _is_demo_context(current_user):
+            return _render_demo_shell_or_new(current_user)
 
         return _render_project_shell(selected_project=None, is_new=True)
 
@@ -2381,7 +3028,7 @@ def ui_projects_status_json() -> Response:
         "ok": True,
         "service": "ui_projects",
         "purpose": "project_shell_and_compatibility_routes",
-        "phase": "vectoplan-auth-no-default-user-auth-unavailable-503",
+        "phase": "vectoplan-auth-public-access-context-demo-notice",
         "default_user_removed": True,
         "auth_unavailable_returns_503": True,
         "routes": {
@@ -2408,6 +3055,25 @@ def ui_projects_status_json() -> Response:
             payload["current_user_status"] = get_current_user_status()
     except Exception:
         pass
+
+    try:
+        if callable(get_notice_stream_status):
+            payload["notice_stream"] = get_notice_stream_status()
+    except Exception:
+        payload["notice_stream"] = {
+            "ok": False,
+            "enabled": False,
+            "code": "notice_stream_status_failed",
+        }
+
+    try:
+        if callable(get_project_access_context_status):
+            payload["project_access_context"] = get_project_access_context_status()
+    except Exception:
+        payload["project_access_context"] = {
+            "ok": False,
+            "code": "project_access_context_status_failed",
+        }
 
     return _json_response(payload, 200)
 

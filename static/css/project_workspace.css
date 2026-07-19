@@ -195,7 +195,7 @@ a {
 }
 
 :focus {
-  outline: none;
+  outline-offset: 2px;
 }
 
 :focus-visible {
@@ -1840,5 +1840,428 @@ a {
 
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Hardened workspace contracts (2026)
+   Completes the normalized project, publication, team and
+   georeference states used by the current viewer templates.
+───────────────────────────────────────────────────────────── */
+
+:root {
+  --vp-project-disabled-opacity: 0.68;
+  --vp-project-state-stripe: rgba(91, 100, 122, 0.22);
+}
+
+:root[data-theme="dark"] {
+  --vp-project-state-stripe: rgba(154, 163, 199, 0.22);
+}
+
+/* Explicit state variants used by the normalized viewer contract. */
+
+.vp-project-status--error,
+.vp-project-chip--error,
+.vp-project-alert--error,
+.vp-project-inline-note--error {
+  border-color: var(--vp-project-danger-border);
+  background: var(--vp-project-danger-bg);
+  color: var(--vp-project-danger);
+}
+
+.vp-project-status--readonly,
+.vp-project-alert--info {
+  border-color: var(--vp-project-info-border);
+  background: var(--vp-project-info-bg);
+  color: var(--vp-project-info);
+}
+
+.vp-project-alert--warning {
+  border-color: var(--vp-project-warning-border);
+  background: var(--vp-project-warning-bg);
+  color: var(--vp-project-warning);
+}
+
+.vp-project-workspace--blocked .vp-project-hero {
+  border-color: var(--vp-project-danger-border);
+  background:
+    linear-gradient(135deg, var(--vp-project-danger-bg), transparent 62%),
+    var(--vp-project-surface);
+}
+
+.vp-project-workspace--public .vp-project-hero,
+.vp-project-workspace--readonly .vp-project-hero {
+  border-color: var(--vp-project-info-border);
+}
+
+.vp-project-workspace--demo .vp-project-hero {
+  border-color: var(--vp-project-warning-border);
+  background:
+    linear-gradient(135deg, var(--vp-project-warning-bg), transparent 62%),
+    var(--vp-project-surface);
+}
+
+.vp-project-card--visibility,
+.vp-project-card--publication,
+.vp-project-card--team,
+.vp-project-card--address {
+  isolation: isolate;
+}
+
+.vp-project-card.is-disabled,
+.vp-project-card[data-project-address-disabled="true"],
+.vp-project-card[data-project-visibility-disabled="true"],
+.vp-project-card[data-project-publication-disabled="true"],
+.vp-project-card[data-project-team-disabled="true"] {
+  border-style: dashed;
+}
+
+.vp-project-card[data-project-identity-consistent="false"],
+.vp-project-workspace[data-project-identity-consistent="false"] .vp-project-card {
+  --vp-project-accent-soft: var(--vp-project-danger-bg);
+}
+
+.vp-project-card__actions,
+.vp-project-section-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.vp-project-field__meta {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* Safe runtime-state presentation. */
+
+[data-project-runtime-card][data-project-chunk-ready="false"],
+.vp-project-workspace[data-project-chunk-ready="false"] [data-project-runtime-card] {
+  border-color: var(--vp-project-warning-border);
+}
+
+.vp-project-workspace[data-project-chunk-fallback-used="true"] [data-project-runtime-card] {
+  background:
+    linear-gradient(180deg, var(--vp-project-warning-bg), transparent 42%),
+    var(--vp-project-surface);
+}
+
+.vp-project-workspace[data-project-chunk-provisioning-status="failed"] [data-project-runtime-card],
+.vp-project-workspace[data-project-chunk-provisioning-status="error"] [data-project-runtime-card],
+.vp-project-workspace[data-project-chunk-provisioning-status="repair_required"] [data-project-runtime-card],
+.vp-project-workspace[data-project-chunk-access-sync-status="failed"] [data-project-runtime-card],
+.vp-project-workspace[data-project-chunk-access-sync-status="error"] [data-project-runtime-card],
+.vp-project-workspace[data-project-chunk-access-sync-status="repair_required"] [data-project-runtime-card] {
+  border-color: var(--vp-project-danger-border);
+}
+
+[data-project-chunk-fallback-alert],
+[data-project-address-world-fallback-note] {
+  border-left-width: 4px;
+}
+
+[data-project-chunk-repair-alert],
+[data-project-address-georeference-repair-note],
+[data-project-team-access-sync-note].vp-project-inline-note--error {
+  border-left-width: 4px;
+}
+
+[data-project-chunk-pending-alert],
+[data-project-address-georeference-pending-note] {
+  border-left-width: 4px;
+}
+
+/* Address / georeference status. */
+
+.vp-project-card--address[data-georeference-status="available"] {
+  border-color: var(--vp-project-success-border);
+}
+
+.vp-project-card--address[data-georeference-status="pending"] {
+  border-color: var(--vp-project-warning-border);
+}
+
+.vp-project-card--address[data-georeference-status="repair_required"] {
+  border-color: var(--vp-project-danger-border);
+}
+
+.vp-project-card--address[data-world-fallback-used="true"] {
+  background:
+    linear-gradient(180deg, var(--vp-project-warning-bg), transparent 45%),
+    var(--vp-project-surface);
+}
+
+.vp-project-card--address .vp-project-textarea {
+  min-height: 126px;
+}
+
+.vp-project-card--address .vp-project-field__meta {
+  margin-top: 1px;
+}
+
+/* Visibility cards. */
+
+.vp-project-choice-card__eyebrow {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--vp-project-accent);
+  font-size: 0.7rem;
+  font-weight: 780;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.vp-project-choice-card.is-disabled,
+.vp-project-choice-card[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: var(--vp-project-disabled-opacity);
+}
+
+.vp-project-choice-card.is-disabled:hover,
+.vp-project-choice-card[aria-disabled="true"]:hover {
+  border-color: var(--vp-project-border);
+  background: var(--vp-project-surface-soft);
+  transform: none;
+}
+
+/* Publication rules and unavailable workspaces. */
+
+.vp-project-publication-rules {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+  padding: 14px;
+  border: 1px solid var(--vp-project-border);
+  border-radius: var(--vp-project-radius-md);
+  background: var(--vp-project-surface-soft);
+}
+
+.vp-project-checkline {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--vp-project-text);
+  font-size: 0.86rem;
+  font-weight: 600;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.vp-project-checkline input {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  accent-color: var(--vp-project-accent);
+}
+
+.vp-project-checkline:has(input:disabled),
+.vp-project-checkline.is-disabled {
+  cursor: not-allowed;
+  opacity: var(--vp-project-disabled-opacity);
+}
+
+.vp-project-publication-never-public {
+  padding: 11px 12px;
+  border: 1px dashed var(--vp-project-border-strong);
+  border-radius: var(--vp-project-radius-md);
+  background: var(--vp-project-surface-muted);
+}
+
+.vp-project-toggle-card.is-disabled,
+.vp-project-toggle-card[aria-disabled="true"],
+.vp-project-toggle-card[data-workspace-unavailable-reason]:not([data-workspace-unavailable-reason="ready"]) {
+  cursor: not-allowed;
+  opacity: var(--vp-project-disabled-opacity);
+}
+
+.vp-project-toggle-card.is-disabled:hover,
+.vp-project-toggle-card[aria-disabled="true"]:hover,
+.vp-project-toggle-card[data-workspace-unavailable-reason]:not([data-workspace-unavailable-reason="ready"]):hover {
+  border-color: var(--vp-project-border);
+  background: var(--vp-project-surface-soft);
+}
+
+.vp-project-toggle-card[data-workspace="editor3d"][data-workspace-unavailable-reason="chunk_repair_required"] {
+  border-color: var(--vp-project-danger-border);
+  background: var(--vp-project-danger-bg);
+}
+
+.vp-project-toggle-card[data-workspace="editor3d"][data-workspace-unavailable-reason="chunk_not_ready"],
+.vp-project-toggle-card[data-workspace="editor3d"][data-workspace-unavailable-reason="chunk_access_not_ready"],
+.vp-project-toggle-card[data-workspace="editor3d"][data-workspace-unavailable-reason="public_editor3d_not_verified"] {
+  border-color: var(--vp-project-warning-border);
+  background: var(--vp-project-warning-bg);
+}
+
+[data-project-publication-editor3d-note] {
+  margin-top: -4px;
+}
+
+/* Team rows and access-projection state. */
+
+.vp-project-team-row--owner {
+  border-color: var(--vp-project-accent-border);
+  background:
+    linear-gradient(90deg, var(--vp-project-accent-soft), transparent 48%),
+    var(--vp-project-surface-soft);
+}
+
+.vp-project-team-list--invitations .vp-project-team-row {
+  border-style: dashed;
+}
+
+.vp-project-permission-chip--muted {
+  border-color: var(--vp-project-border);
+  background: var(--vp-project-surface-muted);
+  color: var(--vp-project-text-soft);
+}
+
+.vp-project-card--team[data-project-chunk-access-sync-status="pending"],
+.vp-project-card--team[data-project-chunk-access-sync-status="syncing"] {
+  border-color: var(--vp-project-warning-border);
+}
+
+.vp-project-card--team[data-project-chunk-access-sync-repair-required="true"],
+.vp-project-card--team[data-project-chunk-access-sync-status="failed"],
+.vp-project-card--team[data-project-chunk-access-sync-status="error"],
+.vp-project-card--team[data-project-chunk-access-sync-status="repair_required"] {
+  border-color: var(--vp-project-danger-border);
+}
+
+[data-project-team-access-sync-note] {
+  margin-bottom: 2px;
+}
+
+/* Disabled controls remain readable and selectable where appropriate. */
+
+.vp-project-input:disabled,
+.vp-project-textarea:disabled,
+.vp-project-select:disabled,
+.vp-project-btn:disabled,
+.vp-project-choice-card:disabled,
+.vp-project-toggle-card:has(input:disabled) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.vp-project-btn:disabled,
+.vp-project-choice-card:disabled,
+.vp-project-toggle-card:has(input:disabled) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.vp-project-input:read-only:not(:disabled),
+.vp-project-textarea:read-only:not(:disabled) {
+  border-style: dashed;
+  background: var(--vp-project-surface-muted);
+}
+
+/* Avoid relying on :has() for the disabled publication state. */
+
+.vp-project-toggle-card.is-disabled .vp-project-toggle-card__body,
+.vp-project-toggle-card[aria-disabled="true"] .vp-project-toggle-card__body {
+  opacity: 0.9;
+}
+
+/* Safer wrapping for translated labels and narrow iframe widths. */
+
+.vp-project-status,
+.vp-project-chip,
+.vp-project-role-chip,
+.vp-project-lock-chip,
+.vp-project-permission-chip {
+  max-width: 100%;
+}
+
+.vp-project-card__text,
+.vp-project-help,
+.vp-project-readonly,
+.vp-project-inline-note,
+.vp-project-alert,
+.vp-project-team-row__name,
+.vp-project-team-row__meta,
+.vp-project-toggle-card__text,
+.vp-project-choice-card__text {
+  overflow-wrap: anywhere;
+}
+
+.vp-project-team-row__meta {
+  white-space: normal;
+}
+
+/* Touch devices should not depend on hover feedback. */
+
+@media (hover: none) {
+  .vp-project-choice-card:hover:not(:disabled),
+  .vp-project-toggle-card:hover,
+  .vp-project-btn--secondary:hover:not(:disabled),
+  .vp-project-btn--ghost:hover:not(:disabled) {
+    border-color: var(--vp-project-border);
+    background: var(--vp-project-surface-soft);
+  }
+}
+
+/* Improved high-contrast support. */
+
+@media (prefers-contrast: more) {
+  .vp-project-card,
+  .vp-project-hero,
+  .vp-project-input,
+  .vp-project-textarea,
+  .vp-project-select,
+  .vp-project-choice-card,
+  .vp-project-toggle-card,
+  .vp-project-team-row,
+  .vp-project-alert,
+  .vp-project-inline-note {
+    border-width: 2px;
+  }
+
+  .vp-project-text-muted,
+  .vp-project-help,
+  .vp-project-card__text {
+    color: var(--vp-project-text);
+  }
+}
+
+@media (max-width: 980px) {
+  .vp-project-publication-rules {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 700px) {
+  .vp-project-card__actions,
+  .vp-project-section-actions,
+  .vp-project-field__meta {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .vp-project-status,
+  .vp-project-chip {
+    white-space: normal;
+  }
+
+  .vp-project-publication-rules {
+    padding: 12px;
+  }
+}
+
+@media print {
+  .vp-project-alert--error,
+  .vp-project-inline-note--error,
+  [data-project-chunk-repair-alert],
+  [data-project-team-access-sync-note] {
+    print-color-adjust: exact;
   }
 }

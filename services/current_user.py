@@ -29,9 +29,14 @@ Wichtige Regeln:
 """
 
 import datetime as _dt
+import hashlib
+import hmac
 import json
 import logging
 import os
+import threading
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -166,6 +171,46 @@ BLOCKED_DISPLAY_NAME = "Gesperrter Benutzer"
 DEFAULT_LOCALE = "de-DE"
 DEFAULT_TIMEZONE = "Europe/Berlin"
 
+PRINCIPAL_AUTHENTICATED_USER = "authenticated_user"
+PRINCIPAL_AUTHENTICATED_UNLINKED = "authenticated_unlinked"
+PRINCIPAL_TRUSTED_GATEWAY_USER = "trusted_gateway_user"
+PRINCIPAL_DEMO_GUEST = "demo_guest"
+PRINCIPAL_ANONYMOUS = "anonymous"
+PRINCIPAL_BLOCKED = "blocked"
+PRINCIPAL_AUTH_UNAVAILABLE = "auth_unavailable"
+
+LOCAL_LINK_LINKED = "linked"
+LOCAL_LINK_UNLINKED = "unlinked"
+LOCAL_LINK_NOT_APPLICABLE = "not_applicable"
+LOCAL_LINK_IDENTITY_MISMATCH = "identity_mismatch"
+LOCAL_LINK_INACTIVE = "inactive"
+LOCAL_LINK_UNAVAILABLE = "unavailable"
+
+CURRENT_USER_CONTEXT_VERSION = 2
+DEFAULT_LOCAL_LINK_CACHE_SECONDS = 5.0
+DEFAULT_LOCAL_LINK_CACHE_MAX_ENTRIES = 256
+
+_SENSITIVE_KEY_PARTS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "csrf",
+        "password",
+        "passwd",
+        "secret",
+        "session",
+        "token",
+        "api_key",
+        "apikey",
+        "private_key",
+        "refresh",
+        "credential",
+    }
+)
+
+_LOCAL_LINK_CACHE: "OrderedDict[str, tuple[float, int]]" = OrderedDict()
+_LOCAL_LINK_CACHE_LOCK = threading.RLock()
+
 
 # ─────────────────────────────────────────────────────────────
 # Exceptions
@@ -201,31 +246,14 @@ class CurrentUserAccessError(RuntimeError):
 
 @dataclass(frozen=True)
 class CurrentUserContext:
-    """
-    Einheitlicher User-/Auth-Kontext für vectoplan-app.
+    """Unified, fail-closed identity context for ``vectoplan-app``.
 
-    user_id / id:
-        Lokale AppUser.id, nur vorhanden, wenn ein echter Auth-User erfolgreich
-        lokal verknüpft wurde.
+    ``user_id`` / ``id`` are local ``AppUser.id`` values and may only be used
+    for foreign keys inside ``vectoplan-app``.
 
-    auth_user_id:
-        Kanonische User-ID aus vectoplan-auth.
-
-    persistent:
-        True nur, wenn lokale App-Persistenz erlaubt ist.
-
-    demo_mode:
-        True nur für nicht eingeloggte Guests mit demo_project_access.
-
-    auth_unavailable:
-        True, wenn vectoplan-auth technisch nicht erreichbar/nutzbar ist.
-        Kein User-Ban, aber fail-closed.
-
-    user_blocked:
-        True, wenn vectoplan-auth den User/Account wirklich als gesperrt meldet.
-
-    access_blocked / blocked:
-        Effektive Zugriffssperre für Guards/Legacy-Code.
+    ``auth_user_id`` is the canonical opaque user identifier from
+    ``vectoplan-auth`` and is the only user identifier that may be sent to
+    another VECTOPLAN service such as ``vectoplan-chunk``.
     """
 
     user_id: Optional[int] = None
@@ -253,6 +281,10 @@ class CurrentUserContext:
     auth_unavailable: bool = False
     auth_user_id: Optional[str] = None
     auth_email: Optional[str] = None
+
+    # Canonical auth id stored on the linked local AppUser row. It is kept
+    # separately so identity mismatches can never be hidden by serialization.
+    local_auth_user_id: Optional[str] = None
 
     account_id: Optional[str] = None
     account_role: Optional[str] = None
@@ -297,19 +329,109 @@ class CurrentUserContext:
     def effective_blocked(self) -> bool:
         return bool(self.blocked or self.access_blocked or self.user_blocked or self.auth_unavailable)
 
+    @property
+    def canonical_user_id(self) -> Optional[str]:
+        return _safe_str(self.auth_user_id, "", 160) or None
+
+    @property
+    def local_user_id(self) -> Optional[int]:
+        return _safe_int(self.user_id, None)
+
+    @property
+    def identity_consistent(self) -> bool:
+        canonical = _safe_str(self.auth_user_id, "", 160)
+        local_canonical = _safe_str(self.local_auth_user_id, "", 160)
+
+        if self.blocked_kind == "identity_mismatch":
+            return False
+
+        if self.auth_unavailable:
+            return False
+
+        if self.demo_mode or not self.authenticated:
+            return not bool(self.persistent or self.user_id)
+
+        if not canonical:
+            return False
+
+        if self.user_id is None:
+            return not self.persistent
+
+        return bool(local_canonical and hmac.compare_digest(canonical, local_canonical))
+
+    @property
+    def local_link_state(self) -> str:
+        if self.auth_unavailable:
+            return LOCAL_LINK_UNAVAILABLE
+        if self.demo_mode or not self.authenticated:
+            return LOCAL_LINK_NOT_APPLICABLE
+        if self.blocked_kind == "identity_mismatch":
+            return LOCAL_LINK_IDENTITY_MISMATCH
+        if self.blocked_kind == "local_user_inactive":
+            return LOCAL_LINK_INACTIVE
+        if self.user_id and self.identity_consistent:
+            return LOCAL_LINK_LINKED
+        return LOCAL_LINK_UNLINKED
+
+    @property
+    def principal_type(self) -> str:
+        if self.auth_unavailable:
+            return PRINCIPAL_AUTH_UNAVAILABLE
+        if self.effective_blocked:
+            return PRINCIPAL_BLOCKED
+        if self.demo_mode:
+            return PRINCIPAL_DEMO_GUEST
+        if self.authenticated and self.persistent and self.identity_consistent:
+            return PRINCIPAL_AUTHENTICATED_USER
+        if self.authenticated and self.source == SOURCE_AUTH_HEADERS:
+            return PRINCIPAL_TRUSTED_GATEWAY_USER
+        if self.authenticated:
+            return PRINCIPAL_AUTHENTICATED_UNLINKED
+        return PRINCIPAL_ANONYMOUS
+
+    @property
+    def identity_fingerprint(self) -> Optional[str]:
+        canonical = _safe_str(self.auth_user_id, "", 160)
+        if not canonical:
+            return None
+        material = "|".join(
+            (
+                canonical,
+                str(_safe_int(self.user_id, 0) or 0),
+                _safe_str(self.account_id, "", 160),
+                self.local_link_state,
+            )
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
     def with_app_user_id(self, app_user_id: Optional[int]) -> "CurrentUserContext":
         parsed = _safe_int(app_user_id, None)
-        return replace(
-            self,
-            user_id=parsed,
-            id=parsed,
-            persistent=bool(parsed and self.authenticated and not self.effective_blocked),
+        persistent = bool(
+            parsed
+            and self.authenticated
+            and self.auth_user_id
+            and self.local_auth_user_id
+            and not self.effective_blocked
+            and hmac.compare_digest(
+                _safe_str(self.auth_user_id, "", 160),
+                _safe_str(self.local_auth_user_id, "", 160),
+            )
         )
+        return replace(self, user_id=parsed, id=parsed, persistent=persistent)
 
-    def to_dict(self) -> Dict[str, Any]:
-        payload = {
+    def to_dict(
+        self,
+        *,
+        include_private: bool = False,
+        include_raw: bool = False,
+    ) -> Dict[str, Any]:
+        raw_auth = _redact_sensitive(self.raw_auth) if include_raw else {}
+
+        payload: Dict[str, Any] = {
+            "context_version": CURRENT_USER_CONTEXT_VERSION,
             "user_id": self.user_id,
             "id": self.id,
+            "local_user_id": self.local_user_id,
             "public_id": self.public_id,
             "handle": self.handle,
             "display_name": self.display_name,
@@ -321,6 +443,7 @@ class CurrentUserContext:
             "is_placeholder": self.is_placeholder,
             "is_system": self.is_system,
             "source": self.source,
+            "principal_type": self.principal_type,
             "authenticated": self.authenticated,
             "is_authenticated": self.authenticated,
             "demo_mode": self.demo_mode,
@@ -331,6 +454,7 @@ class CurrentUserContext:
             "auth_available": self.auth_available,
             "auth_unavailable": self.auth_unavailable,
             "auth_user_id": self.auth_user_id,
+            "canonical_user_id": self.canonical_user_id,
             "auth_email": self.auth_email,
             "account_id": self.account_id,
             "account_role": self.account_role,
@@ -344,6 +468,10 @@ class CurrentUserContext:
             "user_blocked": self.user_blocked,
             "access_blocked": self.access_blocked,
             "denial_status_code": self.denial_status_code,
+            "effective_blocked": self.effective_blocked,
+            "identity_consistent": self.identity_consistent,
+            "identity_fingerprint": self.identity_fingerprint,
+            "local_link_state": self.local_link_state,
             "can_use_bigdata": self.can_use_bigdata,
             "can_use_cloud": self.can_use_cloud,
             "can_demo": self.can_demo,
@@ -361,17 +489,23 @@ class CurrentUserContext:
             "admin_dashboard_url": self.admin_dashboard_url,
             "warning": self.warning,
             "capabilities": dict(self.capabilities or {}),
-            "raw_auth": dict(self.raw_auth or {}),
+            "raw_auth": raw_auth,
         }
+
+        if include_private:
+            payload["local_auth_user_id"] = self.local_auth_user_id
 
         payload.update(
             {
+                "contextVersion": CURRENT_USER_CONTEXT_VERSION,
                 "userId": self.user_id,
+                "localUserId": self.local_user_id,
                 "publicId": self.public_id,
                 "displayName": self.display_name,
                 "isActive": self.is_active,
                 "isPlaceholder": self.is_placeholder,
                 "isSystem": self.is_system,
+                "principalType": self.principal_type,
                 "isAuthenticated": self.authenticated,
                 "demoMode": self.demo_mode,
                 "authMode": self.auth_mode,
@@ -379,6 +513,7 @@ class CurrentUserContext:
                 "authAvailable": self.auth_available,
                 "authUnavailable": self.auth_unavailable,
                 "authUserId": self.auth_user_id,
+                "canonicalUserId": self.canonical_user_id,
                 "authEmail": self.auth_email,
                 "accountId": self.account_id,
                 "accountRole": self.account_role,
@@ -389,6 +524,10 @@ class CurrentUserContext:
                 "userBlocked": self.user_blocked,
                 "accessBlocked": self.access_blocked,
                 "denialStatusCode": self.denial_status_code,
+                "effectiveBlocked": self.effective_blocked,
+                "identityConsistent": self.identity_consistent,
+                "identityFingerprint": self.identity_fingerprint,
+                "localLinkState": self.local_link_state,
                 "canUseBigdata": self.can_use_bigdata,
                 "canUseCloud": self.can_use_cloud,
                 "canDemo": self.can_demo,
@@ -407,11 +546,16 @@ class CurrentUserContext:
             }
         )
 
+        if include_private:
+            payload["localAuthUserId"] = self.local_auth_user_id
+
         return payload
 
     def to_app_config(self) -> Dict[str, Any]:
         return {
+            "contextVersion": CURRENT_USER_CONTEXT_VERSION,
             "userId": self.user_id,
+            "localUserId": self.local_user_id,
             "publicId": self.public_id,
             "displayName": self.display_name,
             "email": self.email,
@@ -419,11 +563,16 @@ class CurrentUserContext:
             "authenticated": self.authenticated,
             "demo": self.demo_mode,
             "persistent": self.persistent,
+            "principalType": self.principal_type,
             "authMode": self.auth_mode,
             "authState": self.auth_state,
             "authAvailable": self.auth_available,
             "authUnavailable": self.auth_unavailable,
             "authUserId": self.auth_user_id,
+            "canonicalUserId": self.canonical_user_id,
+            "identityConsistent": self.identity_consistent,
+            "identityFingerprint": self.identity_fingerprint,
+            "localLinkState": self.local_link_state,
             "accountId": self.account_id,
             "accountRole": self.account_role,
             "plan": self.account_plan,
@@ -437,7 +586,7 @@ class CurrentUserContext:
             "denialStatusCode": self.denial_status_code,
             "canUseCloud": self.can_use_cloud,
             "canDemo": self.can_demo,
-            "canPersist": self.persistent,
+            "canPersist": bool(self.persistent and self.identity_consistent),
             "canManageAccount": self.can_manage_account,
             "canManageMembers": self.can_manage_members,
             "canManageApiKeys": self.can_manage_api_keys,
@@ -531,9 +680,160 @@ def _safe_dict(value: Any) -> Dict[str, Any]:
         return {}
 
 
+def _is_sensitive_key(key: Any) -> bool:
+    try:
+        normalized = _safe_str(key, "", 200).lower().replace("-", "_")
+        return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
+    except Exception:
+        return True
+
+
+def _redact_sensitive(value: Any, *, depth: int = 0, max_depth: int = 8) -> Any:
+    """Return a JSON-safe copy with credentials and oversized values removed."""
+    if depth > max_depth:
+        return "<max-depth>"
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    if isinstance(value, str):
+        if len(value) > 4096:
+            return value[:4096] + "…"
+        return value
+
+    if isinstance(value, Mapping):
+        result: Dict[str, Any] = {}
+        for key, item in list(value.items())[:256]:
+            clean_key = _safe_str(key, "", 200)
+            if not clean_key:
+                continue
+            if _is_sensitive_key(clean_key):
+                result[clean_key] = "<redacted>"
+            else:
+                result[clean_key] = _redact_sensitive(item, depth=depth + 1, max_depth=max_depth)
+        return result
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [
+            _redact_sensitive(item, depth=depth + 1, max_depth=max_depth)
+            for item in list(value)[:256]
+        ]
+
+    try:
+        if hasattr(value, "isoformat") and callable(value.isoformat):
+            return value.isoformat()
+    except Exception:
+        pass
+
+    return _safe_str(value, "", 4096)
+
+
+def _app_user_auth_user_id(app_user: Any) -> Optional[str]:
+    try:
+        for name in ("auth_user_id", "authUserId", "external_user_id", "subject_id"):
+            value = getattr(app_user, name, None)
+            clean = _safe_str(value, "", 160)
+            if clean:
+                return clean
+    except Exception:
+        pass
+    return None
+
+
+def _app_user_is_active(app_user: Any) -> bool:
+    try:
+        if app_user is None:
+            return False
+        if _safe_bool(getattr(app_user, "is_deleted", False), False):
+            return False
+        if getattr(app_user, "deleted_at", None) is not None:
+            return False
+        status = _safe_str(getattr(app_user, "status", "active"), "active", 40).lower()
+        if status in {"blocked", "deleted", "disabled", "inactive", "revoked", "suspended"}:
+            return False
+        return _safe_bool(getattr(app_user, "is_active", True), True)
+    except Exception:
+        return False
+
+
+def _local_link_cache_seconds() -> float:
+    try:
+        value = float(_config_value("VECTOPLAN_CURRENT_USER_LINK_CACHE_SECONDS", DEFAULT_LOCAL_LINK_CACHE_SECONDS))
+        return max(0.0, min(30.0, value))
+    except Exception:
+        return DEFAULT_LOCAL_LINK_CACHE_SECONDS
+
+
+def _local_link_cache_max_entries() -> int:
+    try:
+        value = int(_config_value("VECTOPLAN_CURRENT_USER_LINK_CACHE_MAX_ENTRIES", DEFAULT_LOCAL_LINK_CACHE_MAX_ENTRIES))
+        return max(16, min(4096, value))
+    except Exception:
+        return DEFAULT_LOCAL_LINK_CACHE_MAX_ENTRIES
+
+
+def _local_link_cache_get(auth_user_id: Any) -> Optional[int]:
+    key = _safe_str(auth_user_id, "", 160)
+    ttl = _local_link_cache_seconds()
+    if not key or ttl <= 0:
+        return None
+
+    now = time.monotonic()
+    try:
+        with _LOCAL_LINK_CACHE_LOCK:
+            item = _LOCAL_LINK_CACHE.get(key)
+            if item is None:
+                return None
+            expires_at, local_user_id = item
+            if expires_at <= now:
+                _LOCAL_LINK_CACHE.pop(key, None)
+                return None
+            _LOCAL_LINK_CACHE.move_to_end(key)
+            return _safe_int(local_user_id, None)
+    except Exception:
+        return None
+
+
+def _local_link_cache_set(auth_user_id: Any, local_user_id: Any) -> None:
+    key = _safe_str(auth_user_id, "", 160)
+    uid = _safe_int(local_user_id, None)
+    ttl = _local_link_cache_seconds()
+    if not key or not uid or ttl <= 0:
+        return
+
+    try:
+        with _LOCAL_LINK_CACHE_LOCK:
+            _LOCAL_LINK_CACHE[key] = (time.monotonic() + ttl, uid)
+            _LOCAL_LINK_CACHE.move_to_end(key)
+            while len(_LOCAL_LINK_CACHE) > _local_link_cache_max_entries():
+                _LOCAL_LINK_CACHE.popitem(last=False)
+    except Exception:
+        pass
+
+
+def clear_current_user_link_cache(auth_user_id: Any = None) -> int:
+    """Clear the short-lived positive local-link cache."""
+    try:
+        with _LOCAL_LINK_CACHE_LOCK:
+            if auth_user_id is None:
+                count = len(_LOCAL_LINK_CACHE)
+                _LOCAL_LINK_CACHE.clear()
+                return count
+            key = _safe_str(auth_user_id, "", 160)
+            return 1 if key and _LOCAL_LINK_CACHE.pop(key, None) is not None else 0
+    except Exception:
+        return 0
+
+
 def _compact_json(value: Any) -> str:
     try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        return json.dumps(
+            _redact_sensitive(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
     except Exception:
         try:
             return str(value)
@@ -637,6 +937,59 @@ def _db_get_user(user_id: Optional[int]) -> Any:
         return AppUser.query.get(user_id)
     except Exception:
         raise
+
+
+def _db_get_user_by_auth_user_id(auth_user_id: Any) -> Any:
+    canonical = _safe_str(auth_user_id, "", 160)
+    if AppUser is None or db is None or not canonical:
+        return None
+
+    try:
+        column = getattr(AppUser, "auth_user_id", None)
+        if column is None:
+            return None
+        query = AppUser.query.filter(column == canonical)
+        try:
+            return query.one_or_none()
+        except Exception:
+            # A duplicate canonical link is a schema/data error. Do not silently
+            # select one of several identities.
+            rows = list(query.limit(2).all())
+            if len(rows) == 1:
+                return rows[0]
+            if len(rows) > 1:
+                _log_warning("duplicate AppUser.auth_user_id link detected", auth_user_id=canonical)
+            return None
+    except Exception:
+        return None
+
+
+def _load_existing_app_user_link(auth_user_id: Any) -> Any:
+    canonical = _safe_str(auth_user_id, "", 160)
+    if not canonical:
+        return None
+
+    cached_id = _local_link_cache_get(canonical)
+    if cached_id:
+        try:
+            cached_user = _db_get_user(cached_id)
+            if (
+                cached_user is not None
+                and _app_user_is_active(cached_user)
+                and _app_user_auth_user_id(cached_user) == canonical
+            ):
+                return cached_user
+        except Exception:
+            pass
+        clear_current_user_link_cache(canonical)
+
+    user = _db_get_user_by_auth_user_id(canonical)
+    if user is not None and _app_user_is_active(user):
+        local_canonical = _app_user_auth_user_id(user)
+        if local_canonical and hmac.compare_digest(canonical, local_canonical):
+            _local_link_cache_set(canonical, getattr(user, "id", None))
+            return user
+    return None
 
 
 def _context_attr(context: Any, name: str, default: Any = None) -> Any:
@@ -759,6 +1112,34 @@ def legacy_default_user_fallback_enabled() -> bool:
 # Trusted gateway compatibility
 # ─────────────────────────────────────────────────────────────
 
+def _trusted_gateway_signature_valid() -> bool:
+    """Optionally authenticate trusted gateway headers with a shared secret.
+
+    Existing deployments that only enable ``VECTOPLAN_AUTH_TRUSTED_GATEWAY_HEADERS``
+    remain compatible. When a secret is configured, the matching request header is
+    mandatory and compared in constant time.
+    """
+    if not auth_headers_trusted():
+        return False
+
+    expected = _safe_str(
+        _config_value("VECTOPLAN_AUTH_TRUSTED_GATEWAY_SECRET", ""),
+        "",
+        1024,
+    )
+    if not expected:
+        return True
+
+    provided = _safe_str(
+        _request_header("X-VECTOPLAN-Gateway-Secret")
+        or _request_header("X-Vectoplan-Gateway-Secret")
+        or _request_header("X-Gateway-Secret"),
+        "",
+        1024,
+    )
+    return bool(provided and hmac.compare_digest(expected, provided))
+
+
 def _request_auth_header_context() -> Dict[str, Any]:
     """
     Liest vertrauenswürdige Auth-Gateway-Header.
@@ -769,7 +1150,7 @@ def _request_auth_header_context() -> Dict[str, Any]:
     if not has_request_context() or request is None:
         return {}
 
-    if not auth_headers_trusted():
+    if not _trusted_gateway_signature_valid():
         return {}
 
     try:
@@ -878,67 +1259,269 @@ def _auth_data_from_platform_context(context: Any) -> Dict[str, Any]:
     if context is None:
         return {}
 
-    try:
-        public = context.to_public_dict(include_raw=False)
-    except Exception:
-        public = {}
+    public: Dict[str, Any] = {}
+    app_config: Dict[str, Any] = {}
 
-    try:
-        app_config = context.to_app_config()
-    except Exception:
-        app_config = {}
+    if isinstance(context, Mapping):
+        public = _safe_dict(context)
+        app_config = _safe_dict(public.get("app_config") or public.get("appConfig"))
+    else:
+        try:
+            public = _safe_dict(context.to_public_dict(include_raw=False))
+        except Exception:
+            public = {}
+        try:
+            app_config = _safe_dict(context.to_app_config())
+        except Exception:
+            app_config = {}
 
+    user_obj = _safe_dict(public.get("user"))
+    account_dict = _safe_dict(public.get("account"))
+    access_dict = _safe_dict(public.get("access"))
     links = _safe_dict(public.get("links")) or _safe_dict(app_config.get("links"))
 
-    account_obj = getattr(context, "account", None)
-    access_obj = getattr(context, "access", None)
+    account_obj = getattr(context, "account", None) if not isinstance(context, Mapping) else None
+    access_obj = getattr(context, "access", None) if not isinstance(context, Mapping) else None
 
-    auth_unavailable = _safe_bool(getattr(context, "auth_unavailable", False), False)
-    user_blocked = _safe_bool(getattr(context, "user_blocked", False), False)
-    access_blocked = _safe_bool(getattr(context, "access_blocked", False), False) or auth_unavailable or user_blocked
+    auth_unavailable = _safe_bool(
+        public.get("auth_unavailable")
+        or public.get("authUnavailable")
+        or getattr(context, "auth_unavailable", False),
+        False,
+    )
+    user_blocked = _safe_bool(
+        public.get("user_blocked")
+        or public.get("userBlocked")
+        or getattr(context, "user_blocked", False),
+        False,
+    )
+    access_blocked = bool(
+        _safe_bool(
+            public.get("access_blocked")
+            or public.get("accessBlocked")
+            or getattr(context, "access_blocked", False),
+            False,
+        )
+        or auth_unavailable
+        or user_blocked
+    )
+
+    auth_user_id = _safe_str(
+        public.get("auth_user_id")
+        or public.get("authUserId")
+        or public.get("user_id")
+        or public.get("userId")
+        or user_obj.get("id")
+        or user_obj.get("user_id")
+        or user_obj.get("auth_user_id")
+        or getattr(context, "user_id", None),
+        "",
+        160,
+    ) or None
+
+    email = _safe_str(
+        public.get("email")
+        or public.get("auth_email")
+        or public.get("authEmail")
+        or user_obj.get("email")
+        or getattr(context, "email", None),
+        "",
+        320,
+    ).lower() or None
+
+    display_name = _safe_str(
+        public.get("display_name")
+        or public.get("displayName")
+        or user_obj.get("display_name")
+        or user_obj.get("displayName")
+        or user_obj.get("name")
+        or getattr(context, "display_name", None),
+        "",
+        160,
+    ) or None
+
+    roles = (
+        public.get("roles")
+        or user_obj.get("roles")
+        or app_config.get("roles")
+        or getattr(context, "roles", tuple())
+        or tuple()
+    )
+    entitlements = (
+        access_dict.get("entitlements")
+        or public.get("entitlements")
+        or app_config.get("entitlements")
+        or getattr(access_obj, "entitlements", tuple())
+        or tuple()
+    )
+
+    authenticated = _safe_bool(
+        public.get("authenticated")
+        or public.get("is_authenticated")
+        or public.get("isAuthenticated")
+        or getattr(context, "authenticated", False),
+        False,
+    )
 
     return {
-        "authenticated": bool(getattr(context, "authenticated", False)),
-        "auth_available": bool(getattr(context, "auth_available", False)),
+        "authenticated": authenticated,
+        "auth_available": _safe_bool(
+            public.get("auth_available")
+            or public.get("authAvailable")
+            or getattr(context, "auth_available", False),
+            not auth_unavailable,
+        ),
         "auth_unavailable": auth_unavailable,
-        "auth_state": _safe_str(getattr(context, "auth_state", "anonymous"), "anonymous", 80),
-        "auth_user_id": _safe_str(getattr(context, "user_id", None), "", 160) or None,
-        "email": _safe_str(getattr(context, "email", None), "", 320) or None,
-        "display_name": _safe_str(getattr(context, "display_name", None), "", 160) or None,
-        "account_id": _safe_str(getattr(context, "account_id", None), "", 160) or None,
-        "account_role": _safe_str(getattr(account_obj, "member_role", None), "", 80) or None,
-        "account_plan": _safe_str(getattr(context, "plan", None), "", 80) or None,
-        "account_status": _safe_str(getattr(access_obj, "plan_status", None), "", 80) or None,
-        "roles": tuple(getattr(context, "roles", tuple()) or tuple()),
-        "entitlements": tuple(getattr(access_obj, "entitlements", tuple()) or tuple()),
-        "blocked": bool(getattr(context, "blocked", False)),
-        "blocked_reason": _safe_str(getattr(context, "blocked_reason", None), "", 160) or None,
-        "blocked_kind": _safe_str(getattr(context, "blocked_kind", None), "", 80) or None,
+        "auth_state": _safe_str(
+            public.get("auth_state")
+            or public.get("authState")
+            or getattr(context, "auth_state", "anonymous"),
+            "anonymous",
+            80,
+        ),
+        "auth_user_id": auth_user_id,
+        "email": email,
+        "display_name": display_name,
+        "account_id": _safe_str(
+            public.get("account_id")
+            or public.get("accountId")
+            or account_dict.get("id")
+            or getattr(context, "account_id", None),
+            "",
+            160,
+        ) or None,
+        "account_role": _safe_str(
+            public.get("account_role")
+            or public.get("accountRole")
+            or account_dict.get("member_role")
+            or account_dict.get("role")
+            or getattr(account_obj, "member_role", None),
+            "",
+            80,
+        ) or None,
+        "account_plan": _safe_str(
+            public.get("plan")
+            or public.get("account_plan")
+            or public.get("accountPlan")
+            or account_dict.get("plan")
+            or getattr(context, "plan", None),
+            "",
+            80,
+        ) or None,
+        "account_status": _safe_str(
+            public.get("account_status")
+            or public.get("accountStatus")
+            or access_dict.get("plan_status")
+            or getattr(access_obj, "plan_status", None),
+            "",
+            80,
+        ) or None,
+        "roles": tuple(roles or tuple()),
+        "entitlements": tuple(entitlements or tuple()),
+        "blocked": _safe_bool(
+            public.get("blocked") or getattr(context, "blocked", False),
+            access_blocked,
+        ),
+        "blocked_reason": _safe_str(
+            public.get("blocked_reason")
+            or public.get("blockedReason")
+            or getattr(context, "blocked_reason", None),
+            "",
+            160,
+        ) or None,
+        "blocked_kind": _safe_str(
+            public.get("blocked_kind")
+            or public.get("blockedKind")
+            or getattr(context, "blocked_kind", None),
+            "",
+            80,
+        ) or None,
         "user_blocked": user_blocked,
         "access_blocked": access_blocked,
-        "denial_status_code": _safe_int(getattr(context, "denial_status_code", None), 503 if auth_unavailable else 403),
-        "can_use_cloud": bool(getattr(context, "can_use_cloud", False)),
-        "can_use_bigdata": bool(getattr(context, "can_use_bigdata", False)) if hasattr(context, "can_use_bigdata") else False,
-        "can_demo": bool(getattr(context, "can_demo", False)),
-        "can_manage_account": bool(getattr(context, "can_manage_account", False)),
-        "can_manage_members": bool(getattr(context, "can_manage_members", False)),
-        "can_manage_api_keys": bool(getattr(context, "can_manage_api_keys", False)),
-        "can_project_sharing": bool(getattr(context, "can_project_sharing", False)),
-        "dashboard_allowed": bool(getattr(context, "dashboard_allowed", False)),
-        "login_url": _safe_str(links.get("login_url") or links.get("login"), "", 500) or getattr(context, "login_url", None),
-        "register_url": _safe_str(links.get("register_url") or links.get("register"), "", 500) or getattr(context, "register_url", None),
-        "logout_url": _safe_str(links.get("logout_url") or links.get("logout"), "", 500) or getattr(context, "logout_url", None),
+        "denial_status_code": _safe_int(
+            public.get("denial_status_code")
+            or public.get("denialStatusCode")
+            or getattr(context, "denial_status_code", None),
+            503 if auth_unavailable else 403,
+        ),
+        "can_use_cloud": _safe_bool(
+            public.get("can_use_cloud")
+            or public.get("canUseCloud")
+            or getattr(context, "can_use_cloud", False),
+            False,
+        ),
+        "can_use_bigdata": _safe_bool(
+            public.get("can_use_bigdata")
+            or public.get("canUseBigdata")
+            or getattr(context, "can_use_bigdata", False),
+            False,
+        ),
+        "can_demo": _safe_bool(
+            public.get("can_demo")
+            or public.get("canDemo")
+            or getattr(context, "can_demo", False),
+            False,
+        ),
+        "can_manage_account": _safe_bool(
+            public.get("can_manage_account")
+            or public.get("canManageAccount")
+            or getattr(context, "can_manage_account", False),
+            False,
+        ),
+        "can_manage_members": _safe_bool(
+            public.get("can_manage_members")
+            or public.get("canManageMembers")
+            or getattr(context, "can_manage_members", False),
+            False,
+        ),
+        "can_manage_api_keys": _safe_bool(
+            public.get("can_manage_api_keys")
+            or public.get("canManageApiKeys")
+            or getattr(context, "can_manage_api_keys", False),
+            False,
+        ),
+        "can_project_sharing": _safe_bool(
+            public.get("can_project_sharing")
+            or public.get("canProjectSharing")
+            or getattr(context, "can_project_sharing", False),
+            False,
+        ),
+        "dashboard_allowed": _safe_bool(
+            public.get("dashboard_allowed")
+            or public.get("dashboardAllowed")
+            or getattr(context, "dashboard_allowed", False),
+            False,
+        ),
+        "login_url": _safe_str(
+            links.get("login_url") or links.get("login") or getattr(context, "login_url", None),
+            "",
+            500,
+        ) or None,
+        "register_url": _safe_str(
+            links.get("register_url") or links.get("register") or getattr(context, "register_url", None),
+            "",
+            500,
+        ) or None,
+        "logout_url": _safe_str(
+            links.get("logout_url") or links.get("logout") or getattr(context, "logout_url", None),
+            "",
+            500,
+        ) or None,
         "account_dashboard_url": _safe_str(
-            links.get("account_dashboard_url") or links.get("accountDashboard"),
+            links.get("account_dashboard_url")
+            or links.get("accountDashboard")
+            or getattr(context, "account_dashboard_url", None),
             "",
             500,
-        ) or getattr(context, "account_dashboard_url", None),
+        ) or None,
         "admin_dashboard_url": _safe_str(
-            links.get("admin_dashboard_url") or links.get("adminDashboard"),
+            links.get("admin_dashboard_url")
+            or links.get("adminDashboard")
+            or getattr(context, "admin_dashboard_url", None),
             "",
             500,
-        ) or getattr(context, "admin_dashboard_url", None),
-        "raw": public,
+        ) or None,
+        "raw": _redact_sensitive(public),
     }
 
 
@@ -951,18 +1534,55 @@ def _context_from_app_user(
     auth = _auth_data_from_platform_context(platform_context)
 
     local_user_id = _safe_int(getattr(app_user, "id", None), None)
+    canonical_auth_user_id = _safe_str(auth.get("auth_user_id"), "", 160) or None
+    local_auth_user_id = _app_user_auth_user_id(app_user)
+
+    if not canonical_auth_user_id:
+        return _authenticated_unlinked_context(
+            platform_context,
+            warning="vectoplan-auth lieferte keine kanonische User-ID. Persistente Aktionen sind gesperrt.",
+        )
+
+    if not local_user_id or not local_auth_user_id:
+        return _identity_mismatch_context(
+            platform_context,
+            app_user=app_user,
+            reason="local_app_user_auth_id_missing",
+        )
+
+    if not hmac.compare_digest(canonical_auth_user_id, local_auth_user_id):
+        clear_current_user_link_cache(canonical_auth_user_id)
+        return _identity_mismatch_context(
+            platform_context,
+            app_user=app_user,
+            reason="local_app_user_auth_id_mismatch",
+        )
+
+    if not _app_user_is_active(app_user):
+        clear_current_user_link_cache(canonical_auth_user_id)
+        return _local_user_blocked_context(platform_context, app_user=app_user)
+
     auth_unavailable = _safe_bool(auth.get("auth_unavailable"), False)
     user_blocked = _safe_bool(auth.get("user_blocked"), False)
     access_blocked = _safe_bool(auth.get("access_blocked"), False) or auth_unavailable or user_blocked
+    authenticated = _safe_bool(auth.get("authenticated"), False)
 
     roles = _tuple_lower(auth.get("roles"))
     entitlements = _tuple_text(auth.get("entitlements"))
 
+    persistent = bool(
+        authenticated
+        and local_user_id
+        and canonical_auth_user_id
+        and local_auth_user_id
+        and not access_blocked
+    )
+
     capabilities = {
-        "can_use_bigdata": _safe_bool(auth.get("can_use_bigdata"), False),
-        "can_use_cloud": _safe_bool(auth.get("can_use_cloud"), False),
-        "can_persist_projects": bool(local_user_id and not access_blocked),
-        "can_manage_projects": bool(local_user_id and not access_blocked),
+        "can_use_bigdata": _safe_bool(auth.get("can_use_bigdata"), False) and not access_blocked,
+        "can_use_cloud": _safe_bool(auth.get("can_use_cloud"), False) and not access_blocked,
+        "can_persist_projects": persistent,
+        "can_manage_projects": persistent,
         "can_manage_account": _safe_bool(auth.get("can_manage_account"), False) and not access_blocked,
         "can_manage_members": _safe_bool(auth.get("can_manage_members"), False) and not access_blocked,
         "can_manage_api_keys": _safe_bool(auth.get("can_manage_api_keys"), False) and not access_blocked,
@@ -977,28 +1597,33 @@ def _context_from_app_user(
         or "User"
     )
 
+    _local_link_cache_set(canonical_auth_user_id, local_user_id)
+
     return CurrentUserContext(
-        user_id=local_user_id if not access_blocked else None,
-        id=local_user_id if not access_blocked else None,
+        user_id=local_user_id if persistent else None,
+        id=local_user_id if persistent else None,
         public_id=_safe_str(getattr(app_user, "public_id", None), "", 120) or None,
-        handle=_safe_str(getattr(app_user, "handle", None), "", 120) or _safe_str(getattr(app_user, "username", None), "", 120) or None,
+        handle=_safe_str(getattr(app_user, "handle", None), "", 120)
+        or _safe_str(getattr(app_user, "username", None), "", 120)
+        or None,
         display_name=display_name,
         email=_safe_str(auth.get("email") or getattr(app_user, "email", None), "", 320) or None,
         role=_safe_str(getattr(app_user, "role", None), "user", 40),
         locale=_safe_str(getattr(app_user, "locale", None), DEFAULT_LOCALE, 40),
         timezone=_safe_str(getattr(app_user, "timezone", None), DEFAULT_TIMEZONE, 80),
-        is_active=_safe_bool(getattr(app_user, "is_active", True), True) and not access_blocked,
+        is_active=persistent,
         is_placeholder=False,
         is_system=_safe_bool(getattr(app_user, "is_system", False), False),
-        authenticated=bool(local_user_id and not access_blocked),
+        authenticated=authenticated and not access_blocked,
         demo_mode=False,
-        persistent=bool(local_user_id and not access_blocked),
+        persistent=persistent,
         auth_mode=AUTH_MODE_EXTERNAL,
         auth_state=_safe_str(auth.get("auth_state"), "authenticated", 80),
         auth_available=_safe_bool(auth.get("auth_available"), not auth_unavailable),
         auth_unavailable=auth_unavailable,
-        auth_user_id=_safe_str(auth.get("auth_user_id"), "", 160) or None,
+        auth_user_id=canonical_auth_user_id,
         auth_email=_safe_str(auth.get("email"), "", 320) or None,
+        local_auth_user_id=local_auth_user_id,
         account_id=_safe_str(auth.get("account_id"), "", 160) or None,
         account_role=_safe_str(auth.get("account_role"), "", 80) or None,
         account_plan=_safe_str(auth.get("account_plan"), "", 80) or None,
@@ -1007,7 +1632,8 @@ def _context_from_app_user(
         entitlements=entitlements,
         blocked=access_blocked,
         blocked_reason=_safe_str(auth.get("blocked_reason"), "", 160) or None,
-        blocked_kind=_safe_str(auth.get("blocked_kind"), "", 80) or ("auth_unavailable" if auth_unavailable else "user_blocked" if user_blocked else None),
+        blocked_kind=_safe_str(auth.get("blocked_kind"), "", 80)
+        or ("auth_unavailable" if auth_unavailable else "user_blocked" if user_blocked else None),
         user_blocked=user_blocked,
         access_blocked=access_blocked,
         denial_status_code=503 if auth_unavailable else 403 if access_blocked else 200,
@@ -1026,7 +1652,7 @@ def _context_from_app_user(
         account_dashboard_url=_safe_str(auth.get("account_dashboard_url"), "", 500) or None,
         admin_dashboard_url=_safe_str(auth.get("admin_dashboard_url"), "", 500) or None,
         capabilities=capabilities,
-        raw_auth=auth,
+        raw_auth=_redact_sensitive(auth),
     )
 
 
@@ -1434,24 +2060,86 @@ def _platform_auth_context(*, force_refresh: bool = False) -> Any:
 
 
 def _external_context_from_headers() -> Optional[CurrentUserContext]:
-    if not auth_headers_trusted():
+    if not _trusted_gateway_signature_valid():
         return None
 
     auth_data = _request_auth_header_context()
     if not auth_data:
         return None
 
-    if _safe_bool(auth_data.get("blocked"), False):
-        return _blocked_context(None, source=SOURCE_AUTH_HEADERS)
+    canonical = _safe_str(auth_data.get("auth_user_id"), "", 160) or None
+    authenticated = _safe_bool(auth_data.get("authenticated"), False)
+    blocked = _safe_bool(auth_data.get("blocked"), False)
 
-    if not _safe_bool(auth_data.get("authenticated"), False):
+    if blocked:
+        return CurrentUserContext(
+            public_id=BLOCKED_PUBLIC_ID,
+            handle=BLOCKED_HANDLE,
+            display_name=BLOCKED_DISPLAY_NAME,
+            email=_safe_str(auth_data.get("email"), "", 320) or None,
+            role="blocked",
+            is_active=False,
+            authenticated=False,
+            persistent=False,
+            auth_available=True,
+            auth_unavailable=False,
+            auth_state="blocked",
+            auth_user_id=canonical,
+            auth_email=_safe_str(auth_data.get("email"), "", 320) or None,
+            account_id=_safe_str(auth_data.get("account_id"), "", 160) or None,
+            account_plan=_safe_str(auth_data.get("account_plan"), "", 80) or None,
+            account_status=_safe_str(auth_data.get("account_status"), "", 80) or None,
+            roles=_tuple_lower(auth_data.get("roles")),
+            entitlements=_tuple_text(auth_data.get("entitlements")),
+            blocked=True,
+            blocked_reason="trusted_gateway_user_blocked",
+            blocked_kind="user_blocked",
+            user_blocked=True,
+            access_blocked=True,
+            denial_status_code=403,
+            source=SOURCE_AUTH_HEADERS,
+            warning="Der vertrauenswürdige Gateway-Kontext meldet diesen Benutzer als gesperrt.",
+            raw_auth=_redact_sensitive(auth_data),
+        )
+
+    if not authenticated:
         return None
+
+    if not canonical:
+        return CurrentUserContext(
+            public_id=SOURCE_AUTH_HEADERS,
+            handle="auth_headers_missing_subject",
+            display_name=_safe_str(auth_data.get("display_name"), "Angemeldeter User", 160),
+            email=_safe_str(auth_data.get("email"), "", 320) or None,
+            role="user",
+            is_active=False,
+            authenticated=True,
+            persistent=False,
+            auth_available=True,
+            auth_state="authenticated_gateway_missing_subject",
+            auth_user_id=None,
+            account_id=_safe_str(auth_data.get("account_id"), "", 160) or None,
+            roles=_tuple_lower(auth_data.get("roles") or ("user",)),
+            entitlements=_tuple_text(auth_data.get("entitlements")),
+            denial_status_code=409,
+            source=SOURCE_AUTH_HEADERS,
+            warning="Trusted gateway headers authenticated a request without a canonical auth_user_id.",
+            raw_auth=_redact_sensitive(auth_data),
+        )
+
+    if _safe_bool(
+        _config_value("VECTOPLAN_AUTH_TRUSTED_GATEWAY_HEADERS_ALLOW_EXISTING_LOCAL_LINK", False),
+        False,
+    ):
+        app_user = _load_existing_app_user_link(canonical)
+        if app_user is not None:
+            return _context_from_app_user(app_user, auth_data, source=SOURCE_AUTH_HEADERS)
 
     return CurrentUserContext(
         user_id=None,
         id=None,
         public_id=SOURCE_AUTH_HEADERS,
-        handle=_safe_str(auth_data.get("email") or auth_data.get("auth_user_id"), "auth_headers", 120),
+        handle=_safe_str(auth_data.get("email") or canonical, "auth_headers", 120),
         display_name=_safe_str(auth_data.get("display_name"), "Angemeldeter User", 160),
         email=_safe_str(auth_data.get("email"), "", 320) or None,
         role="user",
@@ -1467,7 +2155,7 @@ def _external_context_from_headers() -> Optional[CurrentUserContext]:
         auth_state="authenticated_gateway_unlinked",
         auth_available=True,
         auth_unavailable=False,
-        auth_user_id=_safe_str(auth_data.get("auth_user_id"), "", 160) or None,
+        auth_user_id=canonical,
         auth_email=_safe_str(auth_data.get("email"), "", 320) or None,
         account_id=_safe_str(auth_data.get("account_id"), "", 160) or None,
         account_plan=_safe_str(auth_data.get("account_plan"), "", 80) or None,
@@ -1480,12 +2168,12 @@ def _external_context_from_headers() -> Optional[CurrentUserContext]:
         denial_status_code=403,
         can_use_cloud="cloud_access" in _tuple_text(auth_data.get("entitlements")),
         source=SOURCE_AUTH_HEADERS,
-        warning="Trusted gateway headers authenticated the user, but no local AppUser link was created here.",
-        raw_auth=auth_data,
+        warning="Trusted gateway headers authenticated the user, but no validated local AppUser link is active.",
+        raw_auth=_redact_sensitive(auth_data),
     )
 
 
-def _external_context_from_auth_service() -> CurrentUserContext:
+def _external_context_from_auth_service(*, ensure_link: bool = True) -> CurrentUserContext:
     header_context = _external_context_from_headers()
     if header_context is not None:
         return header_context
@@ -1506,7 +2194,35 @@ def _external_context_from_auth_service() -> CurrentUserContext:
     if _safe_bool(raw_auth.get("access_blocked"), False):
         return _access_blocked_context(platform_context, source=SOURCE_AUTH_SERVICE_ACCESS_BLOCKED)
 
-    if getattr(platform_context, "authenticated", False):
+    authenticated = _safe_bool(
+        raw_auth.get("authenticated") or getattr(platform_context, "authenticated", False),
+        False,
+    )
+
+    if authenticated:
+        canonical = _safe_str(raw_auth.get("auth_user_id"), "", 160) or None
+        if not canonical:
+            return _authenticated_unlinked_context(
+                platform_context,
+                warning="vectoplan-auth meldet Login, aber keine kanonische User-ID.",
+            )
+
+        existing_user = _load_existing_app_user_link(canonical)
+        if existing_user is not None:
+            return _context_from_app_user(existing_user, platform_context, source=SOURCE_APP_USER_LINK)
+
+        auto_link_enabled = _safe_bool(
+            _config_value("VECTOPLAN_APP_USER_AUTO_LINK_ENABLED", True),
+            True,
+        )
+        should_link = bool(ensure_link or auto_link_enabled)
+
+        if not should_link:
+            return _authenticated_unlinked_context(
+                platform_context,
+                warning="Authentifiziert, aber lokaler AppUser-Link wurde in diesem Aufruf nicht angelegt.",
+            )
+
         if ensure_app_user_for_auth_context is None:
             return _authenticated_unlinked_context(
                 platform_context,
@@ -1522,11 +2238,11 @@ def _external_context_from_auth_service() -> CurrentUserContext:
                 use_cache=True,
             )
         except Exception as exc:
-            raw_auth = _auth_data_from_platform_context(platform_context)
-            raw_auth["app_user_link_error"] = f"{exc.__class__.__name__}: {exc}"
+            raw_patch = _auth_data_from_platform_context(platform_context)
+            raw_patch["app_user_link_error"] = f"{exc.__class__.__name__}: {exc}"
             return _authenticated_unlinked_context(
                 platform_context,
-                raw_patch=raw_auth,
+                raw_patch=raw_patch,
                 warning=(
                     "Der User ist laut vectoplan-auth authentifiziert, aber der lokale AppUser-Link "
                     "konnte wegen eines Fehlers nicht erstellt werden. Persistente Projektaktionen sind gesperrt."
@@ -1534,15 +2250,24 @@ def _external_context_from_auth_service() -> CurrentUserContext:
             )
 
         if getattr(link_result, "ok", False) and getattr(link_result, "app_user", None) is not None:
-            return _context_from_app_user(
-                link_result.app_user,
-                platform_context,
-                source=SOURCE_APP_USER_LINK,
-            )
+            app_user = link_result.app_user
+            local_canonical = _app_user_auth_user_id(app_user)
+            if not local_canonical or not hmac.compare_digest(canonical, local_canonical):
+                return _identity_mismatch_context(
+                    platform_context,
+                    app_user=app_user,
+                    reason="app_user_link_service_identity_mismatch",
+                )
+            _local_link_cache_set(canonical, getattr(app_user, "id", None))
+            return _context_from_app_user(app_user, platform_context, source=SOURCE_APP_USER_LINK)
 
         raw_patch = _auth_data_from_platform_context(platform_context)
         try:
-            raw_patch["app_user_link"] = link_result.to_dict(include_context=False) if hasattr(link_result, "to_dict") else {}
+            raw_patch["app_user_link"] = (
+                link_result.to_dict(include_context=False)
+                if hasattr(link_result, "to_dict")
+                else {}
+            )
         except Exception:
             raw_patch["app_user_link"] = {}
 
@@ -1555,7 +2280,7 @@ def _external_context_from_auth_service() -> CurrentUserContext:
             ),
         )
 
-    if getattr(platform_context, "can_demo", False):
+    if _safe_bool(raw_auth.get("can_demo") or getattr(platform_context, "can_demo", False), False):
         return _demo_context(source=SOURCE_DEMO, platform_context=platform_context)
 
     return _anonymous_context(platform_context, source=SOURCE_AUTH_SERVICE)
@@ -1618,7 +2343,116 @@ def _authenticated_unlinked_context(
     )
 
 
-def _resolve_current_user_context() -> CurrentUserContext:
+
+def _identity_mismatch_context(
+    platform_context: Any,
+    *,
+    app_user: Any = None,
+    reason: str = "identity_mismatch",
+) -> CurrentUserContext:
+    auth = _auth_data_from_platform_context(platform_context)
+    canonical = _safe_str(auth.get("auth_user_id"), "", 160) or None
+    local_canonical = _app_user_auth_user_id(app_user)
+    local_user_id = _safe_int(getattr(app_user, "id", None), None)
+
+    if canonical:
+        clear_current_user_link_cache(canonical)
+
+    return CurrentUserContext(
+        user_id=None,
+        id=None,
+        public_id="identity_mismatch",
+        handle="identity_mismatch",
+        display_name="Identitätsverknüpfung fehlerhaft",
+        email=_safe_str(auth.get("email"), "", 320) or None,
+        role="blocked",
+        is_active=False,
+        authenticated=False,
+        demo_mode=False,
+        persistent=False,
+        auth_mode=AUTH_MODE_EXTERNAL,
+        auth_state="identity_mismatch",
+        auth_available=True,
+        auth_unavailable=False,
+        auth_user_id=canonical,
+        auth_email=_safe_str(auth.get("email"), "", 320) or None,
+        local_auth_user_id=local_canonical,
+        account_id=_safe_str(auth.get("account_id"), "", 160) or None,
+        roles=_tuple_lower(auth.get("roles")),
+        entitlements=_tuple_text(auth.get("entitlements")),
+        blocked=True,
+        blocked_reason=reason,
+        blocked_kind="identity_mismatch",
+        user_blocked=False,
+        access_blocked=True,
+        denial_status_code=409,
+        source=SOURCE_AUTH_UNLINKED,
+        warning=(
+            "Die kanonische vectoplan-auth User-ID stimmt nicht mit dem lokalen AppUser-Link überein. "
+            "Persistente und serviceübergreifende Aktionen sind gesperrt."
+        ),
+        capabilities={
+            "can_persist_projects": False,
+            "can_manage_projects": False,
+            "identity_mismatch": True,
+            "demo": False,
+        },
+        raw_auth=_redact_sensitive(
+            {
+                **auth,
+                "local_user_id": local_user_id,
+                "local_auth_user_id": local_canonical,
+                "identity_mismatch_reason": reason,
+            }
+        ),
+    )
+
+
+def _local_user_blocked_context(platform_context: Any, *, app_user: Any = None) -> CurrentUserContext:
+    auth = _auth_data_from_platform_context(platform_context)
+    canonical = _safe_str(auth.get("auth_user_id"), "", 160) or None
+    if canonical:
+        clear_current_user_link_cache(canonical)
+
+    return CurrentUserContext(
+        user_id=None,
+        id=None,
+        public_id="local_user_inactive",
+        handle="local_user_inactive",
+        display_name="Lokale Benutzerverknüpfung inaktiv",
+        email=_safe_str(auth.get("email"), "", 320) or None,
+        role="blocked",
+        is_active=False,
+        authenticated=False,
+        persistent=False,
+        auth_mode=AUTH_MODE_EXTERNAL,
+        auth_state="local_user_inactive",
+        auth_available=True,
+        auth_user_id=canonical,
+        auth_email=_safe_str(auth.get("email"), "", 320) or None,
+        local_auth_user_id=_app_user_auth_user_id(app_user),
+        account_id=_safe_str(auth.get("account_id"), "", 160) or None,
+        roles=_tuple_lower(auth.get("roles")),
+        entitlements=_tuple_text(auth.get("entitlements")),
+        blocked=True,
+        blocked_reason="local_user_inactive",
+        blocked_kind="local_user_inactive",
+        user_blocked=False,
+        access_blocked=True,
+        denial_status_code=403,
+        source=SOURCE_APP_USER_LINK,
+        warning="Der lokale AppUser-Link ist inaktiv oder gelöscht.",
+        capabilities={
+            "can_persist_projects": False,
+            "can_manage_projects": False,
+            "local_user_inactive": True,
+            "demo": False,
+        },
+        raw_auth=_redact_sensitive(auth),
+    )
+
+
+def _resolve_current_user_context(*, ensure_link: bool = True) -> CurrentUserContext:
     try:
         if get_auth_mode() == AUTH_MODE_DEMO:
             platform_context = _platform_auth_context()
@@ -1634,7 +2468,7 @@ def _resolve_current_user_context() -> CurrentUserContext:
                 return _demo_context(source="forced_demo", platform_context=platform_context)
             return _anonymous_context(platform_context, source=SOURCE_AUTH_SERVICE)
 
-        return _external_context_from_auth_service()
+        return _external_context_from_auth_service(ensure_link=ensure_link)
 
     except Exception as exc:
         _log_exception("resolve current user context failed", exc)
@@ -1658,7 +2492,7 @@ def get_current_user_id(
     """
     try:
         context = get_current_user_context()
-        if context.user_id and context.persistent and not context.effective_blocked:
+        if context.user_id and context.persistent and context.identity_consistent and not context.effective_blocked:
             return int(context.user_id)
         return 0
     except Exception:
@@ -1668,21 +2502,37 @@ def get_current_user_id(
 def get_current_user_id_optional(*, allow_request_override: bool = False) -> Optional[int]:
     try:
         context = get_current_user_context()
-        return context.user_id if context.persistent and not context.effective_blocked else None
+        return context.user_id if context.persistent and context.identity_consistent and not context.effective_blocked else None
     except Exception:
         return None
 
 
 def set_current_user_id_on_g(user_id: Optional[int] = None) -> int:
-    resolved = _safe_int(user_id, get_current_user_id()) or 0
+    """Store only the currently authenticated local user id on Flask ``g``.
 
+    The parameter is retained for compatibility, but it cannot override the
+    identity resolved from ``vectoplan-auth``.
+    """
+    context = get_current_user_context(ensure=True)
+    resolved = _safe_int(context.user_id, None) if context.persistent and context.identity_consistent else None
+    requested = _safe_int(user_id, None)
+
+    if requested and resolved and requested != resolved:
+        _log_warning(
+            "ignored current user id override",
+            requested_user_id=requested,
+            resolved_user_id=resolved,
+        )
+    elif requested and not resolved:
+        _log_warning("ignored current user id without persistent context", requested_user_id=requested)
+
+    value = int(resolved or 0)
     try:
         if has_request_context() and g is not None:
-            setattr(g, CURRENT_USER_ID_G_KEY, resolved)
+            setattr(g, CURRENT_USER_ID_G_KEY, value)
     except Exception:
         pass
-
-    return int(resolved)
+    return value
 
 
 def set_current_user_context_on_g(context: Optional[CurrentUserContext] = None) -> CurrentUserContext:
@@ -1691,8 +2541,13 @@ def set_current_user_context_on_g(context: Optional[CurrentUserContext] = None) 
     try:
         if has_request_context() and g is not None:
             setattr(g, CURRENT_CONTEXT_G_KEY, resolved)
-            if resolved.user_id:
-                setattr(g, CURRENT_USER_ID_G_KEY, resolved.user_id)
+            setattr(
+                g,
+                CURRENT_USER_ID_G_KEY,
+                int(resolved.user_id or 0)
+                if resolved.persistent and resolved.identity_consistent and not resolved.effective_blocked
+                else 0,
+            )
     except Exception:
         pass
 
@@ -1700,34 +2555,24 @@ def set_current_user_context_on_g(context: Optional[CurrentUserContext] = None) 
 
 
 def get_current_user_id_from_g_or_default() -> int:
-    """
-    Name kept for compatibility.
+    """Compatibility name; no default user exists."""
+    context = get_current_user_context(ensure=True)
+    expected = _safe_int(context.user_id, None) if context.persistent and context.identity_consistent else None
 
-    No default user exists anymore. Returns 0 when no local AppUser is linked.
-    """
     try:
         if has_request_context() and g is not None:
-            value = getattr(g, CURRENT_USER_ID_G_KEY, None)
-            parsed = _safe_int(value, None)
-            if parsed:
-                return int(parsed)
+            value = _safe_int(getattr(g, CURRENT_USER_ID_G_KEY, None), None)
+            if value and expected and value == expected:
+                return int(value)
     except Exception:
         pass
 
-    return get_current_user_id()
+    return int(expected or 0)
 
 
 def get_current_user_id_from_g_or_none() -> Optional[int]:
-    try:
-        if has_request_context() and g is not None:
-            value = getattr(g, CURRENT_USER_ID_G_KEY, None)
-            parsed = _safe_int(value, None)
-            if parsed:
-                return parsed
-    except Exception:
-        pass
-
-    return get_current_user_id_optional()
+    value = get_current_user_id_from_g_or_default()
+    return value if value > 0 else None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1735,12 +2580,7 @@ def get_current_user_id_from_g_or_none() -> Optional[int]:
 # ─────────────────────────────────────────────────────────────
 
 def get_current_user(*, ensure: bool = True) -> Any:
-    """
-    Returns local AppUser if linked.
-
-    Demo/Guest/Blocked/Auth-unavailable:
-    - returns None.
-    """
+    """Return the validated local ``AppUser`` link for the current auth user."""
     if AppUser is None or db is None:
         return None
 
@@ -1748,15 +2588,28 @@ def get_current_user(*, ensure: bool = True) -> Any:
         if not has_app_context():
             return None
 
-        context = get_current_user_context()
-
-        if context.demo_mode or context.effective_blocked:
+        context = get_current_user_context(ensure=ensure)
+        if (
+            context.demo_mode
+            or context.effective_blocked
+            or not context.persistent
+            or not context.user_id
+            or not context.auth_user_id
+            or not context.identity_consistent
+        ):
             return None
 
-        if not context.persistent or not context.user_id:
+        user = _db_get_user(context.user_id)
+        if user is None or not _app_user_is_active(user):
+            clear_current_user_link_cache(context.auth_user_id)
             return None
 
-        return _db_get_user(context.user_id)
+        local_canonical = _app_user_auth_user_id(user)
+        if not local_canonical or not hmac.compare_digest(context.auth_user_id, local_canonical):
+            clear_current_user_link_cache(context.auth_user_id)
+            return None
+
+        return user
 
     except Exception as exc:
         _log_exception("get_current_user failed", exc)
@@ -1764,7 +2617,7 @@ def get_current_user(*, ensure: bool = True) -> Any:
 
 
 def require_current_user() -> Any:
-    context = get_current_user_context()
+    context = get_current_user_context(ensure=True)
 
     if context.auth_unavailable:
         raise CurrentUserAccessError(
@@ -1774,11 +2627,19 @@ def require_current_user() -> Any:
             context=context,
         )
 
+    if context.blocked_kind == "identity_mismatch":
+        raise CurrentUserAccessError(
+            "current user unavailable: canonical and local identities do not match",
+            code=context.blocked_reason or "identity_mismatch",
+            status_code=409,
+            context=context,
+        )
+
     if context.user_blocked or context.access_blocked:
         raise CurrentUserAccessError(
             f"current user blocked: {context.blocked_reason or context.auth_state}",
             code=context.blocked_reason or context.auth_state or "access_blocked",
-            status_code=403,
+            status_code=context.denial_status_code if context.denial_status_code >= 400 else 403,
             context=context,
         )
 
@@ -1790,21 +2651,37 @@ def require_current_user() -> Any:
             context=context,
         )
 
-    if not context.persistent:
+    if not context.authenticated:
         raise CurrentUserAccessError(
-            "current user unavailable: non-persistent auth context",
-            code="non_persistent_auth_context",
-            status_code=403,
+            "current user unavailable: authentication required",
+            code="authentication_required",
+            status_code=401,
             context=context,
         )
 
-    user = get_current_user()
+    if not context.auth_user_id:
+        raise CurrentUserAccessError(
+            "current user unavailable: canonical auth user id missing",
+            code="auth_user_id_required",
+            status_code=409,
+            context=context,
+        )
+
+    if not context.persistent or not context.identity_consistent:
+        raise CurrentUserAccessError(
+            "current user unavailable: non-persistent or inconsistent auth context",
+            code="local_app_user_link_missing" if context.local_link_state == LOCAL_LINK_UNLINKED else "identity_mismatch",
+            status_code=403 if context.local_link_state == LOCAL_LINK_UNLINKED else 409,
+            context=context,
+        )
+
+    user = get_current_user(ensure=True)
 
     if user is None:
         raise CurrentUserAccessError(
             "current user unavailable",
             code="current_user_unavailable",
-            status_code=403,
+            status_code=409,
             context=context,
         )
 
@@ -1812,25 +2689,48 @@ def require_current_user() -> Any:
 
 
 def get_current_user_context(*, ensure: bool = True, force_refresh: bool = False) -> CurrentUserContext:
+    """Resolve and request-cache the normalized current identity context."""
     try:
         if has_request_context() and g is not None and not force_refresh:
             existing = getattr(g, CURRENT_CONTEXT_G_KEY, None)
             if isinstance(existing, CurrentUserContext):
                 return existing
 
-        context = _resolve_current_user_context()
+        if force_refresh and has_request_context() and g is not None:
+            try:
+                setattr(g, CURRENT_CONTEXT_G_KEY, None)
+                setattr(g, CURRENT_USER_ID_G_KEY, 0)
+                setattr(g, PLATFORM_AUTH_CONTEXT_G_KEY, None)
+            except Exception:
+                pass
+
+        context = _resolve_current_user_context(ensure_link=ensure)
+
+        # A persistent context is valid only when both identifiers exist and match.
+        if context.persistent and not context.identity_consistent:
+            context = _identity_mismatch_context(
+                get_platform_auth_context(force_refresh=False),
+                app_user=_db_get_user(context.user_id),
+                reason="persistent_context_identity_inconsistent",
+            )
 
         try:
             if has_request_context() and g is not None:
                 setattr(g, CURRENT_CONTEXT_G_KEY, context)
-                if context.user_id:
-                    setattr(g, CURRENT_USER_ID_G_KEY, context.user_id)
+                setattr(
+                    g,
+                    CURRENT_USER_ID_G_KEY,
+                    int(context.user_id or 0)
+                    if context.persistent and context.identity_consistent and not context.effective_blocked
+                    else 0,
+                )
         except Exception:
             pass
 
         return context
 
-    except Exception:
+    except Exception as exc:
+        _log_exception("get_current_user_context failed", exc)
         return _auth_unavailable_context(None, source=SOURCE_ERROR_UNAVAILABLE)
 
 
@@ -1863,7 +2763,7 @@ def serialize_current_user(*, ensure: bool = True) -> Dict[str, Any]:
                 user_payload = _safe_dict(user.to_public_dict())
                 user_payload.update(
                     {
-                        "auth": context.to_dict(),
+                        "auth": context.to_dict(include_private=False, include_raw=False),
                         "authenticated": context.authenticated,
                         "demo_mode": context.demo_mode,
                         "persistent": context.persistent,
@@ -1892,7 +2792,7 @@ def serialize_current_user(*, ensure: bool = True) -> Dict[str, Any]:
             if user_payload:
                 user_payload.update(
                     {
-                        "auth": context.to_dict(),
+                        "auth": context.to_dict(include_private=False, include_raw=False),
                         "authenticated": context.authenticated,
                         "demo_mode": context.demo_mode,
                         "persistent": context.persistent,
@@ -1905,10 +2805,10 @@ def serialize_current_user(*, ensure: bool = True) -> Dict[str, Any]:
                 )
                 return user_payload
 
-        return context.to_dict()
+        return context.to_dict(include_private=False, include_raw=False)
 
     except Exception:
-        return _auth_unavailable_context(None, source=SOURCE_ERROR_UNAVAILABLE).to_dict()
+        return _auth_unavailable_context(None, source=SOURCE_ERROR_UNAVAILABLE).to_dict(include_private=False, include_raw=False)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1930,7 +2830,7 @@ def is_current_user_admin_placeholder() -> bool:
 def is_current_user_authenticated() -> bool:
     try:
         context = get_current_user_context()
-        return bool(context.authenticated and not context.effective_blocked)
+        return bool(context.authenticated and context.auth_user_id and not context.effective_blocked)
     except Exception:
         return False
 
@@ -1946,7 +2846,15 @@ def is_current_user_demo() -> bool:
 def current_user_can_persist() -> bool:
     try:
         context = get_current_user_context()
-        return bool(context.persistent and context.authenticated and not context.demo_mode and context.user_id and not context.effective_blocked)
+        return bool(
+            context.persistent
+            and context.authenticated
+            and context.auth_user_id
+            and context.user_id
+            and context.identity_consistent
+            and not context.demo_mode
+            and not context.effective_blocked
+        )
     except Exception:
         return False
 
@@ -1975,8 +2883,60 @@ def current_user_can_demo() -> bool:
         return False
 
 
+def get_current_auth_user_id(*, required: bool = False) -> Optional[str]:
+    """Return the canonical opaque ``vectoplan-auth`` user id."""
+    context = get_current_user_context(ensure=True)
+    value = _safe_str(context.auth_user_id, "", 160) or None
+    if required and not value:
+        raise CurrentUserAccessError(
+            "canonical auth user id required",
+            code="auth_user_id_required",
+            status_code=409 if context.authenticated else 401,
+            context=context,
+        )
+    return value
+
+
+def get_current_identity_pair() -> Dict[str, Any]:
+    context = get_current_user_context(ensure=True)
+    return {
+        "local_user_id": context.local_user_id,
+        "auth_user_id": context.canonical_user_id,
+        "identity_consistent": context.identity_consistent,
+        "local_link_state": context.local_link_state,
+        "principal_type": context.principal_type,
+        "identity_fingerprint": context.identity_fingerprint,
+    }
+
+
+def assert_current_user_matches_local_id(user_id: Any) -> CurrentUserContext:
+    context = require_persistent_current_user()
+    requested = _safe_int(user_id, None)
+    if not requested or requested != context.local_user_id:
+        raise CurrentUserAccessError(
+            "local user id does not match the current authenticated user",
+            code="actor_user_mismatch",
+            status_code=403,
+            context=context,
+        )
+    return context
+
+
+def require_canonical_auth_user_id() -> str:
+    context = require_persistent_current_user()
+    value = _safe_str(context.auth_user_id, "", 160)
+    if not value:
+        raise CurrentUserAccessError(
+            "canonical auth user id required",
+            code="auth_user_link_required",
+            status_code=409,
+            context=context,
+        )
+    return value
+
+
 def require_persistent_current_user() -> CurrentUserContext:
-    context = get_current_user_context()
+    context = get_current_user_context(ensure=True)
 
     if context.auth_unavailable:
         raise CurrentUserAccessError(
@@ -1986,11 +2946,19 @@ def require_persistent_current_user() -> CurrentUserContext:
             context=context,
         )
 
+    if context.blocked_kind == "identity_mismatch":
+        raise CurrentUserAccessError(
+            "persistent user required: canonical and local identities do not match",
+            code=context.blocked_reason or "identity_mismatch",
+            status_code=409,
+            context=context,
+        )
+
     if context.user_blocked or context.access_blocked:
         raise CurrentUserAccessError(
             f"persistent user required: access blocked: {context.blocked_reason or context.auth_state}",
             code=context.blocked_reason or context.auth_state or "access_blocked",
-            status_code=403,
+            status_code=context.denial_status_code if context.denial_status_code >= 400 else 403,
             context=context,
         )
 
@@ -2010,11 +2978,36 @@ def require_persistent_current_user() -> CurrentUserContext:
             context=context,
         )
 
+    if not context.auth_user_id:
+        raise CurrentUserAccessError(
+            "persistent user required: canonical auth user id missing",
+            code="auth_user_id_required",
+            status_code=409,
+            context=context,
+        )
+
     if not context.persistent or not context.user_id:
         raise CurrentUserAccessError(
             "persistent user required: local AppUser link missing",
             code="local_app_user_link_missing",
             status_code=403,
+            context=context,
+        )
+
+    if not context.identity_consistent:
+        raise CurrentUserAccessError(
+            "persistent user required: identity link is inconsistent",
+            code="identity_mismatch",
+            status_code=409,
+            context=context,
+        )
+
+    user = get_current_user(ensure=True)
+    if user is None:
+        raise CurrentUserAccessError(
+            "persistent user required: local AppUser link could not be revalidated",
+            code="local_app_user_link_invalid",
+            status_code=409,
             context=context,
         )
 
@@ -2115,7 +3108,26 @@ def get_current_user_status() -> Dict[str, Any]:
             "ok": True,
             "phase": "vectoplan-auth-integrated-no-default-user",
             "auth_mode": get_auth_mode(),
-            "current_user": context.to_dict(),
+            "current_user": context.to_dict(include_private=False, include_raw=False),
+            "identity_contract": {
+                "local_user_id": context.local_user_id,
+                "canonical_auth_user_id": context.canonical_user_id,
+                "local_link_state": context.local_link_state,
+                "identity_consistent": context.identity_consistent,
+                "principal_type": context.principal_type,
+                "identity_fingerprint": context.identity_fingerprint,
+                "local_foreign_keys_use": "AppUser.id",
+                "cross_service_user_ids_use": "AppUser.auth_user_id / vectoplan-auth user.id",
+                "request_identity_overrides_allowed": False,
+            },
+            "local_link_cache": {
+                "enabled": _local_link_cache_seconds() > 0,
+                "ttl_seconds": _local_link_cache_seconds(),
+                "max_entries": _local_link_cache_max_entries(),
+                "entries": len(_LOCAL_LINK_CACHE),
+                "positive_only": True,
+                "auth_state_cached": False,
+            },
             "platform_auth": platform_auth,
             "platform_status": platform_status,
             "auth_dependency": auth_dependency,
@@ -2139,7 +3151,7 @@ def get_current_user_status() -> Dict[str, Any]:
             },
             "notes": {
                 "user_truth": "vectoplan-auth",
-                "local_app_user": "Local FK/link only.",
+                "local_app_user": "AppUser.id is a local FK only; AppUser.auth_user_id is the cross-service identity.",
                 "default_user": "Removed. No id=1 fallback.",
                 "demo_mode": "Guests get Demo only if vectoplan-auth returns demo_project_access.",
                 "auth_unavailable": "Fail-closed 503 state, not a real user ban.",
@@ -2188,17 +3200,34 @@ __all__ = [
     "DEMO_TTL_SECONDS",
     "CurrentUserAccessError",
     "CurrentUserContext",
+    "CURRENT_USER_CONTEXT_VERSION",
+    "LOCAL_LINK_IDENTITY_MISMATCH",
+    "LOCAL_LINK_INACTIVE",
+    "LOCAL_LINK_LINKED",
+    "LOCAL_LINK_NOT_APPLICABLE",
+    "LOCAL_LINK_UNAVAILABLE",
+    "LOCAL_LINK_UNLINKED",
+    "PRINCIPAL_ANONYMOUS",
+    "PRINCIPAL_AUTHENTICATED_UNLINKED",
+    "PRINCIPAL_AUTHENTICATED_USER",
+    "PRINCIPAL_AUTH_UNAVAILABLE",
+    "PRINCIPAL_BLOCKED",
+    "PRINCIPAL_DEMO_GUEST",
+    "PRINCIPAL_TRUSTED_GATEWAY_USER",
     "allow_user_header_override",
     "auth_headers_trusted",
     "current_user_can_demo",
     "current_user_can_persist",
     "current_user_can_use_bigdata",
     "current_user_can_use_cloud",
+    "clear_current_user_link_cache",
     "current_user_id_placeholder",
     "ensure_default_user",
     "get_auth_context_status",
     "get_auth_mode",
     "get_current_auth_context",
+    "get_current_auth_user_id",
+    "get_current_identity_pair",
     "get_current_user",
     "get_current_user_context",
     "get_current_user_id",
@@ -2223,6 +3252,8 @@ __all__ = [
     "is_requesting_demo_mode",
     "legacy_default_user_fallback_enabled",
     "require_current_user",
+    "require_canonical_auth_user_id",
+    "assert_current_user_matches_local_id",
     "require_persistent_current_user",
     "serialize_current_user",
     "set_current_user_context_on_g",

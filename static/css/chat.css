@@ -1,4 +1,4 @@
- /* services/vectoplan-app/static/css/chat.css */
+/* services/vectoplan-app/static/css/chat.css */
 
 /* ───────────────────────── Theme Variables ─────────────────────────
    Diese Datei steuert nur noch die Projekt-/Workspace-Shell.
@@ -10,7 +10,8 @@
    - kein Chat-Toggle-Button neben "Projekt"
 
    Ziel-Layout:
-   - Desktop: Projektliste | Workspace
+   - Desktop ohne Hinweis: Projektliste | Workspace
+   - Desktop mit Hinweis: Demo-/Notice-Banner über Projektliste und Workspace
    - Mobile: Projektliste als eigenes Sidebar-Verhalten über project_sidebar.css,
              Workspace bleibt Hauptfläche
 ------------------------------------------------------------------- */
@@ -74,6 +75,9 @@
   --drawer-z:1000;
   --backdrop-z:900;
   --project-sidebar-z:950;
+
+  --vp-shell-notice-z:980;
+  --vp-shell-notice-row-min-h:0px;
 
   --app-h:calc(var(--vh, 1vh) * 100);
 }
@@ -240,6 +244,7 @@ textarea{
 .app-wrap{
   display:grid;
   grid-template-columns:minmax(0, 1fr);
+  grid-template-rows:minmax(0, 1fr);
   gap:var(--app-gap);
   height:var(--app-h);
   padding:var(--app-pad);
@@ -254,8 +259,41 @@ body > main.app-wrap.vp-chat-viewer-with-project-sidebar,
 body > main.app-wrap.vp-project-shell{
   display:grid;
   grid-template-columns:auto minmax(0, 1fr);
+  grid-template-rows:minmax(0, 1fr);
   gap:var(--app-gap);
   align-items:stretch;
+}
+
+/* Projekt-Shell mit globalem Banner:
+   Row 1 = Hinweis über beide Spalten
+   Row 2 = Projektliste | Workspace
+*/
+body > main.app-wrap.vp-chat-viewer-with-project-sidebar.vp-project-shell--has-notice,
+body > main.app-wrap.vp-project-shell.vp-project-shell--has-notice{
+  grid-template-rows:auto minmax(0, 1fr);
+}
+
+.vp-shell-notice-row{
+  grid-column:1 / -1;
+  grid-row:1;
+  width:100%;
+  min-width:0;
+  min-height:var(--vp-shell-notice-row-min-h);
+  align-self:start;
+  position:relative;
+  z-index:var(--vp-shell-notice-z);
+}
+
+body > main.app-wrap.vp-chat-viewer-with-project-sidebar.vp-project-shell--has-notice > .vp-project-sidebar,
+body > main.app-wrap.vp-project-shell.vp-project-shell--has-notice > .vp-project-sidebar{
+  grid-column:1;
+  grid-row:2;
+}
+
+body > main.app-wrap.vp-chat-viewer-with-project-sidebar.vp-project-shell--has-notice > .viewer-panel,
+body > main.app-wrap.vp-project-shell.vp-project-shell--has-notice > .viewer-panel{
+  grid-column:2;
+  grid-row:2;
 }
 
 body > main.app-wrap.vp-chat-viewer-with-project-sidebar > .vp-project-sidebar,
@@ -289,6 +327,14 @@ body > main.app-wrap.vp-chat-viewer-with-project-sidebar:has(> .vp-project-sideb
 body > main.app-wrap.vp-project-shell:has(> .vp-project-sidebar[hidden]),
 body > main.app-wrap.vp-project-shell:has(> .vp-project-sidebar.is-disabled){
   grid-template-columns:minmax(0, 1fr);
+}
+
+body > main.app-wrap.vp-chat-viewer-with-project-sidebar.vp-project-shell--has-notice:has(> .vp-project-sidebar[hidden]) > .viewer-panel,
+body > main.app-wrap.vp-chat-viewer-with-project-sidebar.vp-project-shell--has-notice:has(> .vp-project-sidebar.is-disabled) > .viewer-panel,
+body > main.app-wrap.vp-project-shell.vp-project-shell--has-notice:has(> .vp-project-sidebar[hidden]) > .viewer-panel,
+body > main.app-wrap.vp-project-shell.vp-project-shell--has-notice:has(> .vp-project-sidebar.is-disabled) > .viewer-panel{
+  grid-column:1 / -1;
+  grid-row:2;
 }
 
 /* ───────────────────────── Buttons / Links ───────────────────────── */
@@ -399,6 +445,11 @@ a:hover{
   .viewer-panel{
     min-height:var(--panel-min-h);
   }
+
+  body > main.app-wrap.vp-project-shell--has-notice > .viewer-panel,
+  body > main.app-wrap.vp-project-shell--has-notice > .vp-project-sidebar{
+    min-height:0;
+  }
 }
 
 .viewer-toolbar{
@@ -485,6 +536,17 @@ a:hover{
 .app-wrap[data-project-is-new="true"] #versionsToggleBtn,
 .app-wrap[data-project-is-new="true"] #viewerOpenRawBtn{
   opacity:.72;
+}
+
+/* Public/read-only contexts should never look editable by accident. */
+.app-wrap[data-read-only="true"] #modeAdminBtn,
+.app-wrap[data-public-viewer="true"] #modeAdminBtn{
+  display:none !important;
+}
+
+.app-wrap[data-read-only="true"] .btn[data-mutates-project="true"],
+.app-wrap[data-public-viewer="true"] .btn[data-mutates-project="true"]{
+  display:none !important;
 }
 
 /* ───────────────────────── Iframe / Workspace ───────────────────────── */
@@ -679,6 +741,11 @@ a:hover{
     overflow:hidden;
   }
 
+  body > main.app-wrap.vp-chat-viewer-with-project-sidebar > .vp-shell-notice-row,
+  body > main.app-wrap.vp-project-shell > .vp-shell-notice-row{
+    margin-bottom:12px;
+  }
+
   body > main.app-wrap.vp-chat-viewer-with-project-sidebar > .vp-project-sidebar,
   body > main.app-wrap.vp-project-shell > .vp-project-sidebar{
     height:100dvh;
@@ -687,6 +754,12 @@ a:hover{
   .viewer-panel{
     height:calc(var(--app-h) - 24px);
     min-height:0;
+  }
+
+  body > main.app-wrap.vp-chat-viewer-with-project-sidebar.vp-project-shell--has-notice > .viewer-panel,
+  body > main.app-wrap.vp-project-shell.vp-project-shell--has-notice > .viewer-panel{
+    height:calc(var(--app-h) - 24px - var(--vp-notice-stream-height, 42px) - 12px);
+    min-height:320px;
   }
 
   .viewer-toolbar{
@@ -718,5 +791,43 @@ a:hover{
     left:8px;
     right:8px;
     width:auto;
+  }
+}
+
+@media (max-width: 520px){
+  :root{
+    --app-pad:10px;
+    --app-gap:10px;
+  }
+
+  body > main.app-wrap.vp-chat-viewer-with-project-sidebar,
+  body > main.app-wrap.vp-project-shell{
+    padding:10px;
+  }
+
+  body > main.app-wrap.vp-chat-viewer-with-project-sidebar > .vp-shell-notice-row,
+  body > main.app-wrap.vp-project-shell > .vp-shell-notice-row{
+    margin-bottom:10px;
+  }
+
+  .viewer-panel{
+    height:calc(var(--app-h) - 20px);
+    border-radius:10px;
+  }
+
+  body > main.app-wrap.vp-chat-viewer-with-project-sidebar.vp-project-shell--has-notice > .viewer-panel,
+  body > main.app-wrap.vp-project-shell.vp-project-shell--has-notice > .viewer-panel{
+    height:calc(var(--app-h) - 20px - var(--vp-notice-stream-height, 42px) - 10px);
+  }
+
+  .viewer-toolbar{
+    min-height:44px;
+    padding:7px 8px;
+  }
+
+  .btn{
+    min-height:30px;
+    padding:6px 8px;
+    font-size:12px;
   }
 }

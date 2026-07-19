@@ -17,6 +17,8 @@ Zweck:
 Wichtige Architekturregel:
 - Registrierung/Login/Account/Abo/Bigdata-Zugriff liegen NICHT in vectoplan-app.
 - vectoplan-app verwaltet Projektrollen, Sichtbarkeit, Veröffentlichungen und Projektfrontend.
+- Klartext-Einladungstokens werden nicht persistiert. Persistiert wird nur der Hash.
+- public_id ist kein Geheimnis; invitation_token_hash ist geheimhaltungsrelevant.
 """
 
 from __future__ import annotations
@@ -166,7 +168,7 @@ def utcnow() -> _dt.datetime:
     UTC timestamp helper.
 
     Gibt bewusst timezone-aware UTC zurück. Falls andere App-Models naive UTC
-    nutzen, kann SQLAlchemy/Postgres das in der Regel trotzdem speichern.
+    nutzen, wird beim Vergleichen defensiv auf naive UTC zurückgefallen.
     """
     try:
         return _dt.datetime.now(_dt.timezone.utc)
@@ -190,9 +192,10 @@ def _safe_str(value: Any, default: str = "", max_len: Optional[int] = None) -> s
 
 def _safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
     try:
-        if value is None or value == "":
+        if value is None or value == "" or isinstance(value, bool):
             return default
-        return int(value)
+        parsed = int(value)
+        return parsed if parsed > 0 else default
     except Exception:
         return default
 
@@ -206,9 +209,9 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
         if isinstance(value, (int, float)):
             return bool(value)
         text = str(value).strip().lower()
-        if text in {"1", "true", "yes", "y", "on", "enabled"}:
+        if text in {"1", "true", "yes", "y", "on", "enabled", "active", "ok", "ja"}:
             return True
-        if text in {"0", "false", "no", "n", "off", "disabled"}:
+        if text in {"0", "false", "no", "n", "off", "disabled", "inactive", "none", "null", "nein", ""}:
             return False
         return default
     except Exception:
@@ -232,7 +235,7 @@ def _safe_dict(value: Any) -> Dict[str, Any]:
 
 def _compact_json(value: Any) -> str:
     try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     except Exception:
         try:
             return str(value)
@@ -263,26 +266,33 @@ def normalize_invitation_role(role: Any, allow_owner: bool = False) -> str:
 
     Owner-Einladungen sind standardmäßig deaktiviert, damit ein normaler
     Einladungsvorgang nicht versehentlich Projektownership erzeugt.
-    Ownership-Transfer sollte später über einen eigenen Transfer-Flow laufen.
+    Ownership-Transfer muss über einen eigenen Transfer-Flow laufen.
     """
-    text = _safe_str(role, default=DEFAULT_INVITATION_ROLE, max_len=40).lower()
+    text = _safe_str(role, default=DEFAULT_INVITATION_ROLE, max_len=40).lower().replace("-", "_")
 
     aliases = {
         "read": ROLE_VIEWER,
         "readonly": ROLE_VIEWER,
+        "read_only": ROLE_VIEWER,
         "reader": ROLE_VIEWER,
         "view": ROLE_VIEWER,
         "viewer": ROLE_VIEWER,
+        "guest": ROLE_VIEWER,
+        "gast": ROLE_VIEWER,
         "write": ROLE_EDITOR,
         "writer": ROLE_EDITOR,
         "edit": ROLE_EDITOR,
         "editor": ROLE_EDITOR,
         "member": ROLE_EDITOR,
+        "bearbeiter": ROLE_EDITOR,
         "manage": ROLE_ADMIN,
         "manager": ROLE_ADMIN,
         "admin": ROLE_ADMIN,
         "administrator": ROLE_ADMIN,
         "owner": ROLE_OWNER,
+        "besitzer": ROLE_OWNER,
+        "eigentuemer": ROLE_OWNER,
+        "eigentümer": ROLE_OWNER,
     }
 
     normalized = aliases.get(text, text)
@@ -300,7 +310,7 @@ def normalize_invitation_role(role: Any, allow_owner: bool = False) -> str:
 
 
 def normalize_invitation_status(status: Any) -> str:
-    text = _safe_str(status, default=STATUS_PENDING, max_len=40).lower()
+    text = _safe_str(status, default=STATUS_PENDING, max_len=40).lower().replace("-", "_")
 
     aliases = {
         "new": STATUS_PENDING,
@@ -308,6 +318,7 @@ def normalize_invitation_status(status: Any) -> str:
         "open": STATUS_PENDING,
         "active": STATUS_PENDING,
         "sent": STATUS_PENDING,
+        "queued": STATUS_PENDING,
         "accepted": STATUS_ACCEPTED,
         "accept": STATUS_ACCEPTED,
         "joined": STATUS_ACCEPTED,
@@ -332,7 +343,7 @@ def normalize_invitation_status(status: Any) -> str:
 
 
 def normalize_dispatch_status(status: Any) -> str:
-    text = _safe_str(status, default=DISPATCH_PENDING, max_len=40).lower()
+    text = _safe_str(status, default=DISPATCH_PENDING, max_len=40).lower().replace("-", "_")
 
     aliases = {
         "new": DISPATCH_PENDING,
@@ -377,15 +388,13 @@ def generate_plain_invitation_token() -> str:
     """
     Erzeugt einen geheimen Token für spätere Einladungslinks.
 
-    Der Klartext-Token sollte nur einmalig ausgegeben werden.
+    Der Klartext-Token darf nur einmalig ausgegeben werden.
     In der DB wird nur der Hash gespeichert.
     """
     try:
         return secrets.token_urlsafe(32)
     except Exception:  # pragma: no cover
-        return hashlib.sha256(
-            f"{utcnow().isoformat()}:{secrets.randbits(128)}".encode("utf-8")
-        ).hexdigest()
+        return hashlib.sha256(f"{utcnow().isoformat()}:{secrets.randbits(128)}".encode("utf-8")).hexdigest()
 
 
 def hash_invitation_token(token: Any) -> str:
@@ -415,6 +424,23 @@ def _maybe_datetime_iso(value: Any) -> Optional[str]:
         return str(value)
     except Exception:
         return None
+
+
+def _is_datetime_past(value: Any) -> bool:
+    try:
+        if value is None or not hasattr(value, "__le__"):
+            return False
+        now = utcnow()
+        try:
+            return bool(value <= now)
+        except TypeError:
+            if isinstance(value, _dt.datetime):
+                if value.tzinfo is None:
+                    return bool(value <= _dt.datetime.utcnow())
+                return bool(value <= _dt.datetime.now(value.tzinfo))
+            return False
+    except Exception:
+        return False
 
 
 def _permission_flags_for_role(role: Any) -> Dict[str, bool]:
@@ -525,15 +551,9 @@ class ProjectInvitation(
     )
 
     role = db.Column(db.String(40), nullable=False, default=DEFAULT_INVITATION_ROLE, index=True)
-
     status = db.Column(db.String(40), nullable=False, default=STATUS_PENDING, index=True)
 
-    dispatch_status = db.Column(
-        db.String(40),
-        nullable=False,
-        default=DISPATCH_PENDING,
-        index=True,
-    )
+    dispatch_status = db.Column(db.String(40), nullable=False, default=DISPATCH_PENDING, index=True)
     dispatch_code = db.Column(db.String(120), nullable=True)
     dispatch_attempts = db.Column(db.Integer, nullable=False, default=0)
     dispatch_error = db.Column(db.Text, nullable=True)
@@ -593,31 +613,11 @@ class ProjectInvitation(
     last_error = db.Column(db.Text, nullable=True)
 
     try:
-        project = db.relationship(
-            "Project",
-            foreign_keys=[project_id],
-            lazy="select",
-        )
-        target_user = db.relationship(
-            "AppUser",
-            foreign_keys=[target_user_id],
-            lazy="select",
-        )
-        invited_by_user = db.relationship(
-            "AppUser",
-            foreign_keys=[invited_by_user_id],
-            lazy="select",
-        )
-        accepted_by_user = db.relationship(
-            "AppUser",
-            foreign_keys=[accepted_by_user_id],
-            lazy="select",
-        )
-        revoked_by_user = db.relationship(
-            "AppUser",
-            foreign_keys=[revoked_by_user_id],
-            lazy="select",
-        )
+        project = db.relationship("Project", foreign_keys=[project_id], lazy="select")
+        target_user = db.relationship("AppUser", foreign_keys=[target_user_id], lazy="select")
+        invited_by_user = db.relationship("AppUser", foreign_keys=[invited_by_user_id], lazy="select")
+        accepted_by_user = db.relationship("AppUser", foreign_keys=[accepted_by_user_id], lazy="select")
+        revoked_by_user = db.relationship("AppUser", foreign_keys=[revoked_by_user_id], lazy="select")
     except Exception:  # pragma: no cover
         # Relationship-Konfiguration soll das Model nicht unbrauchbar machen,
         # falls AppUser/Project in Tests nicht geladen sind.
@@ -680,6 +680,8 @@ class ProjectInvitation(
           Wird nicht in der DB gespeichert, sondern nur als Hash.
         """
         normalized_email = normalize_email(email)
+        if not is_valid_email(normalized_email):
+            raise ValueError("valid email required")
 
         plain_token: Optional[str] = None
 
@@ -693,7 +695,7 @@ class ProjectInvitation(
             dispatch_status=DISPATCH_PENDING,
             invited_by_user_id=_safe_int(invited_by_user_id),
             invited_by_auth_user_id=_safe_str(invited_by_auth_user_id, default=None, max_len=160),  # type: ignore[arg-type]
-            message=_safe_str(message, default=None),  # type: ignore[arg-type]
+            message=_safe_str(message, default=None, max_len=4000),  # type: ignore[arg-type]
             metadata_json=_safe_dict(metadata),
             invited_at=utcnow(),
             expires_at=expires_at_value if expires_at_value is not None else default_expires_at(expires_in_days),
@@ -708,6 +710,26 @@ class ProjectInvitation(
 
         invitation.prepare_for_save()
         return invitation, plain_token
+
+    # ---------------------------------------------------------------------
+    # Compatibility aliases
+    # ---------------------------------------------------------------------
+
+    @property
+    def token_hash(self) -> Optional[str]:
+        return self.invitation_token_hash
+
+    @token_hash.setter
+    def token_hash(self, value: Any) -> None:
+        self.invitation_token_hash = _safe_str(value, default=None, max_len=128)  # type: ignore[arg-type]
+
+    @property
+    def invitation_id(self) -> str:
+        return self.public_id
+
+    @property
+    def email_value(self) -> str:
+        return self.email_normalized or self.email
 
     # ---------------------------------------------------------------------
     # State helpers
@@ -736,13 +758,13 @@ class ProjectInvitation(
                 return True
             if self.expires_at is None:
                 return False
-            return utcnow() >= self.expires_at
+            return _is_datetime_past(self.expires_at)
         except Exception:
             return False
 
     @property
     def is_active(self) -> bool:
-        return self.status in ACTIVE_INVITATION_STATUSES and not self.is_expired
+        return self.status in ACTIVE_INVITATION_STATUSES and not self.is_expired and not bool(getattr(self, "is_deleted", False))
 
     @property
     def permissions(self) -> Dict[str, bool]:
@@ -754,20 +776,27 @@ class ProjectInvitation(
                 return False
 
             wanted_auth_user_id = _safe_str(auth_user_id)
-            if wanted_auth_user_id and self.auth_user_id and wanted_auth_user_id != self.auth_user_id:
-                return False
-
             wanted_email = normalize_email(email)
-            if wanted_email and self.email_normalized and wanted_email != self.email_normalized:
-                return False
 
-            return True
+            if self.auth_user_id:
+                if not wanted_auth_user_id:
+                    return bool(wanted_email and self.email_normalized and wanted_email == self.email_normalized)
+                if wanted_auth_user_id != self.auth_user_id:
+                    return False
+
+            if self.email_normalized:
+                if not wanted_email:
+                    return bool(wanted_auth_user_id and self.auth_user_id and wanted_auth_user_id == self.auth_user_id)
+                if wanted_email != self.email_normalized:
+                    return False
+
+            return bool(wanted_auth_user_id or wanted_email)
         except Exception:
             return False
 
     def can_revoke(self) -> bool:
         try:
-            return self.status not in TERMINAL_INVITATION_STATUSES
+            return self.status not in TERMINAL_INVITATION_STATUSES and not bool(getattr(self, "is_deleted", False))
         except Exception:
             return False
 
@@ -783,11 +812,11 @@ class ProjectInvitation(
                 return False
             if self.expires_at is None:
                 return False
-            if utcnow() < self.expires_at:
+            if not _is_datetime_past(self.expires_at):
                 return False
 
             self.status = STATUS_EXPIRED
-            self.expired_at = utcnow()
+            self.expired_at = self.expired_at or utcnow()
             return True
         except Exception:
             return False
@@ -810,9 +839,7 @@ class ProjectInvitation(
 
             self.role = normalize_invitation_role(getattr(self, "role", DEFAULT_INVITATION_ROLE))
             self.status = normalize_invitation_status(getattr(self, "status", STATUS_PENDING))
-            self.dispatch_status = normalize_dispatch_status(
-                getattr(self, "dispatch_status", DISPATCH_PENDING)
-            )
+            self.dispatch_status = normalize_dispatch_status(getattr(self, "dispatch_status", DISPATCH_PENDING))
 
             if getattr(self, "invited_at", None) is None:
                 self.invited_at = utcnow()
@@ -871,58 +898,48 @@ class ProjectInvitation(
     def apply_identity(self, identity: Mapping[str, Any]) -> None:
         """
         Übernimmt Snapshot-Daten aus auth_identity_client.
-
-        Erwartet z. B.:
-          {
-            "registered": true,
-            "auth_user_id": "...",
-            "email": "...",
-            "display_name": "...",
-            "account_plan": "free",
-            "account_status": "active",
-            "can_use_bigdata": false
-          }
         """
         data = _safe_dict(identity)
+        nested = _safe_dict(data.get("identity") or data.get("user") or data.get("data"))
+        if nested:
+            merged = dict(nested)
+            merged.update({key: value for key, value in data.items() if key not in {"identity", "user", "data"}})
+            data = merged
 
         try:
-            identity_email = normalize_email(data.get("email"))
+            identity_email = normalize_email(data.get("email") or data.get("email_normalized") or data.get("emailNormalized"))
             if identity_email:
                 self.email = identity_email
                 self.email_normalized = identity_email
 
             auth_user_id = _safe_str(
                 data.get("auth_user_id")
+                or data.get("authUserId")
                 or data.get("user_id")
-                or data.get("external_user_id"),
+                or data.get("userId")
+                or data.get("external_user_id")
+                or data.get("id"),
                 default="",
                 max_len=160,
             )
             if auth_user_id:
                 self.auth_user_id = auth_user_id
-                self.auth_email_verified = True
+                self.auth_email_verified = _safe_bool(data.get("email_verified") or data.get("emailVerified"), True)
 
-            display_name = _safe_str(data.get("display_name") or data.get("name"), default="", max_len=240)
+            display_name = _safe_str(data.get("display_name") or data.get("displayName") or data.get("name"), default="", max_len=240)
             if display_name:
                 self.display_name_snapshot = display_name
 
-            account_plan = _safe_str(
-                data.get("account_plan")
-                or data.get("plan")
-                or data.get("subscription_plan"),
-                default="",
-                max_len=80,
-            )
+            account_plan = _safe_str(data.get("account_plan") or data.get("accountPlan") or data.get("plan") or data.get("subscription_plan"), default="", max_len=80)
             if account_plan:
                 self.account_plan_snapshot = account_plan
 
-            account_status = _safe_str(data.get("account_status") or data.get("status"), default="", max_len=80)
+            account_status = _safe_str(data.get("account_status") or data.get("accountStatus") or data.get("status"), default="", max_len=80)
             if account_status:
                 self.account_status_snapshot = account_status
 
             self.can_use_bigdata_snapshot = _safe_bool(
-                data.get("can_use_bigdata")
-                or data.get("bigdata_access"),
+                data.get("can_use_bigdata") or data.get("canUseBigdata") or data.get("bigdata_access") or data.get("bigdataAccess"),
                 default=bool(getattr(self, "can_use_bigdata_snapshot", False)),
             )
 
@@ -933,7 +950,6 @@ class ProjectInvitation(
     def merge_metadata(self, patch: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         base = _safe_dict(getattr(self, "metadata_json", None))
         incoming = _safe_dict(patch)
-
         try:
             base.update(incoming)
             self.metadata_json = base
@@ -958,54 +974,46 @@ class ProjectInvitation(
             self.mark_dispatch_attempt()
 
             ok = _safe_bool(data.get("ok"), default=False)
-            code = _safe_str(data.get("code"), default="")
+            code = _safe_str(data.get("code"), default="", max_len=120)
             self.dispatch_code = code or None
             self.dispatch_response_json = data
 
-            invitation_url = _safe_str(data.get("invitation_url"), default="")
+            invitation_url = _safe_str(data.get("invitation_url") or data.get("invitationUrl"), default="")
             if invitation_url:
                 self.invitation_url = invitation_url
 
-            external_sent = _safe_bool(data.get("external_sent"), default=False)
+            external_sent = _safe_bool(data.get("external_sent") or data.get("externalSent"), default=False)
             placeholder = _safe_bool(data.get("placeholder"), default=False)
+            skipped = _safe_bool(data.get("skipped"), default=False) or code == "invitation_dispatch_skipped"
 
             if ok:
                 if external_sent:
                     self.dispatch_status = DISPATCH_SENT
                 elif placeholder:
                     self.dispatch_status = DISPATCH_PLACEHOLDER
+                elif skipped:
+                    self.dispatch_status = DISPATCH_SKIPPED
                 else:
                     self.dispatch_status = DISPATCH_SENT
 
                 self.sent_at = self.sent_at or utcnow()
                 self.dispatch_error = None
+                self.last_error = None
                 return
 
             self.dispatch_status = DISPATCH_FAILED
-            self.dispatch_error = _safe_str(
-                data.get("error") or data.get("message") or code,
-                default="Invitation dispatch failed.",
-            )
+            self.dispatch_error = _safe_str(data.get("error") or data.get("message") or code, default="Invitation dispatch failed.")
             self.last_error = self.dispatch_error
         except Exception as exc:
             self.dispatch_status = DISPATCH_FAILED
             self.dispatch_error = str(exc)
             self.last_error = str(exc)
 
-    def mark_accepted(
-        self,
-        accepted_by_user_id: Any = None,
-        accepted_by_auth_user_id: Any = None,
-        membership_id: Any = None,
-    ) -> None:
+    def mark_accepted(self, accepted_by_user_id: Any = None, accepted_by_auth_user_id: Any = None, membership_id: Any = None) -> None:
         self.status = STATUS_ACCEPTED
         self.accepted_at = utcnow()
         self.accepted_by_user_id = _safe_int(accepted_by_user_id)
-        self.accepted_by_auth_user_id = _safe_str(
-            accepted_by_auth_user_id,
-            default=getattr(self, "auth_user_id", None),  # type: ignore[arg-type]
-            max_len=160,
-        )
+        self.accepted_by_auth_user_id = _safe_str(accepted_by_auth_user_id, default=getattr(self, "auth_user_id", None), max_len=160)  # type: ignore[arg-type]
         self.accepted_membership_id = _safe_int(membership_id)
         self.last_error = None
 
@@ -1014,68 +1022,78 @@ class ProjectInvitation(
         self.rejected_at = utcnow()
         self.reject_reason = _safe_str(reason, default=None, max_len=500)  # type: ignore[arg-type]
 
-    def mark_revoked(
-        self,
-        revoked_by_user_id: Any = None,
-        revoked_by_auth_user_id: Any = None,
-        reason: Any = None,
-    ) -> None:
+    def mark_revoked(self, revoked_by_user_id: Any = None, revoked_by_auth_user_id: Any = None, reason: Any = None) -> None:
         self.status = STATUS_REVOKED
         self.revoked_at = utcnow()
         self.revoked_by_user_id = _safe_int(revoked_by_user_id)
-        self.revoked_by_auth_user_id = _safe_str(
-            revoked_by_auth_user_id,
-            default=None,  # type: ignore[arg-type]
-            max_len=160,
-        )
+        self.revoked_by_auth_user_id = _safe_str(revoked_by_auth_user_id, default=None, max_len=160)  # type: ignore[arg-type]
         self.revoke_reason = _safe_str(reason, default=None, max_len=500)  # type: ignore[arg-type]
 
     def mark_expired(self) -> None:
         self.status = STATUS_EXPIRED
-        self.expired_at = utcnow()
+        self.expired_at = self.expired_at or utcnow()
 
     def mark_failed(self, error: Any = None) -> None:
         self.status = STATUS_FAILED
+        self.dispatch_status = DISPATCH_FAILED
         self.last_error = _safe_str(error, default="Invitation failed.")
+        self.dispatch_error = self.last_error
 
     # ---------------------------------------------------------------------
     # Serialization
     # ---------------------------------------------------------------------
 
-    def to_dict(
-        self,
-        include_private: bool = False,
-        include_auth: bool = True,
-        include_raw: bool = False,
-    ) -> Dict[str, Any]:
+    def to_dict(self, include_private: bool = False, include_auth: bool = True, include_raw: bool = False) -> Dict[str, Any]:
         self.ensure_not_expired()
 
         data: Dict[str, Any] = {
             "id": self.public_id,
             "public_id": self.public_id,
+            "publicId": self.public_id,
             "project_id": self.project_id,
+            "projectId": self.project_id,
             "project_public_id": self.project_public_id,
+            "projectPublicId": self.project_public_id,
             "email": self.email_normalized or self.email,
             "display_name": self.display_name_snapshot,
+            "displayName": self.display_name_snapshot,
             "role": self.role,
+            "role_label": self.role_label,
             "status": self.status,
+            "status_label": self.status_label,
             "dispatch_status": self.dispatch_status,
+            "dispatchStatus": self.dispatch_status,
             "dispatch_code": self.dispatch_code,
+            "dispatchCode": self.dispatch_code,
             "permissions": self.permissions,
             "is_pending": self.is_pending,
+            "isPending": self.is_pending,
             "is_active": self.is_active,
+            "isActive": self.is_active,
             "is_accepted": self.is_accepted,
+            "isAccepted": self.is_accepted,
             "is_expired": self.is_expired,
+            "isExpired": self.is_expired,
             "invited_by_user_id": self.invited_by_user_id,
+            "invitedByUserId": self.invited_by_user_id,
             "target_user_id": self.target_user_id,
+            "targetUserId": self.target_user_id,
             "accepted_membership_id": self.accepted_membership_id,
+            "acceptedMembershipId": self.accepted_membership_id,
             "invited_at": _maybe_datetime_iso(self.invited_at),
+            "invitedAt": _maybe_datetime_iso(self.invited_at),
             "sent_at": _maybe_datetime_iso(self.sent_at),
+            "sentAt": _maybe_datetime_iso(self.sent_at),
             "accepted_at": _maybe_datetime_iso(self.accepted_at),
+            "acceptedAt": _maybe_datetime_iso(self.accepted_at),
             "rejected_at": _maybe_datetime_iso(self.rejected_at),
+            "rejectedAt": _maybe_datetime_iso(self.rejected_at),
             "revoked_at": _maybe_datetime_iso(self.revoked_at),
+            "revokedAt": _maybe_datetime_iso(self.revoked_at),
             "expired_at": _maybe_datetime_iso(self.expired_at),
+            "expiredAt": _maybe_datetime_iso(self.expired_at),
             "expires_at": _maybe_datetime_iso(self.expires_at),
+            "expiresAt": _maybe_datetime_iso(self.expires_at),
             "message": self.message,
             "metadata": _safe_dict(self.metadata_json),
         }
@@ -1084,10 +1102,15 @@ class ProjectInvitation(
             data.update(
                 {
                     "auth_user_id": self.auth_user_id,
+                    "authUserId": self.auth_user_id,
                     "auth_email_verified": bool(self.auth_email_verified),
+                    "authEmailVerified": bool(self.auth_email_verified),
                     "account_plan": self.account_plan_snapshot,
+                    "accountPlan": self.account_plan_snapshot,
                     "account_status": self.account_status_snapshot,
+                    "accountStatus": self.account_status_snapshot,
                     "can_use_bigdata": bool(self.can_use_bigdata_snapshot),
+                    "canUseBigdata": bool(self.can_use_bigdata_snapshot),
                 }
             )
 
@@ -1095,24 +1118,43 @@ class ProjectInvitation(
             data.update(
                 {
                     "db_id": self.id,
+                    "dbId": self.id,
                     "email_raw": self.email,
+                    "emailRaw": self.email,
                     "email_normalized": self.email_normalized,
+                    "emailNormalized": self.email_normalized,
                     "invited_by_auth_user_id": self.invited_by_auth_user_id,
+                    "invitedByAuthUserId": self.invited_by_auth_user_id,
                     "accepted_by_user_id": self.accepted_by_user_id,
+                    "acceptedByUserId": self.accepted_by_user_id,
                     "accepted_by_auth_user_id": self.accepted_by_auth_user_id,
+                    "acceptedByAuthUserId": self.accepted_by_auth_user_id,
                     "revoked_by_user_id": self.revoked_by_user_id,
+                    "revokedByUserId": self.revoked_by_user_id,
                     "revoked_by_auth_user_id": self.revoked_by_auth_user_id,
+                    "revokedByAuthUserId": self.revoked_by_auth_user_id,
                     "dispatch_attempts": self.dispatch_attempts,
+                    "dispatchAttempts": self.dispatch_attempts,
                     "dispatch_error": self.dispatch_error,
+                    "dispatchError": self.dispatch_error,
                     "reject_reason": self.reject_reason,
+                    "rejectReason": self.reject_reason,
                     "revoke_reason": self.revoke_reason,
+                    "revokeReason": self.revoke_reason,
                     "last_error": self.last_error,
+                    "lastError": self.last_error,
                     "has_token": bool(self.invitation_token_hash),
+                    "hasToken": bool(self.invitation_token_hash),
                     "invitation_url": self.invitation_url,
+                    "invitationUrl": self.invitation_url,
                     "created_at": _maybe_datetime_iso(getattr(self, "created_at", None)),
+                    "createdAt": _maybe_datetime_iso(getattr(self, "created_at", None)),
                     "updated_at": _maybe_datetime_iso(getattr(self, "updated_at", None)),
+                    "updatedAt": _maybe_datetime_iso(getattr(self, "updated_at", None)),
                     "deleted_at": _maybe_datetime_iso(getattr(self, "deleted_at", None)),
+                    "deletedAt": _maybe_datetime_iso(getattr(self, "deleted_at", None)),
                     "is_deleted": bool(getattr(self, "is_deleted", False)),
+                    "isDeleted": bool(getattr(self, "is_deleted", False)),
                 }
             )
 
@@ -1120,11 +1162,37 @@ class ProjectInvitation(
             data.update(
                 {
                     "auth_identity": _safe_dict(self.auth_identity_json),
+                    "authIdentity": _safe_dict(self.auth_identity_json),
                     "dispatch_response": _safe_dict(self.dispatch_response_json),
+                    "dispatchResponse": _safe_dict(self.dispatch_response_json),
                 }
             )
 
         return data
+
+    @property
+    def role_label(self) -> str:
+        role = normalize_invitation_role(self.role, allow_owner=True)
+        if role == ROLE_OWNER:
+            return "Owner"
+        if role == ROLE_ADMIN:
+            return "Admin"
+        if role == ROLE_EDITOR:
+            return "Editor"
+        return "Viewer"
+
+    @property
+    def status_label(self) -> str:
+        status = normalize_invitation_status(self.status)
+        labels = {
+            STATUS_PENDING: "wartet",
+            STATUS_ACCEPTED: "angenommen",
+            STATUS_REJECTED: "abgelehnt",
+            STATUS_REVOKED: "widerrufen",
+            STATUS_EXPIRED: "abgelaufen",
+            STATUS_FAILED: "fehlgeschlagen",
+        }
+        return labels.get(status, status)
 
     def serialize(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
         return self.to_dict(*args, **kwargs)
@@ -1144,18 +1212,13 @@ class ProjectInvitation(
         safe_id = _safe_str(public_id, max_len=100)
         if not safe_id:
             return None
-
         try:
             return cls.query.filter(cls.public_id == safe_id).first()
         except Exception:
             return None
 
     @classmethod
-    def find_active_for_email(
-        cls,
-        project_id: Any,
-        email: Any,
-    ) -> Optional["ProjectInvitation"]:
+    def find_active_for_email(cls, project_id: Any, email: Any) -> Optional["ProjectInvitation"]:
         normalized = normalize_email(email)
         safe_project_id = _safe_int(project_id)
 
@@ -1187,12 +1250,7 @@ class ProjectInvitation(
         return None
 
     @classmethod
-    def list_for_project(
-        cls,
-        project_id: Any,
-        include_terminal: bool = True,
-        include_deleted: bool = False,
-    ) -> list:
+    def list_for_project(cls, project_id: Any, include_terminal: bool = True, include_deleted: bool = False) -> list:
         safe_project_id = _safe_int(project_id)
         if not safe_project_id:
             return []
@@ -1219,11 +1277,7 @@ class ProjectInvitation(
         Commit wird bewusst NICHT automatisch ausgeführt.
         """
         try:
-            query = cls.query.filter(
-                cls.status.in_(list(ACTIVE_INVITATION_STATUSES)),
-                cls.expires_at.isnot(None),
-                cls.expires_at <= utcnow(),
-            )
+            query = cls.query.filter(cls.status.in_(list(ACTIVE_INVITATION_STATUSES)), cls.expires_at.isnot(None), cls.expires_at <= utcnow())
 
             safe_project_id = _safe_int(project_id)
             if safe_project_id:
@@ -1273,10 +1327,22 @@ def _prepare_invitation_before_save(mapper: Any, connection: Any, target: Projec
 
 if event is not None:
     try:
-        event.listen(ProjectInvitation, "before_insert", _prepare_invitation_before_save)
-        event.listen(ProjectInvitation, "before_update", _prepare_invitation_before_save)
+        if not event.contains(ProjectInvitation, "before_insert", _prepare_invitation_before_save):
+            event.listen(ProjectInvitation, "before_insert", _prepare_invitation_before_save)
     except Exception:
-        pass
+        try:
+            event.listen(ProjectInvitation, "before_insert", _prepare_invitation_before_save)
+        except Exception:
+            pass
+
+    try:
+        if not event.contains(ProjectInvitation, "before_update", _prepare_invitation_before_save):
+            event.listen(ProjectInvitation, "before_update", _prepare_invitation_before_save)
+    except Exception:
+        try:
+            event.listen(ProjectInvitation, "before_update", _prepare_invitation_before_save)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1294,11 +1360,7 @@ def serialize_project_invitation(
         return None
 
     try:
-        return invitation.to_dict(
-            include_private=include_private,
-            include_auth=include_auth,
-            include_raw=include_raw,
-        )
+        return invitation.to_dict(include_private=include_private, include_auth=include_auth, include_raw=include_raw)
     except Exception:
         return None
 
@@ -1313,12 +1375,7 @@ def serialize_project_invitations(
 
     try:
         for invitation in invitations or []:
-            serialized = serialize_project_invitation(
-                invitation,
-                include_private=include_private,
-                include_auth=include_auth,
-                include_raw=include_raw,
-            )
+            serialized = serialize_project_invitation(invitation, include_private=include_private, include_auth=include_auth, include_raw=include_raw)
             if serialized is not None:
                 result.append(serialized)
     except Exception:

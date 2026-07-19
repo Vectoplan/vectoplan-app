@@ -3,49 +3,96 @@
   VECTOPLAN Project Workspace
 
   Zweck:
-  - Projektdefinition/-bearbeitung im Workspace-iframe.
-  - Wird initial als erster Workspace-Tab geladen.
-  - Erst wenn das Projekt gespeichert/konfiguriert ist, sollen Map/3D/2D/LV nutzbar werden.
-  - Frontend spricht mit /v1/projects.
-  - Keine direkte Chunk-, Editor-, 2D- oder LV-Persistenz.
-  - Diese Seite verwaltet nur App-Projektmetadaten.
+  - Projektdefinition und Projektmetadaten im App-Workspace bearbeiten.
+  - Ausschließlich normalisierte, bereits serverseitig geprüfte Context-Daten darstellen.
+  - Projekt-, Publication-, Chunk- und Access-Sync-Zustände verständlich visualisieren.
+  - Keine direkte Chunk-, Editor-, 2D- oder LV-Persistenz durchführen.
 
-  Neuer Zielzustand:
-  - Eine sichtbare Adressbox: address_text.
-  - Keine manuellen Koordinatenfelder im Projektformular.
-  - Keine strukturierten Adressfelder im Projektformular.
-  - Keine Systemreferenzen im normalen Projektformular.
-  - Sichtbarkeit über drei Karten: private | unlisted | public.
-  - Team/Einladungen und Veröffentlichung nur für can_manage.
-  - Demo-Modus wird sichtbar und nicht als echte Persistenz behandelt.
+  Sicherheitsregeln:
+  - Backend-Guards bleiben die Berechtigungswahrheit.
+  - Projektrollen werden niemals aus globalen Account-/Plattformrollen abgeleitet.
+  - Viewer und Public Viewer bleiben unabhängig von widersprüchlichen Alt-Payloads read-only.
+  - Auth-unavailable, blocked, access-blocked und Identity-Mismatch deaktivieren Mutationen.
+  - Browser-JavaScript erhält nur explizit zusammengestellte, nicht-sensitive Daten.
+  - Keine lokalen User-IDs, kanonischen Auth-IDs, E-Mails, Owner-IDs, Tokens, Sessions,
+    Cookies, internen URLs, Service-Refs oder ungefilterten Metadaten ausgeben.
+  - Chunk-IDs allein machen eine Welt nicht bereit. Der normalisierte Provisionierungsstatus
+    und gegebenenfalls der Access-Sync-Status bleiben maßgeblich.
 
   Erwartete optionale Template-Variablen:
-  - project
-  - current_project
-  - current_user
+  - project / current_project / project_view
+  - current_user / current_user_view
+  - auth / auth_context
+  - access / access_view
+  - workspace_access / workspace_access_view
+  - publication / publication_view
+  - ui_flags
+  - chunk / chunk_view / chunk_access_sync
+  - workspace_runtime
+  - paths / routes
   - is_new
 
   Robustheitsregel:
-  - Bei Dicts immer .get(...) verwenden.
-  - Alle Felder haben Defaults.
+  - Fehlende optionale Keys dürfen keinen Templatefehler auslösen.
+  - Komplexe Fachlogik gehört in project_workspace_context.py und routes/viewer.py.
+  - Dieses Template enthält nur eine letzte defensive, fail-closed Darstellungsschicht.
 #}
 
-{% set _project_raw = project|default(current_project|default({}, true), true) %}
+{# ------------------------------------------------------------------------- #}
+{# Defensive base values                                                     #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _truthy_values = [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'Yes', 'on', 'ON', 'On', 'ja', 'JA', 'Ja', 'enabled', 'ready', 'ok'] %}
+{% set _falsey_values = [false, 'false', 'False', 'FALSE', '0', 0, 'no', 'NO', 'No', 'off', 'OFF', 'Off', 'nein', 'NEIN', 'Nein', 'disabled', 'error', 'failed', none, ''] %}
+
+{% set _project_raw = project_view|default(project|default(current_project|default({}, true), true), true) %}
 {% set _project = _project_raw if _project_raw is mapping else {} %}
 
-{% set _current_user_raw = current_user|default({}, true) %}
+{% set _current_user_raw = current_user_view|default(current_user|default({}, true), true) %}
 {% set _current_user = _current_user_raw if _current_user_raw is mapping else {} %}
 
-{% set _auth_raw = _current_user.get('auth', _current_user) %}
+{% set _auth_raw = auth_context|default(auth|default(_current_user.get('auth', {}), true), true) %}
 {% set _auth = _auth_raw if _auth_raw is mapping else {} %}
 
-{% set _is_new_raw = is_new|default(_project.get('is_new', _project.get('isNew', false)), true) %}
-{% set _is_new = true if _is_new_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _access_raw = access_view|default(access|default(_project.get('access', {}), true), true) %}
+{% set _access = _access_raw if _access_raw is mapping else {} %}
 
-{% set _project_id = _project.get('id', _project.get('project_id', '')) %}
-{% set _project_public_id = _project.get('public_id', _project.get('publicId', 'new' if _is_new else '')) %}
+{% set _workspace_access_raw = workspace_access_view|default(workspace_access|default(_project.get('workspace_access', _project.get('workspaceAccess', {})), true), true) %}
+{% set _workspace_access = _workspace_access_raw if _workspace_access_raw is mapping else {} %}
 
-{% set _project_name = _project.get('name', '') %}
+{% set _publication_raw = publication_view|default(publication|default(_project.get('publication', {}), true), true) %}
+{% set _publication = _publication_raw if _publication_raw is mapping else {} %}
+
+{% set _ui_flags_raw = ui_flags|default(_project.get('ui_flags', _project.get('uiFlags', {})), true) %}
+{% set _ui_flags = _ui_flags_raw if _ui_flags_raw is mapping else {} %}
+
+{% set _chunk_raw = chunk_view|default(chunk|default(_project.get('chunk', _project.get('chunk_view', _project.get('chunkView', {}))), true), true) %}
+{% set _chunk = _chunk_raw if _chunk_raw is mapping else {} %}
+
+{% set _chunk_access_sync_raw = chunk_access_sync|default(_chunk.get('access_sync', _chunk.get('accessSync', {})), true) %}
+{% set _chunk_access_sync = _chunk_access_sync_raw if _chunk_access_sync_raw is mapping else {} %}
+
+{% set _workspace_runtime_raw = workspace_runtime|default({}, true) %}
+{% set _workspace_runtime = _workspace_runtime_raw if _workspace_runtime_raw is mapping else {} %}
+
+{% set _permissions_raw = _access.get('permissions', {}) %}
+{% set _permissions = _permissions_raw if _permissions_raw is mapping else {} %}
+
+{% set _paths_raw = paths|default(_project.get('paths', _project.get('routes', {})), true) %}
+{% set _paths = _paths_raw if _paths_raw is mapping else {} %}
+
+{# ------------------------------------------------------------------------- #}
+{# Project identity and content                                               #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _is_new_raw = is_new|default(_ui_flags.get('is_new', _ui_flags.get('isNew', _project.get('is_new', _project.get('isNew', none)))), true) %}
+{% set _project_public_id_raw = _project.get('public_id', _project.get('publicId', _project.get('project_public_id', _project.get('projectPublicId', '')))) %}
+{% set _project_public_id_text = _project_public_id_raw|string|lower if _project_public_id_raw is not none else '' %}
+{% set _is_new = true if _is_new_raw in _truthy_values or _project_public_id_text in ['', 'new', 'create', 'neu', 'none', 'null'] else false %}
+{% set _project_public_id = _project_public_id_raw if _project_public_id_raw and _project_public_id_text not in ['none', 'null'] else ('new' if _is_new else '') %}
+{% set _project_id = _project_public_id %}
+
+{% set _project_name = _project.get('name', _project.get('title', '')) %}
 {% set _project_display_name = _project.get('display_name', _project.get('displayName', _project_name if _project_name else 'Neues Projekt')) %}
 {% set _project_description = _project.get('description', '') %}
 
@@ -53,64 +100,481 @@
 {% set _address_obj = _address_obj_raw if _address_obj_raw is mapping else {} %}
 {% set _address_text = _project.get('address_text', _project.get('addressText', _address_obj.get('text', ''))) %}
 
-{% set _visibility_raw = _project.get('visibility', 'private') %}
-{% set _visibility = 'private' %}
+{% set _setup_status = _project.get('setup_status', _project.get('setupStatus', 'draft'))|string|lower %}
+{% set _is_configured_raw = _ui_flags.get('is_configured', _ui_flags.get('isConfigured', _project.get('is_configured', _project.get('isConfigured', false)))) %}
+{% set _is_configured = true if _is_configured_raw in _truthy_values else false %}
+
+{% set _visibility_raw = _project.get('visibility', _publication.get('visibility', 'private'))|string|lower %}
 {% if _visibility_raw in ['public', 'öffentlich', 'oeffentlich', 'open'] %}
   {% set _visibility = 'public' %}
-{% elif _visibility_raw in ['unlisted', 'not_listed', 'nicht_gelistet', 'link', 'link_shared'] %}
+{% elif _visibility_raw in ['unlisted', 'not_listed', 'nicht_gelistet', 'nicht-gelistet', 'link', 'link_shared', 'link-shared'] %}
   {% set _visibility = 'unlisted' %}
 {% else %}
   {% set _visibility = 'private' %}
 {% endif %}
 
-{% set _setup_status = _project.get('setup_status', _project.get('setupStatus', 'draft')) %}
-{% set _is_configured_raw = _project.get('is_configured', _project.get('isConfigured', false)) %}
-{% set _is_configured = true if _is_configured_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{# ------------------------------------------------------------------------- #}
+{# Auth, project role and effective permissions                               #}
+{# ------------------------------------------------------------------------- #}
 
-{% set _access_raw = _project.get('access', {}) %}
-{% set _access = _access_raw if _access_raw is mapping else {} %}
-{% set _permissions_raw = _access.get('permissions', {}) %}
-{% set _permissions = _permissions_raw if _permissions_raw is mapping else {} %}
+{% set _authenticated_raw = _ui_flags.get('authenticated', _auth.get('authenticated', _auth.get('is_authenticated', _auth.get('isAuthenticated', _current_user.get('authenticated', false))))) %}
+{% set _authenticated = true if _authenticated_raw in _truthy_values else false %}
 
-{% set _can_view_raw = _access.get('can_view', _permissions.get('view', true if _is_new else false)) %}
-{% set _can_view = true if _can_view_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _auth_unavailable_raw = _ui_flags.get('auth_unavailable', _ui_flags.get('authUnavailable', _auth.get('auth_unavailable', _auth.get('authUnavailable', false)))) %}
+{% set _auth_unavailable = true if _auth_unavailable_raw in _truthy_values else false %}
 
-{% set _can_edit_raw = _access.get('can_edit', _permissions.get('edit', true if _is_new else false)) %}
-{% set _can_edit = true if _can_edit_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _user_blocked_raw = _ui_flags.get('user_blocked', _ui_flags.get('userBlocked', _auth.get('user_blocked', _auth.get('userBlocked', false)))) %}
+{% set _user_blocked = true if _user_blocked_raw in _truthy_values else false %}
 
-{% set _can_manage_raw = _access.get('can_manage', _permissions.get('manage', _access.get('can_manage_settings', _permissions.get('manage_settings', false)))) %}
-{% set _can_manage = true if _can_manage_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _access_blocked_raw = _ui_flags.get('access_blocked', _ui_flags.get('accessBlocked', _auth.get('access_blocked', _auth.get('accessBlocked', _access.get('access_blocked', _access.get('accessBlocked', false)))))) %}
+{% set _access_blocked = true if _access_blocked_raw in _truthy_values else false %}
 
-{% set _can_view_settings_raw = _access.get('can_view_settings', _permissions.get('view_settings', _can_manage)) %}
-{% set _can_view_settings = true if _can_view_settings_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _identity_consistent_raw = _auth.get('identity_consistent', _auth.get('identityConsistent', _current_user.get('identity_consistent', _current_user.get('identityConsistent', true)))) %}
+{% set _identity_consistent = true if _identity_consistent_raw in _truthy_values else false %}
+{% set _identity_blocked = true if _authenticated and not _identity_consistent else false %}
 
-{% set _can_manage_team_raw = _access.get('can_manage_team', _permissions.get('manage_team', _can_manage)) %}
-{% set _can_manage_team = true if _can_manage_team_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _access_mode_raw = _ui_flags.get('access_mode', _ui_flags.get('accessMode', _access.get('access_mode', _access.get('accessMode', _workspace_access.get('access_mode', _workspace_access.get('accessMode', _project.get('access_mode', _project.get('accessMode', '')))))))) %}
+{% set _access_mode = _access_mode_raw|string|lower %}
 
-{% set _authenticated_raw = _auth.get('authenticated', _auth.get('is_authenticated', _auth.get('isAuthenticated', true))) %}
-{% set _authenticated = true if _authenticated_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _public_viewer_raw = _ui_flags.get('public_viewer', _ui_flags.get('publicViewer', _access.get('public_viewer', _access.get('publicViewer', _workspace_access.get('public_viewer', _workspace_access.get('publicViewer', _project.get('public_viewer', _project.get('publicViewer', false)))))))) %}
+{% set _public_viewer_flag = true if _public_viewer_raw in _truthy_values else false %}
+{% set _public_viewer = true if _public_viewer_flag or _access_mode == 'public' else false %}
 
-{% set _demo_raw = _auth.get('demo_mode', _auth.get('demoMode', _auth.get('is_demo', _project.get('demo_mode', _project.get('demoMode', false))))) %}
-{% set _demo_mode = true if _demo_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _demo_raw = _ui_flags.get('demo_mode', _ui_flags.get('demoMode', _auth.get('demo_mode', _auth.get('demoMode', _project.get('demo_mode', _project.get('demoMode', false)))))) %}
+{% set _demo_mode_raw = true if _demo_raw in _truthy_values else false %}
+{% set _demo_mode = false if _public_viewer else _demo_mode_raw %}
 
-{% set _persistent_raw = _auth.get('persistent', true if _authenticated and not _demo_mode else false) %}
-{% set _persistent = true if _persistent_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set _persistent_raw = _ui_flags.get('persistent', _auth.get('persistent', _current_user.get('persistent', false))) %}
+{% set _persistent = true if _persistent_raw in _truthy_values else false %}
 
-{% if _is_new %}
-  {% set _can_view = true %}
-  {% if not _demo_mode %}
-    {% set _can_edit = true %}
+{% if _public_viewer or _demo_mode or _auth_unavailable or _user_blocked or _access_blocked or _identity_blocked %}
+  {% set _persistent = false %}
+{% endif %}
+
+{% if not _access_mode %}
+  {% if _auth_unavailable %}
+    {% set _access_mode = 'auth_unavailable' %}
+  {% elif _user_blocked or _access_blocked or _identity_blocked %}
+    {% set _access_mode = 'blocked' %}
+  {% elif _public_viewer %}
+    {% set _access_mode = 'public' %}
+  {% elif _demo_mode %}
+    {% set _access_mode = 'demo' %}
+  {% elif _authenticated %}
+    {% set _access_mode = 'authenticated' %}
+  {% else %}
+    {% set _access_mode = 'anonymous' %}
   {% endif %}
 {% endif %}
 
-{% set _form_can_edit = true if _can_edit and _persistent and not _demo_mode else false %}
+{% set _project_role_raw = _ui_flags.get('project_role', _ui_flags.get('projectRole', _access.get('project_role', _access.get('projectRole', _access.get('role', ''))))) %}
+{% set _project_role = _project_role_raw|string|lower|replace('-', '_') %}
+{% if _project_role not in ['owner', 'admin', 'editor', 'viewer'] %}
+  {% set _project_role = '' %}
+{% endif %}
 
-{% set _detail_path = '/v1/projects/' ~ _project_public_id if _project_public_id and _project_public_id != 'new' else '' %}
-{% set _create_path = '/v1/projects' %}
-{% set _project_context_path = '/ui/project/' ~ _project_public_id ~ '/context.json' if _project_public_id else '/ui/project/new/context.json' %}
-{% set _members_path = '/v1/projects/' ~ _project_public_id ~ '/members' if _project_public_id and _project_public_id != 'new' else '' %}
-{% set _invitations_path = '/v1/projects/' ~ _project_public_id ~ '/invitations' if _project_public_id and _project_public_id != 'new' else '' %}
-{% set _publication_path = '/v1/projects/' ~ _project_public_id ~ '/publication' if _project_public_id and _project_public_id != 'new' else '' %}
+{% set _can_view_raw = _ui_flags.get('can_view', _ui_flags.get('canView', _access.get('can_view', _access.get('canView', _permissions.get('view', true if _is_new else false))))) %}
+{% set _can_view = true if _can_view_raw in _truthy_values else false %}
+
+{% set _can_edit_raw = _ui_flags.get('can_edit', _ui_flags.get('canEdit', _access.get('can_edit', _access.get('canEdit', _permissions.get('edit', false))))) %}
+{% set _can_edit = true if _can_edit_raw in _truthy_values else false %}
+
+{% set _can_manage_raw = _ui_flags.get('can_manage', _ui_flags.get('canManage', _access.get('can_manage', _access.get('canManage', _permissions.get('manage', false))))) %}
+{% set _can_manage = true if _can_manage_raw in _truthy_values else false %}
+
+{% set _can_delete_raw = _ui_flags.get('can_delete', _ui_flags.get('canDelete', _access.get('can_delete', _access.get('canDelete', _permissions.get('delete', false))))) %}
+{% set _can_delete = true if _can_delete_raw in _truthy_values else false %}
+
+{% set _can_transfer_raw = _ui_flags.get('can_transfer', _ui_flags.get('canTransfer', _access.get('can_transfer', _access.get('canTransfer', _permissions.get('transfer', false))))) %}
+{% set _can_transfer = true if _can_transfer_raw in _truthy_values else false %}
+
+{% set _can_view_settings_raw = _ui_flags.get('can_view_settings', _ui_flags.get('canViewSettings', _access.get('can_view_settings', _access.get('canViewSettings', _permissions.get('view_settings', _can_manage))))) %}
+{% set _can_view_settings = true if _can_view_settings_raw in _truthy_values else false %}
+
+{% set _can_manage_team_raw = _ui_flags.get('can_manage_team', _ui_flags.get('canManageTeam', _access.get('can_manage_team', _access.get('canManageTeam', _permissions.get('manage_team', _can_manage))))) %}
+{% set _can_manage_team = true if _can_manage_team_raw in _truthy_values else false %}
+
+{% set _can_publish_raw = _ui_flags.get('can_publish', _ui_flags.get('canPublish', _access.get('can_publish', _access.get('canPublish', _permissions.get('publish', _can_manage))))) %}
+{% set _can_publish = true if _can_publish_raw in _truthy_values else false %}
+
+{% set _can_command_raw = _ui_flags.get('can_command', _ui_flags.get('canCommand', _access.get('can_command', _access.get('canCommand', _permissions.get('command', false))))) %}
+{% set _can_command = true if _can_command_raw in _truthy_values else false %}
+
+{% set _can_materialize_raw = _ui_flags.get('can_materialize', _ui_flags.get('canMaterialize', _access.get('can_materialize', _access.get('canMaterialize', _permissions.get('materialize', false))))) %}
+{% set _can_materialize = true if _can_materialize_raw in _truthy_values else false %}
+
+{% set _read_only_raw = _ui_flags.get('read_only', _ui_flags.get('readOnly', _access.get('read_only', _access.get('readOnly', _workspace_access.get('read_only', _workspace_access.get('readOnly', _project.get('read_only', _project.get('readOnly', true)))))))) %}
+{% set _read_only = true if _read_only_raw in _truthy_values else false %}
+{% set _read_only_reason = _ui_flags.get('read_only_reason', _ui_flags.get('readOnlyReason', _access.get('read_only_reason', _access.get('readOnlyReason', '')))) %}
+
+{# Existing projects require a valid project role for all project mutations. #}
+{% if not _is_new %}
+  {% if _project_role not in ['owner', 'admin', 'editor'] %}
+    {% set _can_edit = false %}
+  {% endif %}
+  {% if _project_role not in ['owner', 'admin'] %}
+    {% set _can_manage = false %}
+    {% set _can_view_settings = false %}
+    {% set _can_manage_team = false %}
+    {% set _can_publish = false %}
+    {% set _can_delete = false %}
+    {% set _can_transfer = false %}
+  {% endif %}
+{% endif %}
+
+{% if _project_role == 'viewer' or _public_viewer %}
+  {% set _can_view = true %}
+  {% set _can_edit = false %}
+  {% set _can_manage = false %}
+  {% set _can_delete = false %}
+  {% set _can_transfer = false %}
+  {% set _can_view_settings = false %}
+  {% set _can_manage_team = false %}
+  {% set _can_publish = false %}
+  {% set _can_command = false %}
+  {% set _can_materialize = false %}
+  {% set _read_only = true %}
+{% endif %}
+
+{% if _demo_mode %}
+  {% set _can_view = true %}
+  {% set _can_edit = true %}
+  {% set _can_manage = false %}
+  {% set _can_delete = false %}
+  {% set _can_transfer = false %}
+  {% set _can_view_settings = false %}
+  {% set _can_manage_team = false %}
+  {% set _can_publish = false %}
+  {% set _can_command = false %}
+  {% set _can_materialize = false %}
+{% endif %}
+
+{% if _auth_unavailable or _user_blocked or _access_blocked or _identity_blocked %}
+  {% set _can_edit = false %}
+  {% set _can_manage = false %}
+  {% set _can_delete = false %}
+  {% set _can_transfer = false %}
+  {% set _can_view_settings = false %}
+  {% set _can_manage_team = false %}
+  {% set _can_publish = false %}
+  {% set _can_command = false %}
+  {% set _can_materialize = false %}
+  {% set _read_only = true %}
+{% endif %}
+
+{% if _is_new %}
+  {% set _can_view = true %}
+  {% if (_persistent or _demo_mode) and not _public_viewer and not _auth_unavailable and not _user_blocked and not _access_blocked and not _identity_blocked %}
+    {% set _can_edit = true %}
+    {% set _read_only = false %}
+  {% else %}
+    {% set _can_edit = false %}
+    {% set _read_only = true %}
+  {% endif %}
+{% endif %}
+
+{% set _form_can_edit = true if _can_edit and not _read_only and (_persistent or _demo_mode) and not _public_viewer and not _auth_unavailable and not _user_blocked and not _access_blocked and not _identity_blocked else false %}
+{% set _show_management_sections = true if _can_manage and _persistent and not _is_new and not _demo_mode and not _public_viewer and not _read_only and not _auth_unavailable and not _user_blocked and not _access_blocked and not _identity_blocked else false %}
+{% set _show_management_locked = true if not _is_new and not _show_management_sections and not _public_viewer and not _demo_mode else false %}
+
+{# ------------------------------------------------------------------------- #}
+{# Chunk and external workspace readiness                                     #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _chunk_ready_raw = _ui_flags.get('chunk_ready', _ui_flags.get('chunkReady', _chunk.get('ready', _project.get('chunk_ready', _project.get('chunkReady', false))))) %}
+{% set _chunk_ready = true if _chunk_ready_raw in _truthy_values else false %}
+
+{% set _chunk_provisioning_status = _ui_flags.get('chunk_provisioning_status', _ui_flags.get('chunkProvisioningStatus', _chunk.get('provisioning_status', _chunk.get('provisioningStatus', _project.get('chunk_provisioning_status', _project.get('chunkProvisioningStatus', 'pending'))))))|string|lower|replace('-', '_') %}
+{% set _chunk_access_sync_status = _ui_flags.get('chunk_access_sync_status', _ui_flags.get('chunkAccessSyncStatus', _chunk.get('access_sync_status', _chunk.get('accessSyncStatus', _chunk_access_sync.get('status', 'pending')))))|string|lower|replace('-', '_') %}
+
+{% set _chunk_access_sync_ready_raw = _chunk.get('access_sync_ready', _chunk.get('accessSyncReady', _chunk_access_sync.get('ready', false))) %}
+{% set _chunk_access_sync_ready = true if _chunk_access_sync_ready_raw in _truthy_values else false %}
+
+{% set _chunk_access_sync_enabled_raw = _chunk.get('access_sync_enabled', _chunk.get('accessSyncEnabled', _chunk_access_sync.get('enabled', true))) %}
+{% set _chunk_access_sync_enabled = true if _chunk_access_sync_enabled_raw in _truthy_values else false %}
+
+{% set _chunk_access_sync_required_raw = _chunk.get('access_sync_required', _chunk.get('accessSyncRequired', _chunk_access_sync.get('required', false))) %}
+{% set _chunk_access_sync_required = true if _chunk_access_sync_required_raw in _truthy_values else false %}
+
+{% set _chunk_requested_template = _ui_flags.get('chunk_world_template_requested', _ui_flags.get('chunkWorldTemplateRequested', _chunk.get('requested_world_template', _chunk.get('requestedWorldTemplate', 'earth'))))|string|lower %}
+{% set _chunk_effective_template = _ui_flags.get('chunk_world_template_effective', _ui_flags.get('chunkWorldTemplateEffective', _chunk.get('effective_world_template', _chunk.get('effectiveWorldTemplate', _chunk_requested_template))))|string|lower %}
+
+{% set _chunk_fallback_used_raw = _ui_flags.get('chunk_fallback_used', _ui_flags.get('chunkFallbackUsed', _chunk.get('fallback_used', _chunk.get('fallbackUsed', false)))) %}
+{% set _chunk_fallback_used = true if _chunk_fallback_used_raw in _truthy_values else false %}
+{% set _chunk_fallback_reason_raw = _chunk.get('fallback_reason', _chunk.get('fallbackReason', _project.get('chunk_fallback_reason', _project.get('chunkFallbackReason', ''))))|string|lower|replace('-', '_')|replace(' ', '_') %}
+{% if _chunk_fallback_reason_raw in ['earth_reference_missing', 'earth_reference_unavailable', 'earth_reference_invalid', 'georeference_missing', 'georeference_unavailable', 'location_reference_missing', 'world_provider_precondition_failed'] %}
+  {% set _chunk_fallback_reason = _chunk_fallback_reason_raw %}
+{% else %}
+  {% set _chunk_fallback_reason = 'controlled_earth_fallback' if _chunk_fallback_used else '' %}
+{% endif %}
+
+{% set _chunk_repair_required_raw = _chunk.get('repair_required', _chunk.get('repairRequired', false)) %}
+{% set _chunk_repair_required = true if _chunk_repair_required_raw in _truthy_values or _chunk_provisioning_status == 'repair_required' or _chunk_access_sync_status == 'repair_required' else false %}
+
+{% set _chunk_pending_raw = _chunk.get('pending', false) %}
+{% set _chunk_pending = true if _chunk_pending_raw in _truthy_values or _chunk_provisioning_status in ['pending', 'queued', 'provisioning', 'syncing', 'waiting'] or (_chunk_access_sync_enabled and _chunk_access_sync_status in ['pending', 'queued', 'syncing', 'waiting']) else false %}
+
+{% set _chunk_editor_ready_raw = _chunk.get('editor_ready', _chunk.get('editorReady', _workspace_runtime.get('ready', false))) %}
+{% set _chunk_editor_ready = true if _chunk_editor_ready_raw in _truthy_values else false %}
+{% if not _chunk_ready or (_chunk_access_sync_required and not _chunk_access_sync_ready) or _chunk_repair_required %}
+  {% set _chunk_editor_ready = false %}
+{% endif %}
+
+{% set _chunk_can_retry_raw = _chunk.get('can_retry', _chunk.get('canRetry', false)) %}
+{% set _chunk_can_retry = true if _chunk_can_retry_raw in _truthy_values else false %}
+
+{% set _chunk_project_ref = _chunk.get('chunk_project_id', _chunk.get('chunkProjectId', '')) %}
+{% set _chunk_world_ref = _chunk.get('chunk_world_id', _chunk.get('chunkWorldId', '')) %}
+{% set _chunk_effective_display = _chunk_effective_template if _chunk_ready or _chunk_fallback_used else 'noch offen' %}
+
+{# ------------------------------------------------------------------------- #}
+{# Paths                                                                      #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _detail_path = _paths.get('updateProject', _paths.get('update_project', '/v1/projects/' ~ _project_public_id if _project_public_id and _project_public_id != 'new' else '')) %}
+{% set _create_path = _paths.get('createProject', _paths.get('create_project', '/v1/projects')) %}
+{% set _project_context_path = _paths.get('context', '/ui/project/' ~ _project_public_id ~ '/context.json' if _project_public_id and _project_public_id != 'new' else '/ui/project/new/context.json') %}
+{% set _workspace_access_path = _paths.get('workspaceAccess', _paths.get('workspace_access', '/v1/projects/' ~ _project_public_id ~ '/workspace-access/project' if _project_public_id and _project_public_id != 'new' else '')) %}
+{% set _members_path = _paths.get('members', '') if _show_management_sections else '' %}
+{% set _invitations_path = _paths.get('invitations', '') if _show_management_sections else '' %}
+{% set _publication_path = _paths.get('publication', '') if _show_management_sections else '' %}
+{% set _chunk_path = _paths.get('chunk', '') %}
+{% set _chunk_ensure_path = _paths.get('chunkEnsure', _paths.get('chunk_ensure', '')) if _show_management_sections else '' %}
+{% set _chunk_retry_path = _paths.get('chunkRetry', _paths.get('chunk_retry', '')) if _show_management_sections else '' %}
+{% set _chunk_reconcile_path = _paths.get('chunkReconcile', _paths.get('chunk_reconcile', '')) if _show_management_sections else '' %}
+{% set _chunk_access_path = _paths.get('chunkAccess', _paths.get('chunk_access', '')) if _show_management_sections else '' %}
+{% set _chunk_access_sync_path = _paths.get('chunkAccessSync', _paths.get('chunk_access_sync', '')) if _show_management_sections else '' %}
+{% set _editor3d_path = _paths.get('editor3d', '/ui/project/' ~ _project_public_id ~ '/editor3d' if _project_public_id and _project_public_id != 'new' else '') %}
+{% set _map_path = _paths.get('map', '/ui/project/' ~ _project_public_id ~ '/map' if _project_public_id and _project_public_id != 'new' else '') %}
+
+{# ------------------------------------------------------------------------- #}
+{# Safe browser payloads                                                      #}
+{# ------------------------------------------------------------------------- #}
+
+{% set _effective_permissions = {
+  'view': _can_view,
+  'edit': _can_edit,
+  'manage': _can_manage,
+  'delete': _can_delete,
+  'transfer': _can_transfer,
+  'view_settings': _can_view_settings,
+  'manage_team': _can_manage_team,
+  'publish': _can_publish,
+  'command': _can_command,
+  'materialize': _can_materialize
+} %}
+
+{% set _browser_access = {
+  'role': _project_role,
+  'project_role': _project_role,
+  'projectRole': _project_role,
+  'access_mode': _access_mode,
+  'accessMode': _access_mode,
+  'read_only': _read_only,
+  'readOnly': _read_only,
+  'read_only_reason': _read_only_reason,
+  'readOnlyReason': _read_only_reason,
+  'public_viewer': _public_viewer,
+  'publicViewer': _public_viewer,
+  'demo_mode': _demo_mode,
+  'demoMode': _demo_mode,
+  'persistent': _persistent,
+  'permissions': _effective_permissions,
+  'can_view': _can_view,
+  'canView': _can_view,
+  'can_edit': _can_edit,
+  'canEdit': _can_edit,
+  'can_manage': _can_manage,
+  'canManage': _can_manage,
+  'can_delete': _can_delete,
+  'canDelete': _can_delete,
+  'can_transfer': _can_transfer,
+  'canTransfer': _can_transfer,
+  'can_view_settings': _can_view_settings,
+  'canViewSettings': _can_view_settings,
+  'can_manage_team': _can_manage_team,
+  'canManageTeam': _can_manage_team,
+  'can_publish': _can_publish,
+  'canPublish': _can_publish,
+  'can_command': _can_command,
+  'canCommand': _can_command,
+  'can_materialize': _can_materialize,
+  'canMaterialize': _can_materialize,
+  'can_mutate': _form_can_edit,
+  'canMutate': _form_can_edit
+} %}
+
+{% set _published_workspaces_raw = _publication.get('effective_published_workspaces', _publication.get('effectivePublishedWorkspaces', _publication.get('published_workspaces', _publication.get('publishedWorkspaces', {})))) %}
+{% set _published_workspaces_source = _published_workspaces_raw if _published_workspaces_raw is mapping else {} %}
+{% set _published_workspaces = {
+  'project': true if _published_workspaces_source.get('project', false) in _truthy_values else false,
+  'map': true if _published_workspaces_source.get('map', false) in _truthy_values else false,
+  'editor3d': true if _published_workspaces_source.get('editor3d', false) in _truthy_values else false,
+  'cad2d': true if _published_workspaces_source.get('cad2d', false) in _truthy_values else false,
+  'lv': true if _published_workspaces_source.get('lv', false) in _truthy_values else false,
+  'versions': true if _published_workspaces_source.get('versions', false) in _truthy_values else false
+} %}
+
+{% set _browser_publication = {
+  'visibility': _visibility,
+  'publication_enabled': true if _publication.get('publication_enabled', _publication.get('publicationEnabled', false)) in _truthy_values else false,
+  'publicationEnabled': true if _publication.get('publication_enabled', _publication.get('publicationEnabled', false)) in _truthy_values else false,
+  'published_workspaces': _published_workspaces,
+  'publishedWorkspaces': _published_workspaces,
+  'require_auth': true if _publication.get('require_auth', _publication.get('requireAuth', false)) in _truthy_values else false,
+  'requireAuth': true if _publication.get('require_auth', _publication.get('requireAuth', false)) in _truthy_values else false,
+  'require_project_permission': true if _publication.get('require_project_permission', _publication.get('requireProjectPermission', false)) in _truthy_values else false,
+  'requireProjectPermission': true if _publication.get('require_project_permission', _publication.get('requireProjectPermission', false)) in _truthy_values else false
+} %}
+
+{% set _browser_chunk = {
+  'ready': _chunk_ready,
+  'editor_ready': _chunk_editor_ready,
+  'editorReady': _chunk_editor_ready,
+  'provisioning_status': _chunk_provisioning_status,
+  'provisioningStatus': _chunk_provisioning_status,
+  'access_sync_status': _chunk_access_sync_status,
+  'accessSyncStatus': _chunk_access_sync_status,
+  'access_sync_ready': _chunk_access_sync_ready,
+  'accessSyncReady': _chunk_access_sync_ready,
+  'access_sync_enabled': _chunk_access_sync_enabled,
+  'accessSyncEnabled': _chunk_access_sync_enabled,
+  'access_sync_required': _chunk_access_sync_required,
+  'accessSyncRequired': _chunk_access_sync_required,
+  'requested_world_template': _chunk_requested_template,
+  'requestedWorldTemplate': _chunk_requested_template,
+  'effective_world_template': _chunk_effective_template,
+  'effectiveWorldTemplate': _chunk_effective_template,
+  'fallback_used': _chunk_fallback_used,
+  'fallbackUsed': _chunk_fallback_used,
+  'fallback_reason': _chunk_fallback_reason,
+  'fallbackReason': _chunk_fallback_reason,
+  'repair_required': _chunk_repair_required,
+  'repairRequired': _chunk_repair_required,
+  'pending': _chunk_pending,
+  'can_retry': _chunk_can_retry,
+  'canRetry': _chunk_can_retry,
+  'chunk_project_id': _chunk_project_ref,
+  'chunkProjectId': _chunk_project_ref,
+  'chunk_world_id': _chunk_world_ref,
+  'chunkWorldId': _chunk_world_ref
+} %}
+
+{% set _browser_project = {
+  'public_id': _project_public_id,
+  'publicId': _project_public_id,
+  'project_public_id': _project_public_id,
+  'projectPublicId': _project_public_id,
+  'name': _project_name,
+  'title': _project_name,
+  'display_name': _project_display_name,
+  'displayName': _project_display_name,
+  'description': _project_description,
+  'address_text': _address_text,
+  'addressText': _address_text,
+  'address': {'text': _address_text},
+  'visibility': _visibility,
+  'setup_status': _setup_status,
+  'setupStatus': _setup_status,
+  'is_configured': _is_configured,
+  'isConfigured': _is_configured,
+  'is_new': _is_new,
+  'isNew': _is_new,
+  'project_role': _project_role,
+  'projectRole': _project_role,
+  'read_only': _read_only,
+  'readOnly': _read_only,
+  'public_viewer': _public_viewer,
+  'publicViewer': _public_viewer,
+  'demo_mode': _demo_mode,
+  'demoMode': _demo_mode,
+  'access_mode': _access_mode,
+  'accessMode': _access_mode,
+  'access': _browser_access,
+  'publication': _browser_publication,
+  'chunk': _browser_chunk
+} %}
+
+{% set _browser_user = {
+  'authenticated': _authenticated,
+  'persistent': _persistent,
+  'demo_mode': _demo_mode,
+  'demoMode': _demo_mode,
+  'public_viewer': _public_viewer,
+  'publicViewer': _public_viewer,
+  'auth_unavailable': _auth_unavailable,
+  'authUnavailable': _auth_unavailable,
+  'user_blocked': _user_blocked,
+  'userBlocked': _user_blocked,
+  'access_blocked': _access_blocked,
+  'accessBlocked': _access_blocked,
+  'identity_consistent': _identity_consistent,
+  'identityConsistent': _identity_consistent,
+  'access_mode': _access_mode,
+  'accessMode': _access_mode,
+  'project_role': _project_role,
+  'projectRole': _project_role
+} %}
+
+{% set _browser_workspace_access = {
+  'allowed': true if _workspace_access.get('allowed', _workspace_access.get('ok', _can_view)) in _truthy_values else false,
+  'ok': true if _workspace_access.get('allowed', _workspace_access.get('ok', _can_view)) in _truthy_values else false,
+  'workspace': _workspace_access.get('workspace', 'project'),
+  'status_code': _workspace_access.get('status_code', _workspace_access.get('statusCode', 200 if _can_view else 403)),
+  'statusCode': _workspace_access.get('status_code', _workspace_access.get('statusCode', 200 if _can_view else 403)),
+  'reason': _workspace_access.get('reason', _workspace_access.get('code', 'ok' if _can_view else 'forbidden')),
+  'read_only': _read_only,
+  'readOnly': _read_only,
+  'public_viewer': _public_viewer,
+  'publicViewer': _public_viewer,
+  'access_mode': _access_mode,
+  'accessMode': _access_mode
+} %}
+
+{% set _browser_ui_flags = {
+  'is_new': _is_new,
+  'isNew': _is_new,
+  'is_configured': _is_configured,
+  'isConfigured': _is_configured,
+  'authenticated': _authenticated,
+  'persistent': _persistent,
+  'demo_mode': _demo_mode,
+  'demoMode': _demo_mode,
+  'public_viewer': _public_viewer,
+  'publicViewer': _public_viewer,
+  'project_role': _project_role,
+  'projectRole': _project_role,
+  'read_only': _read_only,
+  'readOnly': _read_only,
+  'read_only_reason': _read_only_reason,
+  'readOnlyReason': _read_only_reason,
+  'access_mode': _access_mode,
+  'accessMode': _access_mode,
+  'can_view': _can_view,
+  'canView': _can_view,
+  'can_edit': _can_edit,
+  'canEdit': _can_edit,
+  'can_manage': _can_manage,
+  'canManage': _can_manage,
+  'can_command': _can_command,
+  'canCommand': _can_command,
+  'can_materialize': _can_materialize,
+  'canMaterialize': _can_materialize,
+  'can_mutate': _form_can_edit,
+  'canMutate': _form_can_edit,
+  'chunk_ready': _chunk_ready,
+  'chunkReady': _chunk_ready,
+  'chunk_provisioning_status': _chunk_provisioning_status,
+  'chunkProvisioningStatus': _chunk_provisioning_status,
+  'chunk_access_sync_status': _chunk_access_sync_status,
+  'chunkAccessSyncStatus': _chunk_access_sync_status,
+  'chunk_fallback_used': _chunk_fallback_used,
+  'chunkFallbackUsed': _chunk_fallback_used
+} %}
+
+{# ------------------------------------------------------------------------- #}
+{# Browser document                                                           #}
+{# ------------------------------------------------------------------------- #}
 
 <!doctype html>
 <html lang="de" data-theme="light">
@@ -128,60 +592,91 @@
 
   <script>
     (function () {
+      "use strict";
       try {
-        var saved = null;
-
+        var savedTheme = null;
         try {
-          saved = localStorage.getItem("theme");
-        } catch (e) {
-          saved = null;
+          savedTheme = localStorage.getItem("theme");
+        } catch (_) {
+          savedTheme = null;
         }
 
-        if (saved === "dark" || saved === "light") {
-          document.documentElement.setAttribute("data-theme", saved);
+        if (savedTheme === "dark" || savedTheme === "light") {
+          document.documentElement.setAttribute("data-theme", savedTheme);
           return;
         }
 
         try {
           if (window.parent && window.parent !== window) {
-            var parentTheme = window.parent.document &&
-              window.parent.document.documentElement &&
-              window.parent.document.documentElement.getAttribute("data-theme");
-
+            var parentRoot = window.parent.document && window.parent.document.documentElement;
+            var parentTheme = parentRoot && parentRoot.getAttribute("data-theme");
             if (parentTheme === "dark" || parentTheme === "light") {
               document.documentElement.setAttribute("data-theme", parentTheme);
             }
           }
-        } catch (e) {}
-      } catch (e) {}
+        } catch (_) {
+          /* Cross-origin parent access is intentionally ignored. */
+        }
+      } catch (_) {
+        /* Theme initialization must never block rendering. */
+      }
     })();
   </script>
 
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ _project_public_id|default('new', true) }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ _project_public_id|default('new', true)|e }}">
 
   <script>
     (function () {
+      "use strict";
+
+      function publishParentEvent(name, detail) {
+        try {
+          if (!name || !window.parent || window.parent === window) {
+            return false;
+          }
+          window.parent.dispatchEvent(new CustomEvent(name, { detail: detail || {} }));
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
       try {
-        var project = {{ _project|tojson }};
-        var currentUser = {{ _current_user|tojson }};
-        var access = {{ _access|tojson }};
+        var project = {{ _browser_project|tojson }};
+        var currentUser = {{ _browser_user|tojson }};
+        var auth = {{ _browser_user|tojson }};
+        var access = {{ _browser_access|tojson }};
+        var workspaceAccess = {{ _browser_workspace_access|tojson }};
+        var publication = {{ _browser_publication|tojson }};
+        var chunk = {{ _browser_chunk|tojson }};
+        var uiFlags = {{ _browser_ui_flags|tojson }};
 
-        if (!project || typeof project !== "object") {
-          project = {};
-        }
+        var paths = {
+          createProject: {{ _create_path|tojson }},
+          updateProject: {{ _detail_path|tojson }},
+          getProject: {{ _detail_path|tojson }},
+          context: {{ _project_context_path|tojson }},
+          workspaceAccess: {{ _workspace_access_path|tojson }},
+          members: {{ _members_path|tojson }},
+          invitations: {{ _invitations_path|tojson }},
+          publication: {{ _publication_path|tojson }},
+          chunk: {{ _chunk_path|tojson }},
+          chunkEnsure: {{ _chunk_ensure_path|tojson }},
+          chunkRetry: {{ _chunk_retry_path|tojson }},
+          chunkReconcile: {{ _chunk_reconcile_path|tojson }},
+          chunkAccess: {{ _chunk_access_path|tojson }},
+          chunkAccessSync: {{ _chunk_access_sync_path|tojson }},
+          editor3d: {{ _editor3d_path|tojson }},
+          map: {{ _map_path|tojson }},
+          projectRoot: "/",
+          projectNew: "/project=new"
+        };
 
-        if (!currentUser || typeof currentUser !== "object") {
-          currentUser = {};
-        }
-
-        if (!access || typeof access !== "object") {
-          access = {};
-        }
-
-        window.VECTOPLAN_PROJECT_WORKSPACE_CONFIG = {
+        var config = {
           appName: "vectoplan-app",
           workspaceKind: "project",
-          version: 2,
+          contractVersion: 5,
+          version: 5,
 
           isNew: {{ _is_new|tojson }},
           canView: {{ _can_view|tojson }},
@@ -189,52 +684,103 @@
           canManage: {{ _can_manage|tojson }},
           canViewSettings: {{ _can_view_settings|tojson }},
           canManageTeam: {{ _can_manage_team|tojson }},
+          canPublish: {{ _can_publish|tojson }},
+          canCommand: {{ _can_command|tojson }},
+          canMaterialize: {{ _can_materialize|tojson }},
+          canMutate: {{ _form_can_edit|tojson }},
 
           authenticated: {{ _authenticated|tojson }},
+          authUnavailable: {{ _auth_unavailable|tojson }},
+          userBlocked: {{ _user_blocked|tojson }},
+          accessBlocked: {{ _access_blocked|tojson }},
+          identityConsistent: {{ _identity_consistent|tojson }},
           demoMode: {{ _demo_mode|tojson }},
           persistent: {{ _persistent|tojson }},
+          publicViewer: {{ _public_viewer|tojson }},
+          isPublicViewer: {{ _public_viewer|tojson }},
+          readOnly: {{ _read_only|tojson }},
+          readonly: {{ _read_only|tojson }},
+          readOnlyReason: {{ _read_only_reason|tojson }},
+          accessMode: {{ _access_mode|tojson }},
+          projectRole: {{ _project_role|tojson }},
 
           project: project,
           currentProject: project,
           currentUser: currentUser,
+          auth: auth,
           access: access,
+          workspaceAccess: workspaceAccess,
+          publication: publication,
+          chunk: chunk,
+          uiFlags: uiFlags,
 
-          projectId: {{ _project_id|tojson }},
+          projectId: {{ _project_public_id|tojson }},
           projectPublicId: {{ _project_public_id|tojson }},
           projectVisibility: {{ _visibility|tojson }},
           projectConfigured: {{ _is_configured|tojson }},
+          setupStatus: {{ _setup_status|tojson }},
+
+          chunkReady: {{ _chunk_ready|tojson }},
+          chunkEditorReady: {{ _chunk_editor_ready|tojson }},
+          chunkProvisioningStatus: {{ _chunk_provisioning_status|tojson }},
+          chunkAccessSyncStatus: {{ _chunk_access_sync_status|tojson }},
+          chunkFallbackUsed: {{ _chunk_fallback_used|tojson }},
 
           addressMode: "single_box",
           systemReferencesVisible: false,
-
-          paths: {
-            createProject: {{ _create_path|tojson }},
-            updateProject: {{ _detail_path|tojson }},
-            getProject: {{ _detail_path|tojson }},
-            context: {{ _project_context_path|tojson }},
-            members: {{ _members_path|tojson }},
-            invitations: {{ _invitations_path|tojson }},
-            publication: {{ _publication_path|tojson }},
-            projectRoot: "/",
-            projectNew: "/project=new"
-          },
+          paths: paths,
 
           parentEvents: {
+            loaded: "vectoplan:project:workspace:loaded",
+            ready: "vectoplan:project:workspace:ready",
+            error: "vectoplan:project:workspace:error",
             saved: "vectoplan:project:saved",
             created: "vectoplan:project:created",
             updated: "vectoplan:project:updated",
             deleted: "vectoplan:project:deleted",
             configured: "vectoplan:project:configured",
             publicationChanged: "vectoplan:project:publication:changed",
-            teamChanged: "vectoplan:project:team:changed"
-          }
+            teamChanged: "vectoplan:project:team:changed",
+            chunkChanged: "vectoplan:project:chunk:changed"
+          },
+
+          emitParentEvent: publishParentEvent
         };
 
-        window.PROJECT_WORKSPACE_CONFIG = window.VECTOPLAN_PROJECT_WORKSPACE_CONFIG;
-      } catch (e) {
+        window.VECTOPLAN_PROJECT_WORKSPACE_CONFIG = config;
+        window.PROJECT_WORKSPACE_CONFIG = config;
+        window.VECTOPLAN_CURRENT_PROJECT = project;
+        window.__VECTOPLAN_PROJECT_WORKSPACE_READY__ = true;
+
+        publishParentEvent(config.parentEvents.loaded, {
+          workspace: "project",
+          projectPublicId: config.projectPublicId,
+          projectName: project.displayName || project.name || "",
+          isNew: config.isNew,
+          canEdit: config.canEdit,
+          readOnly: config.readOnly,
+          accessMode: config.accessMode,
+          projectRole: config.projectRole,
+          chunkProvisioningStatus: config.chunkProvisioningStatus,
+          chunkAccessSyncStatus: config.chunkAccessSyncStatus
+        });
+      } catch (configError) {
         try {
-          console.warn("[vectoplan-project] config init failed", e);
-        } catch (_) {}
+          window.VECTOPLAN_PROJECT_WORKSPACE_CONFIG = {
+            appName: "vectoplan-app",
+            workspaceKind: "project",
+            contractVersion: 5,
+            configFailed: true,
+            canEdit: false,
+            canMutate: false,
+            canCommand: false,
+            canMaterialize: false,
+            readOnly: true,
+            error: String(configError && configError.message ? configError.message : configError)
+          };
+        } catch (_) {
+          /* No further fallback is possible. */
+        }
       }
     })();
   </script>
@@ -244,52 +790,131 @@
   <noscript>JavaScript ist erforderlich, um Projekte zu speichern.</noscript>
 
   <main
-    class="vp-project-workspace"
+    class="vp-project-workspace{% if _read_only %} vp-project-workspace--readonly{% endif %}{% if _public_viewer %} vp-project-workspace--public{% endif %}{% if _demo_mode %} vp-project-workspace--demo{% endif %}{% if _auth_unavailable or _user_blocked or _access_blocked or _identity_blocked %} vp-project-workspace--blocked{% endif %}"
     data-project-workspace
-    data-project-id="{{ _project_id|e }}"
     data-project-public-id="{{ _project_public_id|e }}"
     data-project-is-new="{{ 'true' if _is_new else 'false' }}"
+    data-project-role="{{ _project_role|e }}"
     data-project-can-view="{{ 'true' if _can_view else 'false' }}"
     data-project-can-edit="{{ 'true' if _form_can_edit else 'false' }}"
     data-project-can-manage="{{ 'true' if _can_manage else 'false' }}"
+    data-project-can-command="{{ 'true' if _can_command else 'false' }}"
+    data-project-can-materialize="{{ 'true' if _can_materialize else 'false' }}"
     data-project-demo-mode="{{ 'true' if _demo_mode else 'false' }}"
+    data-project-public-viewer="{{ 'true' if _public_viewer else 'false' }}"
+    data-project-read-only="{{ 'true' if _read_only else 'false' }}"
+    data-project-auth-unavailable="{{ 'true' if _auth_unavailable else 'false' }}"
+    data-project-user-blocked="{{ 'true' if _user_blocked else 'false' }}"
+    data-project-access-blocked="{{ 'true' if _access_blocked else 'false' }}"
+    data-project-identity-consistent="{{ 'true' if _identity_consistent else 'false' }}"
+    data-project-access-mode="{{ _access_mode|e }}"
     data-project-persistent="{{ 'true' if _persistent else 'false' }}"
     data-project-visibility="{{ _visibility|e }}"
     data-project-setup-status="{{ _setup_status|e }}"
     data-project-is-configured="{{ 'true' if _is_configured else 'false' }}"
+    data-project-chunk-ready="{{ 'true' if _chunk_ready else 'false' }}"
+    data-project-chunk-provisioning-status="{{ _chunk_provisioning_status|e }}"
+    data-project-chunk-access-sync-status="{{ _chunk_access_sync_status|e }}"
+    data-project-chunk-fallback-used="{{ 'true' if _chunk_fallback_used else 'false' }}"
   >
     <section class="vp-project-hero" aria-labelledby="projectWorkspaceTitle">
       <div class="vp-project-hero__content">
         <div class="vp-project-hero__eyebrow">
-          Projekt
+          {% if _auth_unavailable %}
+            Auth-Service nicht erreichbar
+          {% elif _user_blocked or _access_blocked or _identity_blocked %}
+            Zugriff gesperrt
+          {% elif _public_viewer %}
+            Öffentliche Ansicht
+          {% elif _demo_mode %}
+            Temporäre Demo-Projektverwaltung
+          {% else %}
+            Projekt{% if _project_role %} · {{ _project_role|capitalize }}{% endif %}
+          {% endif %}
         </div>
 
         <h1 id="projectWorkspaceTitle" class="vp-project-hero__title">
           {% if _is_new %}
             Neues Projekt anlegen
           {% else %}
-            {{ _project_display_name }}
+            {{ _project_display_name|e }}
           {% endif %}
         </h1>
 
         <p class="vp-project-hero__text">
-          Verwalte dein Projekt. Rollen- und Rechteverwaltung des Projektes
+          {% if _auth_unavailable %}
+            Der Auth-Service ist aktuell nicht erreichbar. Projektaktionen bleiben deaktiviert.
+          {% elif _identity_blocked %}
+            Die lokale Benutzerverknüpfung stimmt nicht mit der kanonischen Auth-Identität überein. Projektaktionen bleiben deaktiviert.
+          {% elif _user_blocked %}
+            Dein Benutzer- oder Accountstatus verhindert den Zugriff auf Projektaktionen.
+          {% elif _access_blocked %}
+            Der Zugriff auf diesen Projekt-Workspace ist aktuell blockiert.
+          {% elif _public_viewer %}
+            Dieses Projekt wurde öffentlich freigegeben. Die Ansicht ist schreibgeschützt.
+          {% elif _demo_mode %}
+            Du arbeitest temporär im Demo-Modus. Änderungen werden nicht dauerhaft gespeichert.
+          {% else %}
+            Verwalte Basisdaten, Sichtbarkeit, Veröffentlichung und Teamrechte dieses Projekts.
+          {% endif %}
         </p>
       </div>
 
-
+      <div class="vp-project-hero__status">
+        {% if _auth_unavailable %}
+          <span class="vp-project-status vp-project-status--error">Auth 503</span>
+        {% elif _user_blocked or _access_blocked or _identity_blocked %}
+          <span class="vp-project-status vp-project-status--error">Gesperrt</span>
+        {% elif _public_viewer or _project_role == 'viewer' %}
+          <span class="vp-project-status vp-project-status--readonly">Read-only</span>
+        {% elif _demo_mode %}
+          <span class="vp-project-status vp-project-status--demo">Demo</span>
+        {% elif _is_configured %}
+          <span class="vp-project-status vp-project-status--configured">Konfiguriert</span>
+        {% else %}
+          <span class="vp-project-status vp-project-status--draft">Entwurf</span>
+        {% endif %}
+      </div>
     </section>
 
-    {% if _demo_mode %}
+    {% if _auth_unavailable %}
+      <section class="vp-project-alert vp-project-alert--error" role="alert" aria-live="assertive" data-project-auth-unavailable-alert>
+        <strong>Auth-Service nicht erreichbar:</strong>
+        Die Projekt-Shell wurde geladen, aber persistente Projektaktionen sind fail-closed deaktiviert.
+      </section>
+    {% elif _identity_blocked %}
+      <section class="vp-project-alert vp-project-alert--error" role="alert" aria-live="assertive" data-project-identity-alert>
+        <strong>Identitätskonflikt:</strong>
+        Die lokale AppUser-Verknüpfung stimmt nicht mit der aktuellen Auth-Identität überein. Bitte die Benutzerverknüpfung reparieren.
+      </section>
+    {% elif _user_blocked %}
+      <section class="vp-project-alert vp-project-alert--error" role="alert" aria-live="assertive" data-project-user-blocked-alert>
+        <strong>Zugriff gesperrt:</strong>
+        Dein Benutzer- oder Accountstatus verhindert Projektaktionen.
+      </section>
+    {% elif _access_blocked %}
+      <section class="vp-project-alert vp-project-alert--error" role="alert" aria-live="assertive" data-project-access-blocked-alert>
+        <strong>Workspace blockiert:</strong>
+        Der Zugriff auf diesen Projekt-Workspace ist aktuell nicht erlaubt.
+      </section>
+    {% elif _public_viewer %}
+      <section class="vp-project-alert vp-project-alert--info" role="status" aria-live="polite" data-project-public-alert>
+        <strong>Öffentliche Projektansicht:</strong>
+        Bearbeitung, Commands, Materialisierung, Team, Einladungen, Veröffentlichung und Adminbereiche sind nicht öffentlich verfügbar.
+      </section>
+    {% elif _project_role == 'viewer' %}
+      <section class="vp-project-alert vp-project-alert--info" role="status" aria-live="polite" data-project-viewer-alert>
+        <strong>Leserolle:</strong>
+        Du kannst Projektinformationen und freigegebene Workspaces ansehen, aber keine Änderungen oder 3D-Commands ausführen.
+      </section>
+    {% elif _demo_mode %}
       <section class="vp-project-alert vp-project-alert--demo" role="status" aria-live="polite" data-project-demo-alert>
         <strong>Demo-Modus:</strong>
-        Du bist nicht eingeloggt. Änderungen werden nicht dauerhaft gespeichert und können nach Aktualisierung oder nach Ablauf der Demo-Sitzung verloren gehen.
+        Änderungen gelten nur temporär und werden nach Ablauf der Demo-Sitzung verworfen.
       </section>
-    {% endif %}
-
-    {% if not _persistent and not _demo_mode %}
+    {% elif not _persistent %}
       <section class="vp-project-alert vp-project-alert--warning" role="status" aria-live="polite" data-project-auth-alert>
-        Dein Login ist noch nicht mit einem lokalen VECTOPLAN-App-User verknüpft. Persistente Projektaktionen sind erst nach dem späteren Login-Sync möglich.
+        Dein Login besitzt noch keine gültige lokale AppUser-Verknüpfung. Persistente Projektaktionen sind deaktiviert.
       </section>
     {% endif %}
 
@@ -302,13 +927,83 @@
       hidden
     ></section>
 
+    {% if not _is_new %}
+      <section class="vp-project-card" aria-labelledby="projectRuntimeTitle" data-project-runtime-card>
+        <header class="vp-project-card__header">
+          <div>
+            <h2 id="projectRuntimeTitle" class="vp-project-card__title">Workspace-Bereitschaft</h2>
+            <p class="vp-project-card__text">
+              App-Projekt, Welt-Provisionierung und Rollen-Synchronisation werden getrennt gespeichert und können unabhängig voneinander repariert werden.
+            </p>
+          </div>
+          <div class="vp-project-card__actions">
+            {% if _chunk_editor_ready %}
+              <span class="vp-project-status vp-project-status--configured">3D bereit</span>
+            {% elif _chunk_repair_required %}
+              <span class="vp-project-status vp-project-status--error">Reparatur erforderlich</span>
+            {% elif _chunk_pending %}
+              <span class="vp-project-status vp-project-status--draft">Wird vorbereitet</span>
+            {% else %}
+              <span class="vp-project-status vp-project-status--readonly">Nicht bereit</span>
+            {% endif %}
+          </div>
+        </header>
+
+        <div class="vp-project-grid vp-project-grid--two">
+          <div class="vp-project-field">
+            <span class="vp-project-label">Welt</span>
+            <p class="vp-project-card__text">
+              Angefordert: <strong>{{ _chunk_requested_template|capitalize|e }}</strong>
+              · Effektiv: <strong>{{ _chunk_effective_display|capitalize|e }}</strong>
+            </p>
+          </div>
+
+          <div class="vp-project-field">
+            <span class="vp-project-label">Provisionierung</span>
+            <p class="vp-project-card__text"><strong>{{ _chunk_provisioning_status|replace('_', ' ')|capitalize|e }}</strong></p>
+          </div>
+
+          <div class="vp-project-field">
+            <span class="vp-project-label">Projektzugriff in Chunk</span>
+            <p class="vp-project-card__text"><strong>{% if not _chunk_access_sync_enabled %}Deaktiviert{% else %}{{ _chunk_access_sync_status|replace('_', ' ')|capitalize|e }}{% endif %}</strong></p>
+          </div>
+
+          <div class="vp-project-field">
+            <span class="vp-project-label">Arbeitsbereiche</span>
+            <p class="vp-project-card__text">
+              {% if _map_path %}<a href="{{ _map_path|e }}">Map öffnen</a>{% else %}Map nicht verfügbar{% endif %}
+              {% if _editor3d_path and _chunk_editor_ready %} · <a href="{{ _editor3d_path|e }}">3D öffnen</a>{% elif _editor3d_path %} · 3D noch nicht bereit{% endif %}
+            </p>
+          </div>
+        </div>
+
+        {% if _chunk_fallback_used %}
+          <div class="vp-project-alert vp-project-alert--warning" role="status" data-project-chunk-fallback-alert>
+            <strong>Flat-Fallback aktiv:</strong>
+            Die angeforderte Earth-Welt konnte unter einer bekannten fachlichen Vorbedingung nicht angelegt werden. Das Projekt verwendet kontrolliert eine Flat-Welt.
+            {% if _chunk_fallback_reason == 'earth_reference_missing' %}<span> Grund: Earth-Referenz fehlt.</span>{% elif _chunk_fallback_reason in ['earth_reference_unavailable', 'georeference_unavailable'] %}<span> Grund: Earth-Referenz ist nicht verfügbar.</span>{% elif _chunk_fallback_reason in ['earth_reference_invalid', 'world_provider_precondition_failed'] %}<span> Grund: Earth-Vorbedingung ist nicht erfüllt.</span>{% elif _chunk_fallback_reason %}<span> Grund: kontrollierter fachlicher Fallback.</span>{% endif %}
+          </div>
+        {% endif %}
+
+        {% if _chunk_repair_required %}
+          <div class="vp-project-alert vp-project-alert--error" role="alert" data-project-chunk-repair-alert>
+            <strong>Reparatur erforderlich:</strong>
+            Das App-Projekt bleibt gespeichert. Welt- oder Zugriffssynchronisation muss erneut ausgeführt werden.
+          </div>
+        {% elif _chunk_pending %}
+          <div class="vp-project-alert vp-project-alert--info" role="status" data-project-chunk-pending-alert>
+            <strong>Vorbereitung läuft:</strong>
+            Der Projekt-Workspace ist bereits gespeichert; 3D wird nach erfolgreicher Welt- und Zugriffssynchronisation freigeschaltet.
+          </div>
+        {% endif %}
+      </section>
+    {% endif %}
+
     {% if not _can_view and not _is_new %}
       <section class="vp-project-card vp-project-card--locked" aria-labelledby="projectLockedTitle">
         <header class="vp-project-card__header">
           <div>
-            <h2 id="projectLockedTitle" class="vp-project-card__title">
-              Zugriff nicht erlaubt
-            </h2>
+            <h2 id="projectLockedTitle" class="vp-project-card__title">Zugriff nicht erlaubt</h2>
             <p class="vp-project-card__text">
               Du hast keine Berechtigung, dieses Projekt zu sehen. Wende dich an einen Projekt-Admin oder öffne einen freigegebenen Projektlink.
             </p>
@@ -320,30 +1015,42 @@
         id="projectForm"
         class="vp-project-form"
         data-project-form
+        data-project-form-readonly="{{ 'true' if _read_only else 'false' }}"
+        data-project-form-public-viewer="{{ 'true' if _public_viewer else 'false' }}"
+        data-project-form-demo-mode="{{ 'true' if _demo_mode else 'false' }}"
+        data-project-form-auth-unavailable="{{ 'true' if _auth_unavailable else 'false' }}"
+        data-project-form-user-blocked="{{ 'true' if _user_blocked else 'false' }}"
+        data-project-form-access-blocked="{{ 'true' if _access_blocked or _identity_blocked else 'false' }}"
+        data-project-form-can-edit="{{ 'true' if _form_can_edit else 'false' }}"
+        data-project-create-url="{{ _create_path|e }}"
+        data-project-update-url="{{ _detail_path|e }}"
+        data-project-context-url="{{ _project_context_path|e }}"
         autocomplete="off"
         novalidate
+        {% if _read_only %}aria-readonly="true"{% endif %}
       >
-        <input type="hidden" id="projectId" name="id" value="{{ _project_id|e }}">
+        <input type="hidden" id="projectId" name="id" value="{{ _project_public_id|e }}">
         <input type="hidden" id="projectPublicId" name="public_id" value="{{ _project_public_id|e }}">
         <input type="hidden" id="projectIsNew" name="is_new" value="{{ 'true' if _is_new else 'false' }}">
+        <input type="hidden" id="projectAccessMode" name="access_mode" value="{{ _access_mode|e }}">
 
         <section class="vp-project-card" aria-labelledby="projectBasicsTitle">
           <header class="vp-project-card__header">
             <div>
-              <h2 id="projectBasicsTitle" class="vp-project-card__title">
-                Basisdaten
-              </h2>
+              <h2 id="projectBasicsTitle" class="vp-project-card__title">Basisdaten</h2>
               <p class="vp-project-card__text">
-                Diese Angaben erscheinen in der Projektliste und bilden den Startpunkt für alle weiteren Arbeitsbereiche.
+                {% if _public_viewer %}
+                  Diese Angaben beschreiben das öffentlich freigegebene Projekt.
+                {% else %}
+                  Diese Angaben erscheinen in der Projektliste und bilden den Startpunkt für alle weiteren Arbeitsbereiche.
+                {% endif %}
               </p>
             </div>
           </header>
 
           <div class="vp-project-grid vp-project-grid--two">
             <div class="vp-project-field vp-project-field--wide">
-              <label class="vp-project-label" for="projectName">
-                Projektname <span aria-hidden="true">*</span>
-              </label>
+              <label class="vp-project-label" for="projectName">Projektname <span aria-hidden="true">*</span></label>
               <input
                 id="projectName"
                 class="vp-project-input"
@@ -356,13 +1063,10 @@
                 data-project-name
                 {% if not _form_can_edit %}disabled{% endif %}
               >
-
             </div>
 
             <div class="vp-project-field vp-project-field--wide">
-              <label class="vp-project-label" for="projectDescription">
-                Beschreibung
-              </label>
+              <label class="vp-project-label" for="projectDescription">Beschreibung</label>
               <textarea
                 id="projectDescription"
                 class="vp-project-textarea"
@@ -380,18 +1084,16 @@
         {% include "viewer/partials/project_address.html" %}
         {% include "viewer/partials/project_visibility.html" %}
 
-        {% if _can_manage and not _is_new %}
+        {% if _show_management_sections %}
           {% include "viewer/partials/project_publication.html" %}
           {% include "viewer/partials/project_team.html" %}
-        {% elif not _is_new %}
+        {% elif _show_management_locked %}
           <section class="vp-project-card vp-project-card--locked" aria-labelledby="projectSettingsLockedTitle">
             <header class="vp-project-card__header">
               <div>
-                <h2 id="projectSettingsLockedTitle" class="vp-project-card__title">
-                  Einstellungen geschützt
-                </h2>
+                <h2 id="projectSettingsLockedTitle" class="vp-project-card__title">Einstellungen geschützt</h2>
                 <p class="vp-project-card__text">
-                  Team, Rechte, Veröffentlichung und Systembereiche sind nur für Projektverwalter sichtbar.
+                  Team, Rechte, Veröffentlichung und Systembereiche sind nur für Owner und Admins sichtbar.
                 </p>
               </div>
             </header>
@@ -399,48 +1101,83 @@
         {% endif %}
 
         <footer class="vp-project-form__footer">
-          {% if not _form_can_edit %}
+          {% if _form_can_edit %}
             <p class="vp-project-readonly">
               {% if _demo_mode %}
-                Demo-Modus: Dieses Formular speichert nicht dauerhaft.
+                Demo-Modus: Änderungen gelten ausschließlich temporär.
+              {% else %}
+                Änderungen werden nach dem Speichern dauerhaft im App-Projekt gespeichert. Welt- und Zugriffssynchronisation erfolgen danach getrennt.
+              {% endif %}
+            </p>
+
+            <div class="vp-project-form__actions">
+              <button type="button" class="vp-project-btn vp-project-btn--secondary" data-project-reset>Zurücksetzen</button>
+              <button type="submit" class="vp-project-btn vp-project-btn--primary" data-project-submit>
+                {% if _is_new %}Projekt erstellen{% else %}Projekt speichern{% endif %}
+              </button>
+            </div>
+          {% else %}
+            <p class="vp-project-readonly">
+              {% if _auth_unavailable %}
+                Speichern ist deaktiviert, weil der Auth-Service nicht erreichbar ist.
+              {% elif _identity_blocked %}
+                Speichern ist wegen eines Identitätskonflikts deaktiviert.
+              {% elif _user_blocked %}
+                Speichern ist deaktiviert, weil dein Benutzer- oder Accountstatus gesperrt ist.
+              {% elif _access_blocked %}
+                Speichern ist deaktiviert, weil der Zugriff blockiert ist.
+              {% elif _public_viewer %}
+                Öffentliche Ansicht: Dieses Projekt ist schreibgeschützt.
+              {% elif _project_role == 'viewer' %}
+                Du besitzt für dieses Projekt die Leserolle.
+              {% elif _read_only %}
+                Dieses Projekt ist schreibgeschützt.
               {% elif not _persistent %}
-                Dein Account ist noch nicht lokal verknüpft. Speichern ist deaktiviert.
+                Dein Account ist noch nicht gültig lokal verknüpft. Speichern ist deaktiviert.
               {% elif not _can_edit %}
-                Du hast für dieses Projekt nur Leserechte.
+                Du hast für dieses Projekt keine Bearbeitungsberechtigung.
               {% endif %}
             </p>
           {% endif %}
-
-          <div class="vp-project-form__actions">
-            <button
-              type="button"
-              class="vp-project-btn vp-project-btn--secondary"
-              data-project-reset
-              {% if not _form_can_edit %}disabled{% endif %}
-            >
-              Zurücksetzen
-            </button>
-
-            <button
-              type="submit"
-              class="vp-project-btn vp-project-btn--primary"
-              data-project-submit
-              {% if not _form_can_edit %}disabled{% endif %}
-            >
-              {% if _is_new %}
-                Projekt erstellen
-              {% else %}
-                Projekt speichern
-              {% endif %}
-            </button>
-          </div>
         </footer>
       </form>
     {% endif %}
   </main>
 
-  <script src="{{ url_for('static', filename='js/project/project_form.js') }}?v={{ _project_public_id|default('new', true) }}"></script>
-  <script src="{{ url_for('static', filename='js/project/project_publication.js') }}?v={{ _project_public_id|default('new', true) }}"></script>
-  <script src="{{ url_for('static', filename='js/project/project_team.js') }}?v={{ _project_public_id|default('new', true) }}"></script>
+  <script src="{{ url_for('static', filename='js/project/project_form.js') }}?v={{ _project_public_id|default('new', true)|e }}"></script>
+
+  {% if _show_management_sections %}
+    <script src="{{ url_for('static', filename='js/project/project_publication.js') }}?v={{ _project_public_id|default('new', true)|e }}"></script>
+    <script src="{{ url_for('static', filename='js/project/project_team.js') }}?v={{ _project_public_id|default('new', true)|e }}"></script>
+  {% endif %}
+
+  <script>
+    (function () {
+      "use strict";
+      try {
+        var config = window.VECTOPLAN_PROJECT_WORKSPACE_CONFIG || window.PROJECT_WORKSPACE_CONFIG || {};
+        if (config && typeof config.emitParentEvent === "function") {
+          config.emitParentEvent(
+            config.parentEvents && config.parentEvents.ready ? config.parentEvents.ready : "vectoplan:project:workspace:ready",
+            {
+              workspace: "project",
+              projectPublicId: config.projectPublicId || "",
+              isNew: !!config.isNew,
+              canEdit: !!config.canEdit,
+              readOnly: !!config.readOnly,
+              accessMode: config.accessMode || "",
+              projectRole: config.projectRole || "",
+              chunkReady: !!config.chunkReady,
+              chunkProvisioningStatus: config.chunkProvisioningStatus || "",
+              chunkAccessSyncStatus: config.chunkAccessSyncStatus || ""
+            }
+          );
+        }
+        document.documentElement.setAttribute("data-project-workspace-ready", "true");
+      } catch (_) {
+        /* Ready notification must never block the rendered form. */
+      }
+    })();
+  </script>
 </body>
 </html>

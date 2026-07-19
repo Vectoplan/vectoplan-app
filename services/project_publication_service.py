@@ -470,22 +470,126 @@ def _maybe_iso(value: Any) -> Optional[str]:
         return None
 
 
-def _is_demo_project(project: Any) -> bool:
+def _project_is_demo(project: Any) -> bool:
+    """
+    Robust demo-project detector.
+
+    This service historically called _project_is_demo(...), while an earlier
+    implementation only defined _is_demo_project(...). Keep both names so older
+    code paths and newly generated routes do not fail with NameError.
+
+    The detector accepts SQLAlchemy model objects, dict payloads and serialized
+    project dictionaries. Demo projects are never publishable and must never be
+    treated as public/persistent projects.
+    """
     try:
         if project is None:
             return False
 
-        if _safe_bool(getattr(project, "is_demo", False), False):
+        payload = _safe_dict(project)
+
+        def _value(*keys: str, default: Any = None) -> Any:
+            for key in keys:
+                try:
+                    if isinstance(payload, Mapping) and key in payload and payload.get(key) is not None:
+                        return payload.get(key)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(project, key):
+                        value = getattr(project, key)
+                        if value is not None:
+                            return value
+                except Exception:
+                    continue
+            return default
+
+        if _safe_bool(
+            _value(
+                "is_demo",
+                "isDemo",
+                "demo",
+                "demo_mode",
+                "demoMode",
+                "is_temporary_demo",
+                "isTemporaryDemo",
+                default=False,
+            ),
+            False,
+        ):
             return True
 
-        if _safe_str(getattr(project, "project_scope", ""), "", 40).lower() == "demo":
+        scope = _safe_str(
+            _value("project_scope", "projectScope", "scope", "kind", "type", default=""),
+            "",
+            120,
+        ).lower().replace("-", "_").replace(" ", "_")
+
+        if scope in {"demo", "demo_project", "temporary_demo", "ephemeral_demo", "guest_demo"}:
             return True
 
-        metadata = _safe_dict(getattr(project, "metadata_json", None))
-        demo_meta = _safe_dict(metadata.get("vectoplan_demo"))
-        return _safe_bool(demo_meta.get("enabled"), False)
+        status = _safe_str(_value("status", "lifecycle", "lifecycle_status", "lifecycleStatus", default=""), "", 120).lower()
+        if status in {"demo", "temporary_demo"}:
+            return True
+
+        metadata_candidates = []
+        for key in (
+            "metadata_json",
+            "metadataJson",
+            "metadata",
+            "settings",
+            "project_json",
+            "projectJson",
+            "extra",
+            "extras",
+        ):
+            try:
+                candidate = _value(key, default=None)
+                candidate_dict = _safe_dict(candidate)
+                if candidate_dict:
+                    metadata_candidates.append(candidate_dict)
+            except Exception:
+                continue
+
+        nested_keys = (
+            "vectoplan_demo",
+            "demo",
+            "demo_project",
+            "demoProject",
+            "project_demo",
+            "projectDemo",
+            "temporary_demo",
+            "temporaryDemo",
+        )
+
+        for metadata in metadata_candidates:
+            if _safe_bool(metadata.get("is_demo") or metadata.get("isDemo") or metadata.get("demo_mode") or metadata.get("demoMode"), False):
+                return True
+
+            for nested_key in nested_keys:
+                nested = _safe_dict(metadata.get(nested_key))
+                if not nested:
+                    continue
+                if _safe_bool(
+                    nested.get("enabled")
+                    or nested.get("active")
+                    or nested.get("is_demo")
+                    or nested.get("isDemo")
+                    or nested.get("demo")
+                    or nested.get("demo_mode")
+                    or nested.get("demoMode"),
+                    False,
+                ):
+                    return True
+
+        return False
     except Exception:
         return False
+
+
+def _is_demo_project(project: Any) -> bool:
+    """Backward-compatible alias for older call sites."""
+    return _project_is_demo(project)
 
 
 # ---------------------------------------------------------------------------
@@ -821,9 +925,135 @@ def _actor_is_demo(actor_context: Optional[Mapping[str, Any]]) -> bool:
     return _safe_bool(data.get("demo_mode") or data.get("is_demo") or data.get("demo"), default=False)
 
 
+def _actor_is_auth_unavailable(actor_context: Optional[Mapping[str, Any]]) -> bool:
+    data = _safe_dict(actor_context)
+    code = _safe_str(
+        data.get("blocked_reason")
+        or data.get("blockedReason")
+        or data.get("reason_code")
+        or data.get("reasonCode")
+        or data.get("auth_state")
+        or data.get("authState")
+        or data.get("code"),
+        "",
+        160,
+    ).lower()
+    blocked_kind = _safe_str(data.get("blocked_kind") or data.get("blockedKind"), "", 120).lower()
+    status_code = _safe_int(data.get("denial_status_code") or data.get("denialStatusCode") or data.get("status_code") or data.get("statusCode"), default=None)
+
+    return bool(
+        _safe_bool(data.get("auth_unavailable") or data.get("authUnavailable"), default=False)
+        or _safe_bool(data.get("service_unavailable") or data.get("serviceUnavailable"), default=False)
+        or blocked_kind == "auth_unavailable"
+        or code in {
+            "auth_unavailable",
+            "auth_service_unavailable",
+            "service_unavailable",
+            "dependency_unavailable",
+            "upstream_unavailable",
+            "dns_failed",
+            "connection_refused",
+            "timeout",
+            "http_5xx",
+            "invalid_payload",
+            "not_configured",
+            "request_failed",
+            "requests_unavailable",
+        }
+        or status_code == 503
+    )
+
+
+def _actor_is_user_blocked(actor_context: Optional[Mapping[str, Any]]) -> bool:
+    data = _safe_dict(actor_context)
+    if _actor_is_auth_unavailable(data):
+        return False
+
+    code = _safe_str(
+        data.get("blocked_reason")
+        or data.get("blockedReason")
+        or data.get("reason_code")
+        or data.get("reasonCode")
+        or data.get("auth_state")
+        or data.get("authState")
+        or data.get("code"),
+        "",
+        160,
+    ).lower()
+    blocked_kind = _safe_str(data.get("blocked_kind") or data.get("blockedKind"), "", 120).lower()
+
+    return bool(
+        _safe_bool(data.get("user_blocked") or data.get("userBlocked"), default=False)
+        or _safe_bool(data.get("banned") or data.get("is_banned") or data.get("isBanned"), default=False)
+        or blocked_kind in {"user_blocked", "account_blocked", "blocked", "banned"}
+        or code in {
+            "blocked",
+            "banned",
+            "user_blocked",
+            "user_banned",
+            "account_blocked",
+            "account_banned",
+            "subscription_blocked",
+            "plan_blocked",
+            "security_blocked",
+            "disabled",
+            "inactive",
+            "suspended",
+            "deleted",
+            "locked",
+        }
+    )
+
+
+def _actor_block_status_code(actor_context: Optional[Mapping[str, Any]]) -> int:
+    data = _safe_dict(actor_context)
+    if _actor_is_auth_unavailable(data):
+        return 503
+
+    explicit = _safe_int(data.get("denial_status_code") or data.get("denialStatusCode") or data.get("status_code") or data.get("statusCode"), default=None)
+    if explicit:
+        return explicit
+
+    if _actor_is_user_blocked(data) or _safe_bool(data.get("access_blocked") or data.get("accessBlocked") or data.get("blocked"), False):
+        return 403
+
+    return 403
+
+
+def _actor_block_code(actor_context: Optional[Mapping[str, Any]], default: str = "auth_blocked") -> str:
+    data = _safe_dict(actor_context)
+
+    if _actor_is_auth_unavailable(data):
+        return _safe_str(
+            data.get("blocked_reason")
+            or data.get("blockedReason")
+            or data.get("auth_state")
+            or data.get("authState")
+            or data.get("code"),
+            "auth_service_unavailable",
+            160,
+        )
+
+    if _actor_is_user_blocked(data):
+        return _safe_str(
+            data.get("blocked_reason")
+            or data.get("blockedReason")
+            or data.get("code"),
+            "user_blocked",
+            160,
+        )
+
+    return _safe_str(data.get("blocked_reason") or data.get("blockedReason") or data.get("code"), default, 160)
+
+
 def _actor_is_blocked(actor_context: Optional[Mapping[str, Any]]) -> bool:
     data = _safe_dict(actor_context)
-    return _safe_bool(data.get("blocked"), default=False)
+    return bool(
+        _actor_is_auth_unavailable(data)
+        or _actor_is_user_blocked(data)
+        or _safe_bool(data.get("access_blocked") or data.get("accessBlocked"), default=False)
+        or _safe_bool(data.get("blocked"), default=False)
+    )
 
 
 def _actor_is_authenticated(actor_context: Optional[Mapping[str, Any]]) -> bool:
@@ -940,14 +1170,30 @@ def _can_manage_project(project: Any, actor_context: Optional[Mapping[str, Any]]
 
 
 def _access_payload(project: Any, actor_context: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    data = _safe_dict(actor_context)
+    auth_unavailable = _actor_is_auth_unavailable(data)
+    user_blocked = _actor_is_user_blocked(data)
+    blocked = _actor_is_blocked(data)
+    status_code = _actor_block_status_code(data) if blocked else 200
+    blocked_reason = _actor_block_code(data, default="access_blocked") if blocked else None
+
     return {
-        "authenticated": _actor_is_authenticated(actor_context),
-        "demo_mode": _actor_is_demo(actor_context),
-        "blocked": _actor_is_blocked(actor_context),
-        "blocked_reason": _safe_dict(actor_context).get("blocked_reason"),
-        "user_id": _actor_user_id(actor_context),
-        "can_view": _can_view_project(project, actor_context),
-        "can_manage": _can_manage_project(project, actor_context),
+        "authenticated": _actor_is_authenticated(data),
+        "demo_mode": _actor_is_demo(data),
+        "blocked": blocked,
+        "auth_unavailable": auth_unavailable,
+        "authUnavailable": auth_unavailable,
+        "user_blocked": user_blocked,
+        "userBlocked": user_blocked,
+        "access_blocked": blocked,
+        "accessBlocked": blocked,
+        "blocked_reason": blocked_reason,
+        "blockedReason": blocked_reason,
+        "status_code": status_code,
+        "statusCode": status_code,
+        "user_id": _actor_user_id(data),
+        "can_view": _can_view_project(project, data),
+        "can_manage": _can_manage_project(project, data),
     }
 
 
@@ -1601,7 +1847,7 @@ class ProjectPublicationService:
                 message="Der Zugriff ist gesperrt.",
                 project=project,
                 access=access,
-                status_code=403,
+                status_code=_safe_int(access.get("status_code"), 403) or 403,
             )
 
         if _project_is_demo(project):
@@ -1714,7 +1960,7 @@ class ProjectPublicationService:
                 message="Der Zugriff ist gesperrt.",
                 project=project,
                 access=access,
-                status_code=403,
+                status_code=_safe_int(access.get("status_code"), 403) or 403,
             )
 
         if _project_is_demo(project) or _actor_is_demo(actor_context):
@@ -1972,7 +2218,7 @@ class ProjectPublicationService:
                 message="Der Zugriff ist gesperrt.",
                 project=project,
                 access=access,
-                status_code=403,
+                status_code=_safe_int(access.get("status_code"), 403) or 403,
                 data={"workspace": workspace_key or _safe_str(workspace)},
             )
 

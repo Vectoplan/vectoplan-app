@@ -25,6 +25,13 @@
 {% set project_sidebar_raw = project_sidebar|default({}, true) %}
 {% set project_sidebar_obj = project_sidebar_raw if project_sidebar_raw is mapping else {} %}
 
+{% set notice_stream_raw = notice_stream|default({}, true) %}
+{% set notice_stream_obj = notice_stream_raw if notice_stream_raw is mapping else {} %}
+{% set notice_stream_enabled_raw = notice_stream_obj.get('enabled', false) %}
+{% set notice_stream_enabled = true if notice_stream_enabled_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set notice_stream_kind = notice_stream_obj.get('kind', '') %}
+{% set notice_stream_severity = notice_stream_obj.get('severity', '') %}
+
 {% set project_public_id_raw = project_obj.get('public_id', project_obj.get('publicId', project_obj.get('project_public_id', project_obj.get('projectPublicId', 'new')))) %}
 {% set project_public_id = project_public_id_raw if project_public_id_raw not in ['', none] else 'new' %}
 {% set project_public_id_q = project_public_id|string|urlencode %}
@@ -59,15 +66,29 @@
 {% set authenticated_raw = auth_obj.get('authenticated', auth_obj.get('is_authenticated', auth_obj.get('isAuthenticated', false))) %}
 {% set is_authenticated = true if authenticated_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 
-{% set demo_mode_raw = demo_mode|default(auth_obj.get('demo_mode', auth_obj.get('demoMode', auth_obj.get('is_demo', project_obj.get('demo_mode', project_obj.get('demoMode', false))))), true) %}
+{% set demo_mode_fallback = auth_obj.get('demo_mode', auth_obj.get('demoMode', auth_obj.get('is_demo', project_obj.get('demo_mode', project_obj.get('demoMode', false))))) %}
+{% set demo_mode_raw = demo_mode|default(demo_mode_fallback, true) %}
 {% set is_demo_mode = true if demo_mode_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 
 {% set persistent_raw = auth_obj.get('persistent', auth_obj.get('can_persist_projects', auth_obj.get('canPersistProjects', true if is_authenticated and not is_demo_mode else false))) %}
 {% set is_persistent = true if persistent_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 
-{% set public_viewer_raw = access_obj.get('is_public_viewer', access_obj.get('is_unlisted_viewer', false)) %}
+{% set public_viewer_raw = access_obj.get('is_public_viewer', access_obj.get('public_viewer', access_obj.get('is_unlisted_viewer', false))) %}
 {% set public_viewer_by_access = true if public_viewer_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set is_public_viewer = true if public_viewer_by_access or not is_authenticated else false %}
+{% set is_public_viewer = true if public_viewer_by_access and not is_authenticated and not is_demo_mode else false %}
+
+{% set read_only_raw = access_obj.get('read_only', access_obj.get('readOnly', true if is_public_viewer else false)) %}
+{% set is_read_only = true if read_only_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+
+{% if is_demo_mode %}
+  {% set access_mode = 'demo' %}
+{% elif is_public_viewer %}
+  {% set access_mode = 'public' %}
+{% elif is_authenticated %}
+  {% set access_mode = 'authenticated' %}
+{% else %}
+  {% set access_mode = 'anonymous' %}
+{% endif %}
 
 {% set publication_raw = project_obj.get('publication', {}) %}
 {% set publication_obj = publication_raw if publication_raw is mapping else {} %}
@@ -240,6 +261,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}?v={{ chat_id_s }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/project_sidebar.css') }}?v={{ chat_id_s }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ project_public_id|default('new', true) }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/notice_stream.css') }}?v={{ project_public_id|default('new', true) }}">
 
   <script>
     (function () {
@@ -260,6 +282,12 @@
         var projectSidebarStorageKey = "vectoplan.projectSidebar.v1";
         var projectSidebarCurrentTitle = "Aktuelles Projekt";
         var projectSidebarCurrentSubtitle = "Aktiver Workspace";
+
+        var noticeStream = {};
+        var noticeStreamEnabled = {{ notice_stream_enabled|tojson }};
+        var accessMode = {{ access_mode|tojson }};
+        var publicViewer = {{ is_public_viewer|tojson }};
+        var readOnly = {{ is_read_only|tojson }};
 
         var projectPagePath = {{ resolved_project_url|tojson }};
         var projectPublicUrl = {{ resolved_project_public_url|tojson }};
@@ -294,6 +322,17 @@
           }
         } catch (e) {
           currentUser = {};
+        }
+
+        try {
+          noticeStream = {{ notice_stream_obj|tojson }};
+          if (!noticeStream || typeof noticeStream !== "object" || Array.isArray(noticeStream)) {
+            noticeStream = {};
+          }
+          noticeStreamEnabled = !!noticeStream.enabled;
+        } catch (e) {
+          noticeStream = {};
+          noticeStreamEnabled = false;
         }
 
         try {
@@ -436,6 +475,13 @@
           authenticated: {{ is_authenticated|tojson }},
           demoMode: demoMode,
           persistent: persistent,
+          accessMode: accessMode,
+          publicViewer: publicViewer,
+          readOnly: readOnly,
+
+          noticeStream: noticeStream,
+          noticeStreamEnabled: noticeStreamEnabled,
+          uiNotice: noticeStream,
 
           project: currentProject,
           currentProject: currentProject,
@@ -634,7 +680,7 @@
 <body>
   <noscript>JavaScript ist erforderlich.</noscript>
 
-  <main class="app-wrap vp-project-shell vp-chat-viewer-with-project-sidebar"
+  <main class="app-wrap vp-project-shell vp-chat-viewer-with-project-sidebar{% if notice_stream_enabled %} vp-project-shell--has-notice{% endif %}"
         role="main"
         data-chat-id="{{ chat_id_s }}"
         data-conversation-id="{{ chat_id_s }}"
@@ -648,6 +694,12 @@
         data-project-visibility="{{ project_visibility }}"
         data-demo-mode="{{ 'true' if is_demo_mode else 'false' }}"
         data-persistent="{{ 'true' if is_persistent else 'false' }}"
+        data-access-mode="{{ access_mode }}"
+        data-public-viewer="{{ 'true' if is_public_viewer else 'false' }}"
+        data-read-only="{{ 'true' if is_read_only else 'false' }}"
+        data-notice-stream-enabled="{{ 'true' if notice_stream_enabled else 'false' }}"
+        data-notice-kind="{{ notice_stream_kind }}"
+        data-notice-severity="{{ notice_stream_severity }}"
         data-default-mode="{{ resolved_default_mode }}"
         data-workspace-mode="{{ resolved_workspace_mode }}"
         data-project-page-path="{{ resolved_project_url }}"
@@ -664,11 +716,17 @@
         data-project-sidebar-max-width="{{ project_sidebar_max_width }}"
         data-project-sidebar-collapsed-width="{{ project_sidebar_collapsed_width }}">
 
+    {% if notice_stream_enabled %}
+      <div class="vp-shell-notice-row"
+           data-vp-shell-notice-row="true"
+           style="grid-column: 1 / -1; width: 100%; min-width: 0;">
+        {% include "partials/notice_stream.html" ignore missing %}
+      </div>
+    {% endif %}
+
     {% include "partials/project_sidebar.html" ignore missing %}
 
     <aside class="viewer-panel" id="viewer-panel" aria-label="Arbeitsbereich">
-      {% include "partials/demo_banner.html" ignore missing %}
-
       <div class="viewer-toolbar">
         <div class="toolbar-left">
           <div role="group" aria-label="Arbeitsbereich" class="mode-group">
