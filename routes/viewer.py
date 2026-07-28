@@ -2513,6 +2513,7 @@ def _load_project_payload(
     )
     shell_access = _access_context_to_dict(shell_access_context)
     shell_public_viewer = _access_context_public_viewer(shell_access_context)
+    shell_demo_mode = _access_context_access_mode(shell_access_context) == "demo"
     effective_user = _effective_current_user_for_access(current_user, shell_access_context)
 
     if shell_access_context is not None and not _access_context_allowed(shell_access_context):
@@ -2529,7 +2530,7 @@ def _load_project_payload(
         )
 
     try:
-        if get_project_result is not None and not shell_public_viewer:
+        if get_project_result is not None and not shell_public_viewer and not shell_demo_mode:
             result = get_project_result(
                 _safe_str(project_id, "", 160),
                 user_id=user_id,

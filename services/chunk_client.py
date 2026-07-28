@@ -845,6 +845,7 @@ class ChunkClientConfig:
     status_path: str = "/projects/_status"
     access_path: str = "/projects/{chunk_project_id}/access"
     access_initialize_path: str = "/projects/{chunk_project_id}/access/initialize"
+    access_projection_path: str = "/projects/{chunk_project_id}/access/projection"
     assignments_path: str = "/projects/{chunk_project_id}/assignments"
     transfer_owner_path: str = "/projects/{chunk_project_id}/access/transfer-owner"
 
@@ -1049,6 +1050,10 @@ class ChunkClientConfig:
             access_initialize_path=_config_str(
                 "VECTOPLAN_CHUNK_ACCESS_INITIALIZE_API_PATH",
                 "/projects/{chunk_project_id}/access/initialize",
+            ),
+            access_projection_path=_config_str(
+                "VECTOPLAN_CHUNK_ACCESS_PROJECTION_API_PATH",
+                "/projects/{chunk_project_id}/access/projection",
             ),
             assignments_path=_config_str(
                 "VECTOPLAN_CHUNK_ASSIGNMENTS_API_PATH",
@@ -1832,6 +1837,35 @@ class ChunkClient:
             idempotency_key=idempotency_key or _idempotency_key(
                 seed=f"access-init:{chunk_project_id}:{owner}"
             ),
+            raise_on_error=raise_on_error,
+            timeout_seconds=self.config.access_sync_timeout_seconds,
+            retries=self.config.access_sync_retries,
+            retry_seconds=self.config.access_sync_retry_seconds,
+        )
+        self._invalidate_project_access_cache(chunk_project_id)
+        return result
+
+    def sync_project_access_projection(
+        self,
+        chunk_project_id: str,
+        payload: Mapping[str, Any],
+        *,
+        request_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        raise_on_error: bool = False,
+    ) -> ChunkClientResult:
+        path = _format_path(
+            self.config.access_projection_path,
+            chunk_project_id=chunk_project_id,
+        )
+        result = self.request_json(
+            "PUT",
+            path,
+            body=dict(payload),
+            request_id=request_id,
+            correlation_id=correlation_id,
+            idempotency_key=idempotency_key,
             raise_on_error=raise_on_error,
             timeout_seconds=self.config.access_sync_timeout_seconds,
             retries=self.config.access_sync_retries,

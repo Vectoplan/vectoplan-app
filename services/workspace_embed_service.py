@@ -274,6 +274,7 @@ SECURITY_CONTROL_QUERY_KEYS = frozenset(
         "universe_id",
         "world_id",
         "workspace",
+        "vp_access_ticket",
     }
 )
 
@@ -1009,6 +1010,52 @@ def _request_url_root(request_obj: Any = None) -> str:
         return ""
 
 
+_LOOPBACK_BROWSER_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _match_loopback_target_host(value: Any, request_obj: Any = None) -> str:
+    """Keep local iframe hops on one browser site.
+
+    Local development commonly opens the App through either ``localhost`` or
+    ``127.0.0.1``. Cookies are host-bound, so mixing those names between App
+    and Editor turns the Editor session exchange into a third-party-cookie
+    flow. Only the exact loopback allowlist may be substituted; arbitrary Host
+    headers never influence configured public targets.
+    """
+
+    target = _safe_str(value, "", 12000)
+    if not target or not _config_bool("VECTOPLAN_EMBED_MATCH_LOOPBACK_HOST", True):
+        return target
+
+    try:
+        target_parts = urlsplit(target)
+        request_parts = urlsplit(_request_url_root(request_obj))
+        target_host = _safe_str(target_parts.hostname, "", 255).lower()
+        request_host = _safe_str(request_parts.hostname, "", 255).lower()
+        if (
+            target_parts.scheme not in {"http", "https"}
+            or target_host not in _LOOPBACK_BROWSER_HOSTS
+            or request_host not in _LOOPBACK_BROWSER_HOSTS
+        ):
+            return target
+
+        rendered_host = f"[{request_host}]" if ":" in request_host else request_host
+        netloc = rendered_host
+        if target_parts.port is not None:
+            netloc = f"{rendered_host}:{target_parts.port}"
+        return urlunsplit(
+            (
+                target_parts.scheme,
+                netloc,
+                target_parts.path,
+                target_parts.query,
+                target_parts.fragment,
+            )
+        )
+    except Exception:
+        return target
+
+
 def _configured_app_public_url() -> str:
     explicit = (
         _config_str("VECTOPLAN_APP_PUBLIC_URL", "", 4000)
@@ -1245,6 +1292,25 @@ def _current_user_payload(current_user: Any = None) -> Dict[str, Any]:
         if key not in user and key in nested:
             user[key] = nested.get(key)
     return user
+
+def _canonical_auth_user_id(current_user: Mapping[str, Any]) -> str:
+    user = _safe_dict(current_user)
+    auth = _safe_dict(user.get("auth"))
+    return _safe_str(
+        _first_value(
+            user.get("canonical_user_id"),
+            user.get("canonicalUserId"),
+            user.get("auth_user_id"),
+            user.get("authUserId"),
+            auth.get("canonical_user_id"),
+            auth.get("canonicalUserId"),
+            auth.get("auth_user_id"),
+            auth.get("authUserId"),
+            default="",
+        ),
+        "",
+        180,
+    )
 
 
 def _project_public_id(project: Any = None, project_payload: Optional[Mapping[str, Any]] = None) -> str:
@@ -1937,20 +2003,38 @@ def is_external_workspace(workspace: Any) -> bool:
 # -----------------------------------------------------------------------------
 
 def _public_editor_embed_verified(project_payload: Mapping[str, Any]) -> bool:
-    if not _config_bool("VECTOPLAN_EDITOR_PUBLIC_VIEWER_EMBED_ENABLED", False):
+    if not _config_bool("VECTOPLAN_EDITOR_PUBLIC_VIEWER_EMBED_ENABLED", True):
         return False
-    access = _project_access_payload(project_payload)
-    publication = _safe_dict(project_payload.get("publication"))
-    return _safe_bool(
+    payload = _safe_dict(project_payload)
+    publication = _safe_dict(payload.get("publication"))
+    visibility = _safe_str(
         _first_value(
-            access.get("public_embed_verified"),
-            access.get("publicEmbedVerified"),
-            access.get("signed_readonly_context_verified"),
-            publication.get("public_embed_verified"),
+            payload.get("visibility"),
+            publication.get("visibility"),
+            default="private",
+        ),
+        "private",
+        40,
+    ).lower()
+    published = _safe_dict(
+        publication.get("published_workspaces")
+        or publication.get("effective_published_workspaces")
+        or publication.get("effectivePublishedWorkspaces")
+        or payload.get("effective_published_workspaces")
+        or payload.get("effectivePublishedWorkspaces")
+        or publication.get("publishedWorkspaces")
+        or payload.get("published_workspaces")
+        or payload.get("publishedWorkspaces")
+    )
+    editor_published = _safe_bool(
+        _first_value(
+            published.get(WORKSPACE_EDITOR3D),
+            publication.get(WORKSPACE_EDITOR3D),
             default=False,
         ),
         False,
     )
+    return bool(visibility in {"public", "unlisted"} and editor_published)
 
 
 def _workspace_gate(
@@ -2017,6 +2101,7 @@ def _base_embed_params(
     project_payload: Mapping[str, Any],
     access: WorkspaceAccessContract,
     chunk: Mapping[str, Any],
+    current_user: Mapping[str, Any],
     request_obj: Any,
     include_context: bool,
     include_return_url: bool,
@@ -2061,6 +2146,27 @@ def _base_embed_params(
         include_chunk_hints = _config_bool("VECTOPLAN_EMBED_INCLUDE_CHUNK_QUERY_PARAMS", True)
     if include_chunk_hints and workspace == WORKSPACE_EDITOR3D:
         params.update(_chunk_hint_payload(chunk, access))
+        from services.editor_access_ticket import mint_editor_access_ticket
+
+        params["vp_access_ticket"] = mint_editor_access_ticket(
+            {
+                "workspace": WORKSPACE_EDITOR3D,
+                "app_project_id": project_public_id,
+                "chunk_project_id": _safe_str(chunk.get("chunk_project_id"), "", 240),
+                "world_id": _safe_str(chunk.get("chunk_world_id"), "", 240),
+                "universe_id": _safe_str(chunk.get("chunk_universe_id"), "", 240),
+                "auth_user_id": _canonical_auth_user_id(current_user),
+                "role": access.role or (ROLE_VIEWER if access.public_viewer else ""),
+                "public": bool(access.public_viewer),
+                "demo": bool(access.demo_mode),
+                "read_only": bool(access.read_only),
+                "can_view": bool(access.can_view),
+                "can_edit": bool(access.can_edit),
+                "can_manage": bool(access.can_manage),
+                "can_command": bool(access.can_command),
+                "can_materialize": bool(access.can_materialize),
+            }
+        )
 
     return _clean_query_params(params, allow_security_controls=True)
 
@@ -2138,6 +2244,7 @@ def build_workspace_embed_result(
             chunk=chunk,
             request_obj=request_obj,
             include_context=include_context,
+            current_user=user,
             include_return_url=include_return_url,
             include_chunk_hints=include_chunk_hints,
             prefer_request_host=prefer_request_host,
@@ -2146,7 +2253,11 @@ def build_workspace_embed_result(
         params = dict(extras)
         params.update(base_params)  # Security contract overwrites every external value.
         params = _clean_query_params(params, allow_security_controls=True)
-        url = _append_query_params(target.public_route_url, params)
+        request_target_url = _match_loopback_target_host(
+            target.public_route_url,
+            request_obj,
+        )
+        url = _append_query_params(request_target_url, params)
         if not url:
             return failure("url_build_failed", 500, "The embed URL could not be built.", target=target)
 
@@ -2160,7 +2271,7 @@ def build_workspace_embed_result(
             ok=True,
             workspace=normalized_workspace,
             url=url,
-            target_url=target.public_route_url,
+            target_url=request_target_url,
             public_base_url=target.public_base_url,
             route=target.route,
             code="ok",

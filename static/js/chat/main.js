@@ -72,6 +72,7 @@ const MODE_TITLE = {
 
 const MODES_REQUIRING_CONFIGURED_PROJECT = new Set(["map", "3d", "2d", "lv"]);
 const MODES_REQUIRING_EXISTING_PROJECT = new Set(["map", "3d", "2d", "lv", "versions", "admin"]);
+const PROJECT_PUBLIC_ID_RE = /^(?:prj|demo)_[A-Za-z0-9_-]{8,160}$/;
 
 
 /* ───────────────────────── Boot safety ───────────────────────── */
@@ -1133,6 +1134,66 @@ function extractProjectFromDetail(detail) {
   }
 }
 
+function projectPublicIdFromDetail(detail = {}) {
+  try {
+    const project = extractProjectFromDetail(detail) || {};
+    const candidate = String(
+      project.public_id ||
+        project.publicId ||
+        project.project_public_id ||
+        project.projectPublicId ||
+        detail.project_public_id ||
+        detail.projectPublicId ||
+        detail.public_id ||
+        detail.publicId ||
+        projectPublicId() ||
+        ""
+    ).trim();
+
+    return PROJECT_PUBLIC_ID_RE.test(candidate) ? candidate : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function platformParentOrigin() {
+  try {
+    if (!window.parent || window.parent === window || !document.referrer) return "";
+
+    const parsed = new URL(document.referrer, window.location.href);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+
+    return parsed.origin;
+  } catch (_) {
+    return "";
+  }
+}
+
+function relayProjectNavigation(detail = {}, source = "shell") {
+  try {
+    const publicId = projectPublicIdFromDetail(detail);
+    const targetOrigin = platformParentOrigin();
+
+    if (!publicId || !targetOrigin) return false;
+
+    window.parent.postMessage(
+      {
+        type: "vectoplan:project:navigation",
+        kind: "vectoplan:project:navigation",
+        source: "vectoplan-app.shell",
+        detail: {
+          projectPublicId: publicId,
+          source: String(source || "shell"),
+        },
+      },
+      targetOrigin
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function handleProjectSaved(detail = {}, eventType = "vectoplan:project:saved") {
   try {
     const project = extractProjectFromDetail(detail);
@@ -1161,6 +1222,7 @@ function handleProjectSaved(detail = {}, eventType = "vectoplan:project:saved") 
       };
     } catch (_) {}
 
+    relayProjectNavigation(detail, eventType);
     showStatus("");
   } catch (error) {
     try {
@@ -1806,6 +1868,34 @@ function wireProjectEventBridge() {
         if (!data || typeof data !== "object") return;
 
         const type = String(data.type || data.kind || "").trim();
+        const trustedParentOrigin = platformParentOrigin();
+        if (
+          type === "vectoplan:platform:request-project" &&
+          window.parent &&
+          window.parent !== window &&
+          event?.source === window.parent &&
+          !!trustedParentOrigin &&
+          event?.origin === trustedParentOrigin
+        ) {
+          relayProjectNavigation(
+            {
+              projectPublicId: projectPublicId(),
+              project: currentProject(),
+            },
+            "platform_request"
+          );
+          return;
+        }
+
+        const frame = viewerFrame();
+        if (
+          !frame ||
+          !frame.contentWindow ||
+          event?.source !== frame.contentWindow ||
+          event?.origin !== window.location.origin
+        ) {
+          return;
+        }
 
         if (!type.startsWith("vectoplan:project:")) return;
 
@@ -2640,6 +2730,15 @@ async function boot() {
   safeCall("wireHotkeys", wireHotkeys);
 
   safeCall("wireProjectEventBridge", wireProjectEventBridge);
+  safeCall("announceCurrentProject", () => {
+    relayProjectNavigation(
+      {
+        projectPublicId: projectPublicId(),
+        project: currentProject(),
+      },
+      "shell_ready"
+    );
+  });
   safeCall("wireWorkspaceToolbar", wireWorkspaceToolbar);
   safeCall("wireVersionsDropdown", wireVersionsDropdown);
 
