@@ -706,7 +706,7 @@ def _create_system_blueprint() -> Blueprint:
 # Security headers
 # ─────────────────────────────────────────────────────────────
 
-def _allowed_frame_ancestors(app: Flask) -> str:
+def _allowed_frame_ancestors(app: Flask, *, desktop_embed: bool = False) -> str:
     allowed = (
         "'self' "
         "http://localhost:5103 "
@@ -714,6 +714,11 @@ def _allowed_frame_ancestors(app: Flask) -> str:
         "http://localhost:5200 "
         "http://127.0.0.1:5200"
     )
+    if desktop_embed:
+        # The native launcher intentionally serves its trusted shell from a
+        # packaged file:// URL. Only the explicit allow_embed=1 request may
+        # therefore be framed by a local desktop document.
+        allowed = f"{allowed} file:"
 
     try:
         extra = (
@@ -740,13 +745,15 @@ def _allowed_frame_ancestors(app: Flask) -> str:
     return " ".join(deduped or ["'self'"])
 
 
-def _request_allows_embed() -> bool:
-    allow_embed = False
-
+def _request_allows_desktop_embed() -> bool:
     try:
-        allow_embed = request.args.get("allow_embed") == "1"
+        return request.args.get("allow_embed") == "1"
     except Exception:
-        allow_embed = False
+        return False
+
+
+def _request_allows_embed() -> bool:
+    allow_embed = _request_allows_desktop_embed()
 
     try:
         path = str(request.path or "")
@@ -912,11 +919,16 @@ def create_app() -> Flask:
             pass
 
         try:
-            frame_ancestors = "frame-ancestors " + _allowed_frame_ancestors(app)
+            allow_embed = _request_allows_embed()
+            desktop_embed = _request_allows_desktop_embed()
+            frame_ancestors = "frame-ancestors " + _allowed_frame_ancestors(
+                app,
+                desktop_embed=desktop_embed,
+            )
             existing_csp = str(resp.headers.get("Content-Security-Policy", "") or "")
             resp.headers["Content-Security-Policy"] = _merge_csp_frame_ancestors(existing_csp, frame_ancestors)
 
-            if _request_allows_embed():
+            if allow_embed:
                 try:
                     resp.headers.pop("X-Frame-Options", None)
                 except Exception:

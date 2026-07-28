@@ -2017,11 +2017,11 @@ def _public_editor_embed_verified(project_payload: Mapping[str, Any]) -> bool:
         40,
     ).lower()
     published = _safe_dict(
-        publication.get("published_workspaces")
-        or publication.get("effective_published_workspaces")
+        publication.get("effective_published_workspaces")
         or publication.get("effectivePublishedWorkspaces")
         or payload.get("effective_published_workspaces")
         or payload.get("effectivePublishedWorkspaces")
+        or publication.get("published_workspaces")
         or publication.get("publishedWorkspaces")
         or payload.get("published_workspaces")
         or payload.get("publishedWorkspaces")

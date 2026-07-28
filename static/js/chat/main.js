@@ -73,6 +73,7 @@ const MODE_TITLE = {
 const MODES_REQUIRING_CONFIGURED_PROJECT = new Set(["map", "3d", "2d", "lv"]);
 const MODES_REQUIRING_EXISTING_PROJECT = new Set(["map", "3d", "2d", "lv", "versions", "admin"]);
 const PROJECT_PUBLIC_ID_RE = /^(?:prj|demo)_[A-Za-z0-9_-]{8,160}$/;
+const PLATFORM_PARENT_ORIGIN_SESSION_KEY = "vectoplan.platform.parentOrigin.v1";
 
 
 /* ───────────────────────── Boot safety ───────────────────────── */
@@ -1156,14 +1157,41 @@ function projectPublicIdFromDetail(detail = {}) {
   }
 }
 
-function platformParentOrigin() {
+function normalizePlatformParentOrigin(value) {
   try {
-    if (!window.parent || window.parent === window || !document.referrer) return "";
-
-    const parsed = new URL(document.referrer, window.location.href);
+    const parsed = new URL(String(value || ""), window.location.href);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    if (parsed.origin === window.location.origin) return "";
 
     return parsed.origin;
+  } catch (_) {
+    return "";
+  }
+}
+
+function platformParentOrigin(candidateOrigin = "") {
+  try {
+    if (!window.parent || window.parent === window) return "";
+
+    const candidate = normalizePlatformParentOrigin(candidateOrigin);
+    const referrerOrigin = normalizePlatformParentOrigin(document.referrer);
+
+    if (referrerOrigin) {
+      try {
+        window.sessionStorage.setItem(PLATFORM_PARENT_ORIGIN_SESSION_KEY, referrerOrigin);
+      } catch (_) {}
+
+      return !candidate || candidate === referrerOrigin ? referrerOrigin : "";
+    }
+
+    let storedOrigin = "";
+    try {
+      storedOrigin = normalizePlatformParentOrigin(
+        window.sessionStorage.getItem(PLATFORM_PARENT_ORIGIN_SESSION_KEY)
+      );
+    } catch (_) {}
+
+    return storedOrigin && (!candidate || candidate === storedOrigin) ? storedOrigin : "";
   } catch (_) {
     return "";
   }
@@ -1868,7 +1896,7 @@ function wireProjectEventBridge() {
         if (!data || typeof data !== "object") return;
 
         const type = String(data.type || data.kind || "").trim();
-        const trustedParentOrigin = platformParentOrigin();
+        const trustedParentOrigin = platformParentOrigin(event?.origin);
         if (
           type === "vectoplan:platform:request-project" &&
           window.parent &&
@@ -2015,11 +2043,13 @@ function wireProjectSidebarEvents(root) {
 
     safeOn(root, "vectoplan:project-sidebar:item-selected", (event) => {
       try {
+        const detail = event?.detail || {};
         uiState.lastProjectSidebarSelection = {
-          item: event?.detail?.item || null,
-          href: event?.detail?.href || "",
+          item: detail.item || null,
+          href: detail.href || "",
           selectedAt: Date.now(),
         };
+        relayProjectNavigation(detail, "project_sidebar");
       } catch (_) {}
     });
 
