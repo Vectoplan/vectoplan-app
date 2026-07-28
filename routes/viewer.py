@@ -1142,6 +1142,9 @@ def _public_editor_embed_verified(
     access: Mapping[str, Any],
     workspace_access: Mapping[str, Any],
 ) -> bool:
+    if not _config_bool("VECTOPLAN_EDITOR_PUBLIC_VIEWER_EMBED_ENABLED", True):
+        return False
+
     publication = _safe_dict(project_payload.get("publication"))
     for source in (workspace_access, access, publication, project_payload):
         for key in (
@@ -1154,7 +1157,37 @@ def _public_editor_embed_verified(
         ):
             if key in source:
                 return _safe_bool(source.get(key), False)
-    return False
+
+    visibility = _safe_str(
+        workspace_access.get("visibility")
+        or publication.get("visibility")
+        or project_payload.get("visibility"),
+        "private",
+        40,
+    ).lower()
+    workspace_published = _safe_bool(
+        workspace_access.get("workspace_published")
+        or workspace_access.get("workspacePublished"),
+        False,
+    )
+    publication_enabled = _safe_bool(
+        workspace_access.get("publication_enabled")
+        or workspace_access.get("publicationEnabled"),
+        False,
+    )
+
+    return bool(
+        visibility in {"public", "unlisted"}
+        and publication_enabled
+        and workspace_published
+        and _safe_bool(access.get("public_viewer"), False)
+        and _safe_bool(access.get("read_only"), True)
+        and _safe_bool(access.get("can_view"), False)
+        and not _safe_bool(access.get("can_edit"), False)
+        and not _safe_bool(access.get("can_manage"), False)
+        and not _safe_bool(access.get("can_command"), False)
+        and not _safe_bool(access.get("can_materialize"), False)
+    )
 
 
 def _workspace_runtime_gate(
@@ -2513,6 +2546,7 @@ def _load_project_payload(
     )
     shell_access = _access_context_to_dict(shell_access_context)
     shell_public_viewer = _access_context_public_viewer(shell_access_context)
+    shell_demo_mode = _access_context_access_mode(shell_access_context) == "demo"
     effective_user = _effective_current_user_for_access(current_user, shell_access_context)
 
     if shell_access_context is not None and not _access_context_allowed(shell_access_context):
@@ -2529,7 +2563,7 @@ def _load_project_payload(
         )
 
     try:
-        if get_project_result is not None and not shell_public_viewer:
+        if get_project_result is not None and not shell_public_viewer and not shell_demo_mode:
             result = get_project_result(
                 _safe_str(project_id, "", 160),
                 user_id=user_id,
@@ -2657,6 +2691,9 @@ def _apply_publication_payload(
             )
             publication_result_payload = _safe_dict(publication_result)
             publication_payload = _safe_dict(publication_result_payload.get("publication"))
+            nested_publication = _safe_dict(publication_payload.get("publication"))
+            if nested_publication:
+                publication_payload = nested_publication
 
             if publication_payload:
                 project_payload["publication"] = publication_payload

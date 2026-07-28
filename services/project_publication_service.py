@@ -1251,17 +1251,20 @@ def get_or_create_publication_policy(project: Any) -> Optional[Any]:
     if project is None or _project_is_demo(project) or ProjectEmbedPolicy is None:
         return None
 
+    project_id = _project_id(project)
+    if not project_id:
+        return None
+
     try:
         if _model_get_or_create_embed_policy is not None:
-            policy = _model_get_or_create_embed_policy(project)
+            policy = _model_get_or_create_embed_policy(
+                project_id,
+                commit=False,
+            )
             if policy is not None:
                 return policy
     except Exception:
         pass
-
-    project_id = _project_id(project)
-    if not project_id:
-        return None
 
     try:
         policy = ProjectEmbedPolicy.query.filter(ProjectEmbedPolicy.project_id == project_id).first()
@@ -1477,7 +1480,11 @@ def _apply_policy(
 
     _set_policy_value(policy, "enabled", enabled)
     _set_policy_value(policy, "allow_iframe", enabled)
+    _set_policy_value(policy, "allow_public_embed", enabled)
     _set_policy_value(policy, "mode", "readonly" if enabled else "private")
+    _set_policy_value(policy, "spectator_only", True)
+    _set_policy_value(policy, "readonly", True)
+    _set_policy_value(policy, "allow_interaction", False)
     _set_policy_value(policy, "require_auth", final_require_auth)
     _set_policy_value(policy, "require_project_permission", final_require_project_permission)
 

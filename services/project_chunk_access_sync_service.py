@@ -1920,6 +1920,147 @@ def sync_project_chunk_access(
         warnings: List[Dict[str, Any]] = [dict(item) for item in desired.warnings]
         errors: List[Dict[str, Any]] = []
 
+        projection_sync = getattr(active_client, "sync_project_access_projection", None)
+        if callable(projection_sync):
+            projection_result = projection_sync(
+                chunk_project_id,
+                {
+                    "contractVersion": REMOTE_ACCESS_CONTRACT_VERSION,
+                    "appProjectPublicId": desired.app_project_public_id,
+                    "chunkProjectId": desired.chunk_project_id,
+                    "ownerAuthUserId": desired.owner_auth_user_id,
+                    "sourceService": "vectoplan-app",
+                    "projectionVersion": REMOTE_ACCESS_CONTRACT_VERSION,
+                    "force": bool(force),
+                    "assignments": [
+                        {
+                            "authUserId": assignment.auth_user_id,
+                            "role": assignment.role,
+                            "active": True,
+                            "sourceService": "vectoplan-app",
+                        }
+                        for assignment in desired.assignments
+                    ],
+                    "metadata": {
+                        "appProjectPublicId": desired.app_project_public_id,
+                        "appProjectionFingerprint": desired.fingerprint,
+                    },
+                },
+                request_id=req_id,
+                correlation_id=req_id,
+                idempotency_key=_hash_payload(
+                    {
+                        "operation": "canonical-access-projection",
+                        "chunkProjectId": chunk_project_id,
+                        "fingerprint": desired.fingerprint,
+                    }
+                ),
+                raise_on_error=False,
+            )
+            if not _result_ok(projection_result):
+                _call_error(
+                    errors,
+                    projection_result,
+                    code="chunk_access_projection_failed",
+                    operation="sync_project_access_projection",
+                )
+                stats["failed"] += 1
+                return finish_error(
+                    "chunk_access_projection_failed",
+                    errors[-1]["message"],
+                    status_code=_result_status_code(projection_result) or 502,
+                    retryable=_result_retryable(projection_result),
+                    repair_required=True,
+                    fingerprint=desired.fingerprint,
+                    owner=desired.owner_auth_user_id,
+                    warnings=warnings,
+                    errors=errors,
+                    stats=stats,
+                )
+
+            projection_payload = _result_payload(projection_result)
+            verified = _safe_bool(projection_payload.get("verified"), False)
+            if not verified:
+                return finish_error(
+                    "chunk_access_projection_unverified",
+                    "Chunk did not verify the canonical access projection after synchronization.",
+                    status_code=502,
+                    retryable=True,
+                    repair_required=True,
+                    fingerprint=desired.fingerprint,
+                    owner=desired.owner_auth_user_id,
+                    warnings=warnings,
+                    stats=stats,
+                )
+
+            applied_count = _safe_int(
+                projection_payload.get("appliedChangeCount"),
+                0,
+                minimum=0,
+            )
+            assignment_count = _safe_int(
+                projection_payload.get("assignmentCount"),
+                len(desired.assignments),
+                minimum=0,
+            )
+            stats["initialized"] = 1
+            stats["createdOrUpdated"] = applied_count
+            stats["reused"] = max(0, assignment_count - applied_count)
+            result = ProjectChunkAccessSyncResult(
+                ok=True,
+                code="chunk_access_projection_synced",
+                status_code=200,
+                app_project_public_id=desired.app_project_public_id,
+                chunk_project_id=desired.chunk_project_id,
+                owner_auth_user_id=desired.owner_auth_user_id,
+                actor_auth_user_id=actor,
+                request_id=req_id,
+                fingerprint=desired.fingerprint,
+                desired_count=len(desired.assignments),
+                remote_owner_after=desired.owner_auth_user_id,
+                authz_enforced=True,
+                stats=stats,
+                verification={
+                    "ok": True,
+                    "canonicalProjection": True,
+                    "remoteProjectionFingerprint": projection_payload.get(
+                        "projectionFingerprint"
+                    ),
+                },
+                warnings=tuple(warnings),
+                duration_ms=_duration_ms(started),
+            )
+            try:
+                _mark_success(project, result)
+                _persist(project, commit=True)
+            except Exception as exc:
+                _db_rollback()
+                return finish_error(
+                    "chunk_access_sync_local_persistence_failed",
+                    f"Remote access is synchronized, but local status persistence failed: {exc}",
+                    status_code=500,
+                    retryable=True,
+                    repair_required=True,
+                    fingerprint=desired.fingerprint,
+                    owner=desired.owner_auth_user_id,
+                    warnings=warnings,
+                    stats=stats,
+                )
+            _audit(
+                audit_writer,
+                project=project,
+                action="chunk_access_synced",
+                actor_auth_user_id=actor,
+                payload=result.to_dict(),
+            )
+            _cache_set(
+                cache_key,
+                result,
+                ttl_seconds=cfg.cache_ttl_seconds,
+                max_entries=cfg.cache_max_entries,
+            )
+            return result
+
         access_result = active_client.get_project_access(
             chunk_project_id,
             include_inactive=True,

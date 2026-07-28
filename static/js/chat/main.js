@@ -72,6 +72,8 @@ const MODE_TITLE = {
 
 const MODES_REQUIRING_CONFIGURED_PROJECT = new Set(["map", "3d", "2d", "lv"]);
 const MODES_REQUIRING_EXISTING_PROJECT = new Set(["map", "3d", "2d", "lv", "versions", "admin"]);
+const PROJECT_PUBLIC_ID_RE = /^(?:prj|demo)_[A-Za-z0-9_-]{8,160}$/;
+const PLATFORM_PARENT_ORIGIN_SESSION_KEY = "vectoplan.platform.parentOrigin.v1";
 
 
 /* ───────────────────────── Boot safety ───────────────────────── */
@@ -1133,6 +1135,93 @@ function extractProjectFromDetail(detail) {
   }
 }
 
+function projectPublicIdFromDetail(detail = {}) {
+  try {
+    const project = extractProjectFromDetail(detail) || {};
+    const candidate = String(
+      project.public_id ||
+        project.publicId ||
+        project.project_public_id ||
+        project.projectPublicId ||
+        detail.project_public_id ||
+        detail.projectPublicId ||
+        detail.public_id ||
+        detail.publicId ||
+        projectPublicId() ||
+        ""
+    ).trim();
+
+    return PROJECT_PUBLIC_ID_RE.test(candidate) ? candidate : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function normalizePlatformParentOrigin(value) {
+  try {
+    const parsed = new URL(String(value || ""), window.location.href);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    if (parsed.origin === window.location.origin) return "";
+
+    return parsed.origin;
+  } catch (_) {
+    return "";
+  }
+}
+
+function platformParentOrigin(candidateOrigin = "") {
+  try {
+    if (!window.parent || window.parent === window) return "";
+
+    const candidate = normalizePlatformParentOrigin(candidateOrigin);
+    const referrerOrigin = normalizePlatformParentOrigin(document.referrer);
+
+    if (referrerOrigin) {
+      try {
+        window.sessionStorage.setItem(PLATFORM_PARENT_ORIGIN_SESSION_KEY, referrerOrigin);
+      } catch (_) {}
+
+      return !candidate || candidate === referrerOrigin ? referrerOrigin : "";
+    }
+
+    let storedOrigin = "";
+    try {
+      storedOrigin = normalizePlatformParentOrigin(
+        window.sessionStorage.getItem(PLATFORM_PARENT_ORIGIN_SESSION_KEY)
+      );
+    } catch (_) {}
+
+    return storedOrigin && (!candidate || candidate === storedOrigin) ? storedOrigin : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function relayProjectNavigation(detail = {}, source = "shell") {
+  try {
+    const publicId = projectPublicIdFromDetail(detail);
+    const targetOrigin = platformParentOrigin();
+
+    if (!publicId || !targetOrigin) return false;
+
+    window.parent.postMessage(
+      {
+        type: "vectoplan:project:navigation",
+        kind: "vectoplan:project:navigation",
+        source: "vectoplan-app.shell",
+        detail: {
+          projectPublicId: publicId,
+          source: String(source || "shell"),
+        },
+      },
+      targetOrigin
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function handleProjectSaved(detail = {}, eventType = "vectoplan:project:saved") {
   try {
     const project = extractProjectFromDetail(detail);
@@ -1161,6 +1250,7 @@ function handleProjectSaved(detail = {}, eventType = "vectoplan:project:saved") 
       };
     } catch (_) {}
 
+    relayProjectNavigation(detail, eventType);
     showStatus("");
   } catch (error) {
     try {
@@ -1806,6 +1896,34 @@ function wireProjectEventBridge() {
         if (!data || typeof data !== "object") return;
 
         const type = String(data.type || data.kind || "").trim();
+        const trustedParentOrigin = platformParentOrigin(event?.origin);
+        if (
+          type === "vectoplan:platform:request-project" &&
+          window.parent &&
+          window.parent !== window &&
+          event?.source === window.parent &&
+          !!trustedParentOrigin &&
+          event?.origin === trustedParentOrigin
+        ) {
+          relayProjectNavigation(
+            {
+              projectPublicId: projectPublicId(),
+              project: currentProject(),
+            },
+            "platform_request"
+          );
+          return;
+        }
+
+        const frame = viewerFrame();
+        if (
+          !frame ||
+          !frame.contentWindow ||
+          event?.source !== frame.contentWindow ||
+          event?.origin !== window.location.origin
+        ) {
+          return;
+        }
 
         if (!type.startsWith("vectoplan:project:")) return;
 
@@ -1925,11 +2043,13 @@ function wireProjectSidebarEvents(root) {
 
     safeOn(root, "vectoplan:project-sidebar:item-selected", (event) => {
       try {
+        const detail = event?.detail || {};
         uiState.lastProjectSidebarSelection = {
-          item: event?.detail?.item || null,
-          href: event?.detail?.href || "",
+          item: detail.item || null,
+          href: detail.href || "",
           selectedAt: Date.now(),
         };
+        relayProjectNavigation(detail, "project_sidebar");
       } catch (_) {}
     });
 
@@ -2640,6 +2760,15 @@ async function boot() {
   safeCall("wireHotkeys", wireHotkeys);
 
   safeCall("wireProjectEventBridge", wireProjectEventBridge);
+  safeCall("announceCurrentProject", () => {
+    relayProjectNavigation(
+      {
+        projectPublicId: projectPublicId(),
+        project: currentProject(),
+      },
+      "shell_ready"
+    );
+  });
   safeCall("wireWorkspaceToolbar", wireWorkspaceToolbar);
   safeCall("wireVersionsDropdown", wireVersionsDropdown);
 

@@ -1432,11 +1432,17 @@ def _publication_for_project(project: Any) -> Dict[str, Any]:
                 )
                 result_dict = _safe_dict(result)
                 publication = _safe_dict(result_dict.get("publication") or result_dict)
+                nested_publication = _safe_dict(publication.get("publication"))
+                if nested_publication:
+                    publication = nested_publication
             except TypeError:
                 try:
                     result = get_project_publication(project)
                     result_dict = _safe_dict(result)
                     publication = _safe_dict(result_dict.get("publication") or result_dict)
+                    nested_publication = _safe_dict(publication.get("publication"))
+                    if nested_publication:
+                        publication = nested_publication
                 except Exception:
                     logger.debug("project_access_context.get_publication_legacy_failed", exc_info=True)
             except Exception:

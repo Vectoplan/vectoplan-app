@@ -1529,13 +1529,32 @@ def _normalize_publication_update_payload(data: Mapping[str, Any]) -> Dict[str, 
     try:
         payload = _extract_publication_payload_root(data)
 
-        visibility_raw = (
-            payload.get("visibility")
-            or payload.get("project_visibility")
-            or payload.get("projectVisibility")
-            or payload.get("mode")
+        visibility_keys = (
+            "visibility",
+            "project_visibility",
+            "projectVisibility",
+            "mode",
         )
-        visibility = _normalize_publication_visibility_for_route(visibility_raw, default="private")
+        visibility_present = any(key in payload for key in visibility_keys)
+        visibility_raw = next(
+            (payload.get(key) for key in visibility_keys if key in payload),
+            None,
+        )
+        visibility = (
+            _normalize_publication_visibility_for_route(visibility_raw, default="private")
+            if visibility_present
+            else None
+        )
+
+        published_keys = (
+            "published_workspaces",
+            "publishedWorkspaces",
+            "workspaces",
+            "tabs",
+            "published_tabs",
+            "publishedTabs",
+        )
+        published_present = any(key in payload for key in published_keys)
 
         published_raw = (
             payload.get("published_workspaces")
@@ -1573,18 +1592,29 @@ def _normalize_publication_update_payload(data: Mapping[str, Any]) -> Dict[str, 
             require_auth = True
             require_project_permission = True
         else:
-            require_auth = _safe_bool(require_auth_raw, False)
-            require_project_permission = _safe_bool(require_permission_raw, False)
+            require_auth = (
+                _safe_bool(require_auth_raw, False)
+                if require_auth_raw is not None
+                else None
+            )
+            require_project_permission = (
+                _safe_bool(require_permission_raw, False)
+                if require_permission_raw is not None
+                else None
+            )
 
-        normalized = {
-            "visibility": visibility,
-            "published_workspaces": published_workspaces,
-            "publishedWorkspaces": published_workspaces,
-            "require_auth": require_auth,
-            "requireAuth": require_auth,
-            "require_project_permission": require_project_permission,
-            "requireProjectPermission": require_project_permission,
-        }
+        normalized = {}
+        if published_present or workspace_candidates:
+            normalized["published_workspaces"] = published_workspaces
+            normalized["publishedWorkspaces"] = published_workspaces
+        if visibility_present:
+            normalized["visibility"] = visibility
+        if require_auth is not None:
+            normalized["require_auth"] = require_auth
+            normalized["requireAuth"] = require_auth
+        if require_project_permission is not None:
+            normalized["require_project_permission"] = require_project_permission
+            normalized["requireProjectPermission"] = require_project_permission
 
         if payload.get("reason"):
             normalized["reason"] = _safe_str(payload.get("reason"), "", 500)
@@ -1595,15 +1625,7 @@ def _normalize_publication_update_payload(data: Mapping[str, Any]) -> Dict[str, 
 
         return normalized
     except Exception:
-        return {
-            "visibility": "private",
-            "published_workspaces": {key: False for key in PUBLICATION_ROUTE_WORKSPACES},
-            "publishedWorkspaces": {key: False for key in PUBLICATION_ROUTE_WORKSPACES},
-            "require_auth": True,
-            "requireAuth": True,
-            "require_project_permission": True,
-            "requireProjectPermission": True,
-        }
+        return {}
 
 
 def _publication_response(
