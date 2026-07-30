@@ -276,6 +276,7 @@
 {% set _form_can_edit = true if _can_edit and not _read_only and (_persistent or _demo_mode) and not _public_viewer and not _auth_unavailable and not _user_blocked and not _access_blocked and not _identity_blocked else false %}
 {% set _show_management_sections = true if _can_manage and _persistent and not _is_new and not _demo_mode and not _public_viewer and not _read_only and not _auth_unavailable and not _user_blocked and not _access_blocked and not _identity_blocked else false %}
 {% set _show_management_locked = true if not _is_new and not _show_management_sections and not _public_viewer and not _demo_mode else false %}
+{% set _viewer_landing = true if not _is_new and (_public_viewer or _project_role == 'viewer') else false %}
 
 {# ------------------------------------------------------------------------- #}
 {# Chunk and external workspace readiness                                     #}
@@ -346,6 +347,9 @@
 {% set _chunk_access_sync_path = _paths.get('chunkAccessSync', _paths.get('chunk_access_sync', '')) if _show_management_sections else '' %}
 {% set _editor3d_path = _paths.get('editor3d', '/ui/project/' ~ _project_public_id ~ '/editor3d' if _project_public_id and _project_public_id != 'new' else '') %}
 {% set _map_path = _paths.get('map', '/ui/project/' ~ _project_public_id ~ '/map' if _project_public_id and _project_public_id != 'new' else '') %}
+{% set _cad2d_path = _paths.get('cad2d', '/ui/project/' ~ _project_public_id ~ '/cad2d' if _project_public_id and _project_public_id != 'new' else '') %}
+{% set _lv_path = _paths.get('lv', '/ui/project/' ~ _project_public_id ~ '/lv' if _project_public_id and _project_public_id != 'new' else '') %}
+{% set _versions_path = _paths.get('versions', '/ui/project/' ~ _project_public_id ~ '/versions' if _project_public_id and _project_public_id != 'new' else '') %}
 
 {# ------------------------------------------------------------------------- #}
 {# Safe browser payloads                                                      #}
@@ -582,46 +586,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="referrer" content="no-referrer">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="light">
 
   <title>{{ _project_display_name if _project_display_name else 'Projekt' }} · VECTOPLAN</title>
 
   <meta http-equiv="Cache-Control" content="no-store, max-age=0, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
-
-  <script>
-    (function () {
-      "use strict";
-      try {
-        var savedTheme = null;
-        try {
-          savedTheme = localStorage.getItem("theme");
-        } catch (_) {
-          savedTheme = null;
-        }
-
-        if (savedTheme === "dark" || savedTheme === "light") {
-          document.documentElement.setAttribute("data-theme", savedTheme);
-          return;
-        }
-
-        try {
-          if (window.parent && window.parent !== window) {
-            var parentRoot = window.parent.document && window.parent.document.documentElement;
-            var parentTheme = parentRoot && parentRoot.getAttribute("data-theme");
-            if (parentTheme === "dark" || parentTheme === "light") {
-              document.documentElement.setAttribute("data-theme", parentTheme);
-            }
-          }
-        } catch (_) {
-          /* Cross-origin parent access is intentionally ignored. */
-        }
-      } catch (_) {
-        /* Theme initialization must never block rendering. */
-      }
-    })();
-  </script>
 
   <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ _project_public_id|default('new', true)|e }}">
 
@@ -733,6 +704,7 @@
           parentEvents: {
             loaded: "vectoplan:project:workspace:loaded",
             ready: "vectoplan:project:workspace:ready",
+            navigateWorkspace: "vectoplan:workspace:navigate",
             error: "vectoplan:project:workspace:error",
             saved: "vectoplan:project:saved",
             created: "vectoplan:project:created",
@@ -786,11 +758,11 @@
   </script>
 </head>
 
-<body>
+<body{% if _viewer_landing %} class="vp-project-page--viewer-landing"{% endif %}>
   <noscript>JavaScript ist erforderlich, um Projekte zu speichern.</noscript>
 
   <main
-    class="vp-project-workspace{% if _read_only %} vp-project-workspace--readonly{% endif %}{% if _public_viewer %} vp-project-workspace--public{% endif %}{% if _demo_mode %} vp-project-workspace--demo{% endif %}{% if _auth_unavailable or _user_blocked or _access_blocked or _identity_blocked %} vp-project-workspace--blocked{% endif %}"
+    class="vp-project-workspace{% if _read_only %} vp-project-workspace--readonly{% endif %}{% if _public_viewer %} vp-project-workspace--public{% endif %}{% if _demo_mode %} vp-project-workspace--demo{% endif %}{% if _auth_unavailable or _user_blocked or _access_blocked or _identity_blocked %} vp-project-workspace--blocked{% endif %}{% if _viewer_landing %} vp-project-workspace--viewer-landing{% endif %}"
     data-project-workspace
     data-project-public-id="{{ _project_public_id|e }}"
     data-project-is-new="{{ 'true' if _is_new else 'false' }}"
@@ -817,6 +789,7 @@
     data-project-chunk-access-sync-status="{{ _chunk_access_sync_status|e }}"
     data-project-chunk-fallback-used="{{ 'true' if _chunk_fallback_used else 'false' }}"
   >
+    {% if not _viewer_landing %}
     <section class="vp-project-hero" aria-labelledby="projectWorkspaceTitle">
       <div class="vp-project-hero__content">
         <div class="vp-project-hero__eyebrow">
@@ -917,6 +890,80 @@
         Dein Login besitzt noch keine gültige lokale AppUser-Verknüpfung. Persistente Projektaktionen sind deaktiviert.
       </section>
     {% endif %}
+    {% endif %}
+
+    {% if _viewer_landing %}
+      {% set _has_viewer_workspace_link = (_published_workspaces.get('map') and _map_path) or (_published_workspaces.get('editor3d') and _editor3d_path) or (_published_workspaces.get('cad2d') and _cad2d_path) or (_published_workspaces.get('lv') and _lv_path) or (_published_workspaces.get('versions') and _versions_path) %}
+      <section class="vp-project-viewer-landing" aria-label="Freigegebene Projektansicht" data-project-published-workspaces>
+        {% if _published_workspaces.get('map') and _map_path %}
+          <iframe
+            class="vp-project-map-preview__frame"
+            src="{{ _map_path|e }}"
+            title="Kartenansicht f&uuml;r {{ _project_display_name|e }}"
+            loading="eager"
+            referrerpolicy="no-referrer"
+            scrolling="no"
+          ></iframe>
+        {% else %}
+          <div class="vp-project-viewer-landing__map-empty">
+            F&uuml;r dieses Projekt wurde noch keine Kartenansicht ver&ouml;ffentlicht.
+          </div>
+        {% endif %}
+
+        {% if _has_viewer_workspace_link %}
+
+          <nav class="vp-project-workspace-links" aria-label="Ver&ouml;ffentlichte Arbeitsbereiche">
+            {% if _published_workspaces.get('map') and _map_path %}
+              <a class="vp-project-workspace-link" href="{{ _map_path|e }}" data-published-workspace="map">
+                <span class="vp-project-workspace-link__code" aria-hidden="true">MAP</span>
+                <span><strong>Kartenansicht</strong><small>Geodaten und Projektlage ansehen</small></span>
+                <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
+              </a>
+            {% endif %}
+
+            {% if _published_workspaces.get('editor3d') and _editor3d_path and _chunk_editor_ready %}
+              <a class="vp-project-workspace-link" href="{{ _editor3d_path|e }}" data-published-workspace="editor3d">
+                <span class="vp-project-workspace-link__code" aria-hidden="true">3D</span>
+                <span><strong>3D-Modell</strong><small>Ver&ouml;ffentlichtes Modell schreibgesch&uuml;tzt &ouml;ffnen</small></span>
+                <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
+              </a>
+            {% elif _published_workspaces.get('editor3d') and _editor3d_path %}
+              <span class="vp-project-workspace-link is-disabled" aria-disabled="true">
+                <span class="vp-project-workspace-link__code" aria-hidden="true">3D</span>
+                <span><strong>3D-Modell</strong><small>Die Projektwelt wird noch vorbereitet</small></span>
+              </span>
+            {% endif %}
+
+            {% if _published_workspaces.get('cad2d') and _cad2d_path %}
+              <a class="vp-project-workspace-link" href="{{ _cad2d_path|e }}" data-published-workspace="cad2d">
+                <span class="vp-project-workspace-link__code" aria-hidden="true">2D</span>
+                <span><strong>2D-CAD</strong><small>Ver&ouml;ffentlichte Planansicht &ouml;ffnen</small></span>
+                <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
+              </a>
+            {% endif %}
+
+            {% if _published_workspaces.get('lv') and _lv_path %}
+              <a class="vp-project-workspace-link" href="{{ _lv_path|e }}" data-published-workspace="lv">
+                <span class="vp-project-workspace-link__code" aria-hidden="true">LV</span>
+                <span><strong>Leistungsverzeichnis</strong><small>Freigegebene Positionen ansehen</small></span>
+                <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
+              </a>
+            {% endif %}
+
+            {% if _published_workspaces.get('versions') and _versions_path %}
+              <a class="vp-project-workspace-link" href="{{ _versions_path|e }}" data-published-workspace="versions">
+                <span class="vp-project-workspace-link__code" aria-hidden="true">V</span>
+                <span><strong>Versionen</strong><small>Ver&ouml;ffentlichte Projektst&auml;nde vergleichen</small></span>
+                <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
+              </a>
+            {% endif %}
+          </nav>
+        {% else %}
+          <p class="vp-project-empty-state">F&uuml;r dieses Projekt wurden noch keine zus&auml;tzlichen Arbeitsbereiche ver&ouml;ffentlicht.</p>
+        {% endif %}
+      </section>
+    {% endif %}
+    {% if not _viewer_landing %}
 
     <section
       id="projectSystemAlert"
@@ -1142,9 +1189,12 @@
         </footer>
       </form>
     {% endif %}
+    {% endif %}
   </main>
 
+  {% if not _viewer_landing %}
   <script src="{{ url_for('static', filename='js/project/project_form.js') }}?v={{ _project_public_id|default('new', true)|e }}"></script>
+  {% endif %}
 
   {% if _show_management_sections %}
     <script src="{{ url_for('static', filename='js/project/project_publication.js') }}?v={{ _project_public_id|default('new', true)|e }}"></script>
@@ -1156,6 +1206,40 @@
       "use strict";
       try {
         var config = window.VECTOPLAN_PROJECT_WORKSPACE_CONFIG || window.PROJECT_WORKSPACE_CONFIG || {};
+        document.addEventListener("click", function (event) {
+          var link = event.target && event.target.closest
+            ? event.target.closest("a[data-published-workspace]")
+            : null;
+          if (!link || !config || typeof config.emitParentEvent !== "function") {
+            return;
+          }
+
+          var workspace = String(link.getAttribute("data-published-workspace") || "").trim();
+          var mode = workspace === "editor3d"
+            ? "3d"
+            : workspace === "cad2d"
+              ? "2d"
+              : workspace;
+
+          if (!mode) {
+            return;
+          }
+
+          var handled = config.emitParentEvent(
+            config.parentEvents && config.parentEvents.navigateWorkspace
+              ? config.parentEvents.navigateWorkspace
+              : "vectoplan:workspace:navigate",
+            {
+              workspace: workspace,
+              mode: mode,
+              projectPublicId: config.projectPublicId || ""
+            }
+          );
+          if (handled) {
+            event.preventDefault();
+          }
+        });
+
         if (config && typeof config.emitParentEvent === "function") {
           config.emitParentEvent(
             config.parentEvents && config.parentEvents.ready ? config.parentEvents.ready : "vectoplan:project:workspace:ready",

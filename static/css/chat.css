@@ -94,50 +94,6 @@
   }
 }
 
-/* Dark */
-:root[data-theme="dark"]{
-  --bg:#0b0f1e;
-  --panel:#0f1530;
-  --text:#e8ecff;
-  --muted:#9aa3c7;
-  --border:#1f2748;
-  --accent:#4a7aff;
-
-  --btn-bg:#121a36;
-  --btn-border:#1f2748;
-  --btn-hover:#1a2346;
-  --btn-disabled-bg:#111936;
-  --btn-disabled-border:#1b2446;
-  --btn-disabled-text:#687394;
-
-  --link:#7aa2ff;
-
-  --chip-bg:#0e1530;
-  --chip-border:#1f2748;
-
-  --alert-bg:#25131a;
-  --alert-border:#4a2630;
-  --alert-text:#ffc9c9;
-
-  --info-bg:#111b3f;
-  --info-border:#2a3561;
-  --info-text:#cfe0ff;
-
-  --success-bg:rgba(84, 215, 138, .12);
-  --success-border:rgba(84, 215, 138, .32);
-  --success-text:#54d78a;
-
-  --warning-bg:rgba(255, 209, 102, .12);
-  --warning-border:rgba(255, 209, 102, .32);
-  --warning-text:#ffd166;
-
-  --pill-bg:#172147;
-  --pill-border:#2a3561;
-  --pill-text:#a5b1d8;
-
-  --prog-track:#1a2244;
-  --prog-bar:#4a7aff;
-}
 
 /* ───────────────────────── Base / Resets ───────────────────────── */
 
@@ -829,5 +785,46 @@ a:hover{
     min-height:30px;
     padding:6px 8px;
     font-size:12px;
+  }
+}/* Fixed light CAD shell */
+:root {
+  color-scheme: light;
+  --bg: #f3f6fa;
+  --panel: #ffffff;
+  --text: #111827;
+  --muted: #4b5563;
+  --border: #d8e0ea;
+  --accent: #155eef;
+  --btn-border: #b9c5d3;
+  --btn-hover: #eef4ff;
+  --chip-bg: #f8fafc;
+  --chip-border: #d8e0ea;
+  --radius: 10px;
+  --radius-sm: 6px;
+}
+html,
+body {
+  background: var(--bg);
+}
+.viewer-panel {
+  border-radius: var(--radius);
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.08);
+}
+.viewer-toolbar {
+  min-height: 46px;
+  background: #ffffff;
+}
+.btn {
+  border-radius: 6px;
+}
+.mode-group .btn[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: #eef4ff;
+  color: #0f3f9c;
+}
+@media (max-width: 900px) {
+  .toolbar-right {
+    flex: 0 0 auto;
+    width: auto;
   }
 }

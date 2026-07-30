@@ -6,7 +6,7 @@ Browser-safe workspace embed URL builder for vectoplan-app.
 
 Responsibilities
 ----------------
-- Build public Editor and OpenLayer URLs only after route/service authorization.
+- Build public Editor, CAD, LV and OpenLayer URLs only after route/service authorization.
 - Translate an App project into a small browser contract.
 - Keep App project IDs distinct from Chunk project/world IDs.
 - Enforce project-role maximums as defense in depth.
@@ -26,6 +26,7 @@ Security invariants
 import copy
 import hashlib
 import json
+import math
 import os
 import threading
 import time
@@ -59,7 +60,9 @@ WORKSPACE_LV = "lv"
 WORKSPACE_VERSIONS = "versions"
 WORKSPACE_ADMIN = "admin"
 
-EXTERNAL_WORKSPACES = frozenset({WORKSPACE_EDITOR3D, WORKSPACE_MAP})
+EXTERNAL_WORKSPACES = frozenset(
+    {WORKSPACE_EDITOR3D, WORKSPACE_MAP, WORKSPACE_CAD2D, WORKSPACE_LV}
+)
 FORBIDDEN_EXTERNAL_WORKSPACES = frozenset(
     {
         WORKSPACE_ADMIN,
@@ -124,9 +127,14 @@ ROLE_MAXIMUMS: Dict[str, Dict[str, bool]] = {
 
 DEFAULT_EDITOR_PUBLIC_URL = "http://localhost:5100"
 DEFAULT_EDITOR_ROUTE = "/editor"
+DEFAULT_CAD_PUBLIC_URL = "http://localhost:5104"
+DEFAULT_CAD_ROUTE = "/cad"
+DEFAULT_LV_PUBLIC_URL = "http://localhost:5105"
+DEFAULT_LV_ROUTE = "/lv"
 DEFAULT_OPENLAYER_PUBLIC_URL = "http://localhost:5190"
 DEFAULT_OPENLAYER_ROUTE = "/map"
 DEFAULT_APP_PUBLIC_URL = "http://localhost:5103"
+DEFAULT_MAP_PROJECT_ZOOM = 17
 
 DEFAULT_CONTEXT_PATH_TEMPLATE = "/ui/project/{project_public_id}/context.json"
 DEFAULT_RETURN_PATH_TEMPLATE = "/project={project_public_id}"
@@ -134,24 +142,32 @@ DEFAULT_CHUNK_BROWSER_BASE_URL = "/editor/api/chunk"
 
 DEFAULT_CACHE_MAX_AGE_SECONDS = 15.0
 DEFAULT_CACHE_MAX_ITEMS = 512
-EMBED_CONTRACT_VERSION = "2026-07-18.1"
+EMBED_CONTRACT_VERSION = "2026-07-29.1"
 
 MAX_QUERY_VALUE_LENGTH = 4096
 MAX_ROUTE_HINTS_QUERY_LENGTH = 12000
 
 DOCKER_INTERNAL_HOSTS = frozenset(
     {
+        "cad",
         "chunk",
         "editor",
+        "lv",
         "openlayer",
+        "server-cad",
         "server-chunk",
         "server-editor",
+        "server-lv",
         "server-openlayer",
+        "vectoplan-cad",
         "vectoplan-chunk",
         "vectoplan-editor",
+        "vectoplan-lv",
         "vectoplan-openlayer",
+        "vectoplan_cad",
         "vectoplan_chunk",
         "vectoplan_editor",
+        "vectoplan_lv",
         "vectoplan_openlayer",
         "postgres",
         "redis",
@@ -1253,6 +1269,9 @@ def _project_payload_from_object(project: Any = None, project_payload: Optional[
         "service_refs",
         "metadata_json",
         "settings",
+        "latitude",
+        "longitude",
+        "coordinate_srid",
         "access",
         "workspace_access",
         "publication",
@@ -1322,6 +1341,85 @@ def _project_public_id(project: Any = None, project_payload: Optional[Mapping[st
     )
     text = _safe_str(value, "", 180)
     return "" if text.lower() in {"", "none", "null"} else text
+
+
+def _map_project_view_params(
+    project: Any = None,
+    project_payload: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, str]:
+    """Build an OpenLayer start view from the current WGS84 project position."""
+    payload = _safe_dict(project_payload)
+    coordinates = _safe_dict(
+        _first_value(
+            payload.get("coordinates"),
+            payload.get("coordinate"),
+            payload.get("location"),
+            default={},
+        )
+    )
+
+    latitude_raw = _first_value(
+        _mapping_value(payload, "latitude", "lat"),
+        _mapping_value(coordinates, "latitude", "lat"),
+        _object_value(project, "latitude", "lat"),
+        default=None,
+    )
+    longitude_raw = _first_value(
+        _mapping_value(payload, "longitude", "lng", "lon"),
+        _mapping_value(coordinates, "longitude", "lng", "lon"),
+        _object_value(project, "longitude", "lng", "lon"),
+        default=None,
+    )
+    srid = _safe_str(
+        _first_value(
+            _mapping_value(payload, "coordinate_srid", "coordinateSrid", "srid"),
+            _mapping_value(coordinates, "coordinate_srid", "coordinateSrid", "srid"),
+            _object_value(project, "coordinate_srid", "coordinateSrid", "srid"),
+            default="EPSG:4326",
+        ),
+        "EPSG:4326",
+        80,
+    ).upper().replace(" ", "")
+
+    # OpenLayers receives geographic longitude/latitude. Projected coordinates
+    # must never be interpreted as WGS84 by accident.
+    if srid and not (
+        srid in {"4326", "EPSG:4326", "WGS84", "CRS84", "OGC:CRS84"}
+        or srid.endswith(":4326")
+    ):
+        return {}
+
+    try:
+        latitude = float(latitude_raw)
+        longitude = float(longitude_raw)
+    except (TypeError, ValueError):
+        return {}
+
+    if (
+        not math.isfinite(latitude)
+        or not math.isfinite(longitude)
+        or latitude < -90.0
+        or latitude > 90.0
+        or longitude < -180.0
+        or longitude > 180.0
+    ):
+        return {}
+
+    zoom = _safe_int(
+        _config_get("MAP_PROJECT_ZOOM", DEFAULT_MAP_PROJECT_ZOOM),
+        DEFAULT_MAP_PROJECT_ZOOM,
+        minimum=0,
+        maximum=22,
+    )
+
+    def format_coordinate(value: float) -> str:
+        return f"{value:.8f}".rstrip("0").rstrip(".")
+
+    return {
+        "lon": format_coordinate(longitude),
+        "lat": format_coordinate(latitude),
+        "zoom": str(zoom),
+    }
 
 
 def _is_new_project_id(project_public_id: Any) -> bool:
@@ -1976,12 +2074,107 @@ def _map_target_config() -> WorkspaceTargetConfig:
     return result
 
 
+def _cad2d_target_config() -> WorkspaceTargetConfig:
+    explicit_base = (
+        _config_str("VECTOPLAN_CAD_PUBLIC_URL", "", 4000)
+        or _config_str("VECTOPLAN_CAD_PUBLIC_BASE_URL", "", 4000)
+        or _config_str("CAD_PUBLIC_URL", "", 4000)
+    )
+    raw = {
+        "enabled": _config_bool("VECTOPLAN_CAD_EMBED_ENABLED", True),
+        "base": explicit_base or DEFAULT_CAD_PUBLIC_URL,
+        "base_explicit": bool(explicit_base),
+        "route": _config_str("VECTOPLAN_CAD_ROUTE", "", 2000)
+        or _config_str("VECTOPLAN_CAD_EMBED_ROUTE", "", 2000)
+        or DEFAULT_CAD_ROUTE,
+    }
+    cache_key = _target_cache_key(WORKSPACE_CAD2D, raw)
+    cached = _cache_get(cache_key)
+    if isinstance(cached, WorkspaceTargetConfig):
+        return cached
+
+    warnings: list[str] = []
+    base = _normalize_public_base_url(
+        raw["base"],
+        "" if raw.get("base_explicit") else DEFAULT_CAD_PUBLIC_URL,
+    )
+    route = _normalize_route(raw["route"], DEFAULT_CAD_ROUTE)
+    target = _join_url(base, route)
+    enabled = bool(raw["enabled"] and base and target)
+    if not base:
+        warnings.append("CAD public URL is invalid.")
+    if not target:
+        warnings.append("CAD public route URL could not be built.")
+    result = WorkspaceTargetConfig(
+        workspace=WORKSPACE_CAD2D,
+        service_name="vectoplan-cad",
+        enabled=enabled,
+        public_base_url=base,
+        route=route,
+        public_route_url=target,
+        source="VECTOPLAN_CAD_PUBLIC_URL",
+        warnings=tuple(warnings),
+    )
+    _cache_set(cache_key, result)
+    return result
+
+
+def _lv_target_config() -> WorkspaceTargetConfig:
+    explicit_base = (
+        _config_str("VECTOPLAN_LV_PUBLIC_URL", "", 4000)
+        or _config_str("VECTOPLAN_LV_PUBLIC_BASE_URL", "", 4000)
+        or _config_str("LV_PUBLIC_URL", "", 4000)
+    )
+    raw = {
+        "enabled": _config_bool("VECTOPLAN_LV_EMBED_ENABLED", True),
+        "base": explicit_base or DEFAULT_LV_PUBLIC_URL,
+        "base_explicit": bool(explicit_base),
+        "route": _config_str("VECTOPLAN_LV_ROUTE", "", 2000)
+        or _config_str("VECTOPLAN_LV_EMBED_ROUTE", "", 2000)
+        or _config_str("LV_ROUTE", "", 2000)
+        or DEFAULT_LV_ROUTE,
+    }
+    cache_key = _target_cache_key(WORKSPACE_LV, raw)
+    cached = _cache_get(cache_key)
+    if isinstance(cached, WorkspaceTargetConfig):
+        return cached
+
+    warnings: list[str] = []
+    base = _normalize_public_base_url(
+        raw["base"],
+        "" if raw.get("base_explicit") else DEFAULT_LV_PUBLIC_URL,
+    )
+    route = _normalize_route(raw["route"], DEFAULT_LV_ROUTE)
+    target = _join_url(base, route)
+    enabled = bool(raw["enabled"] and base and target)
+    if not base:
+        warnings.append("LV public URL is invalid.")
+    if not target:
+        warnings.append("LV public route URL could not be built.")
+    result = WorkspaceTargetConfig(
+        workspace=WORKSPACE_LV,
+        service_name="vectoplan-lv",
+        enabled=enabled,
+        public_base_url=base,
+        route=route,
+        public_route_url=target,
+        source="VECTOPLAN_LV_PUBLIC_URL",
+        warnings=tuple(warnings),
+    )
+    _cache_set(cache_key, result)
+    return result
+
+
 def get_workspace_target_config(workspace: Any) -> WorkspaceTargetConfig:
     normalized = normalize_workspace(workspace)
     if normalized == WORKSPACE_EDITOR3D:
         return _editor_target_config()
     if normalized == WORKSPACE_MAP:
         return _map_target_config()
+    if normalized == WORKSPACE_CAD2D:
+        return _cad2d_target_config()
+    if normalized == WORKSPACE_LV:
+        return _lv_target_config()
     return WorkspaceTargetConfig(
         workspace=normalized,
         service_name="vectoplan-app",
@@ -2134,6 +2327,9 @@ def _base_embed_params(
     if include_return_url and project_public_id:
         params["return_url"] = _absolute_app_url(_return_path(project_public_id), request_obj, prefer_request_host)
 
+    if workspace == WORKSPACE_MAP:
+        params.update(_map_project_view_params(project, project_payload))
+
     app_public_url = _app_public_base_url(request_obj, prefer_request_host)
     if app_public_url:
         params["app_public_url"] = app_public_url
@@ -2236,23 +2432,32 @@ def build_workspace_embed_result(
         if not allowed:
             return failure(gate_code, gate_status, gate_message, target=target)
 
-        base_params = _base_embed_params(
-            workspace=normalized_workspace,
-            project=project,
-            project_payload=payload,
-            access=access,
-            chunk=chunk,
-            request_obj=request_obj,
-            include_context=include_context,
-            current_user=user,
-            include_return_url=include_return_url,
-            include_chunk_hints=include_chunk_hints,
-            prefer_request_host=prefer_request_host,
-        )
-        extras = _clean_extra_query_params(extra_params or {})
-        params = dict(extras)
-        params.update(base_params)  # Security contract overwrites every external value.
-        params = _clean_query_params(params, allow_security_controls=True)
+        if normalized_workspace == WORKSPACE_CAD2D:
+            # The first CAD integration is intentionally shell-only: no project,
+            # role, context, Chunk or other domain data is sent to vectoplan-cad.
+            params: Dict[str, Any] = {}
+        elif normalized_workspace == WORKSPACE_LV:
+            # The initial LV integration deliberately stays service-owned and
+            # database-agnostic. Only the public App project key scopes the shell.
+            params = {"project_public_id": project_public_id}
+        else:
+            base_params = _base_embed_params(
+                workspace=normalized_workspace,
+                project=project,
+                project_payload=payload,
+                access=access,
+                chunk=chunk,
+                request_obj=request_obj,
+                include_context=include_context,
+                current_user=user,
+                include_return_url=include_return_url,
+                include_chunk_hints=include_chunk_hints,
+                prefer_request_host=prefer_request_host,
+            )
+            extras = _clean_extra_query_params(extra_params or {})
+            params = dict(extras)
+            params.update(base_params)  # Security contract overwrites every external value.
+            params = _clean_query_params(params, allow_security_controls=True)
         request_target_url = _match_loopback_target_host(
             target.public_route_url,
             request_obj,
@@ -2415,6 +2620,8 @@ def get_workspace_embed_status() -> Dict[str, Any]:
     try:
         editor = get_workspace_target_config(WORKSPACE_EDITOR3D)
         map_target = get_workspace_target_config(WORKSPACE_MAP)
+        cad2d = get_workspace_target_config(WORKSPACE_CAD2D)
+        lv = get_workspace_target_config(WORKSPACE_LV)
         with _CACHE_LOCK:
             cache_size = len(_MODULE_CACHE)
         return {
@@ -2433,6 +2640,8 @@ def get_workspace_embed_status() -> Dict[str, Any]:
             "targets": {
                 WORKSPACE_EDITOR3D: editor.to_dict(),
                 WORKSPACE_MAP: map_target.to_dict(),
+                WORKSPACE_CAD2D: cad2d.to_dict(),
+                WORKSPACE_LV: lv.to_dict(),
             },
             "external_workspaces": sorted(EXTERNAL_WORKSPACES),
             "forbidden_external_workspaces": sorted(FORBIDDEN_EXTERNAL_WORKSPACES),
@@ -2458,6 +2667,8 @@ def get_workspace_embed_status() -> Dict[str, Any]:
                 "public_editor_requires_verified_readonly_context": True,
                 "global_account_role_is_project_role": False,
                 "extra_params_can_elevate_access": False,
+                "cad_project_data_forwarded": False,
+                "lv_only_public_project_id_forwarded": True,
                 "admin_is_never_external_embed": True,
                 "editor_project_id_is_chunk_project_id": True,
                 "editor_world_id_is_chunk_world_id": True,

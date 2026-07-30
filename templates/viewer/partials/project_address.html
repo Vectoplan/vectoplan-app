@@ -56,7 +56,7 @@
 
 {% set _address_text = _address_project.get('address_text', _address_project.get('addressText', _address_obj.get('text', _address_obj.get('address_text', _address_obj.get('addressText', ''))))) %}
 {% set _address_text = '' if _address_text is none else _address_text|string %}
-{% set _address_max_len = 2000 %}
+{% set _address_max_len = 256 %}
 {% set _address_text_len = _address_text|length %}
 
 {% set _address_project_public_id_raw = _address_project.get('public_id', _address_project.get('publicId', _address_project.get('project_public_id', _address_project.get('projectPublicId', '')))) %}
@@ -323,28 +323,59 @@
         Adresse <span aria-hidden="true">*</span>
       </label>
 
-      <textarea
-        id="projectAddressText"
-        class="vp-project-textarea"
-        name="address_text"
-        rows="4"
-        maxlength="{{ _address_max_len }}"
-        placeholder="z. B. Musterstraße 1, 12345 Berlin, Deutschland"
-        required
-        autocomplete="street-address"
-        data-project-address-text
-        data-project-single-address-input
-        data-project-address-max-length="{{ _address_max_len }}"
-        aria-describedby="projectAddressHelp projectAddressCounter"
-        {% if not _address_can_write %}disabled{% endif %}
-        {% if _address_read_only or not _address_can_write %}aria-readonly="true"{% endif %}
-        {% if _address_disabled_reason %}title="{{ _address_disabled_reason|e }}"{% endif %}
-      >{{ _address_text|e }}</textarea>
+      <div class="vp-project-geocoder" data-project-geocoder>
+        <input
+          id="projectAddressText"
+          class="vp-project-input vp-project-geocoder__input"
+          type="search"
+          name="address_text"
+          maxlength="{{ _address_max_len }}"
+          placeholder="z. B. Musterstraße 1, 12345 Berlin, Deutschland"
+          required
+          autocomplete="off"
+          autocapitalize="words"
+          spellcheck="false"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-controls="projectAddressSuggestions"
+          data-project-address-text
+          data-project-single-address-input
+          data-project-address-max-length="{{ _address_max_len }}"
+          aria-expanded="false"
+          aria-describedby="projectAddressHelp projectAddressGeocoderStatus projectAddressCounter"
+          {% if not _address_can_write %}disabled{% endif %}
+          {% if _address_read_only or not _address_can_write %}aria-readonly="true"{% endif %}
+          {% if _address_disabled_reason %}title="{{ _address_disabled_reason|e }}"{% endif %}
+          value="{{ _address_text|e }}"
+        >
+        <input
+          id="projectAddressMapboxId"
+          type="hidden"
+          name="address_mapbox_id"
+          value=""
+          data-project-address-mapbox-id
+        >
+
+        <div
+          id="projectAddressSuggestions"
+          class="vp-project-geocoder__suggestions"
+          role="listbox"
+          data-project-geocoder-suggestions
+          hidden
+        ></div>
+      </div>
 
       <div class="vp-project-field__meta">
         <p id="projectAddressHelp" class="vp-project-help">
-          Es wird nur diese Standortbeschreibung gespeichert. Strukturierte Adressfelder, Koordinaten und Providerdaten werden nicht im Formular bearbeitet.
+          W&auml;hle eine Mapbox-Adresse aus. Beim Speichern pr&uuml;ft der Server die Adresse erneut und speichert die ermittelten Projektkoordinaten.
         </p>
+
+        <p
+          id="projectAddressGeocoderStatus"
+          class="vp-project-geocoder__status"
+          data-project-geocoder-status
+          aria-live="polite"
+        >{% if _address_can_write %}Adresssuche bereit &middot; Powered by Mapbox{% endif %}</p>
 
         <p
           id="projectAddressCounter"

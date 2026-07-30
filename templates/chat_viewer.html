@@ -223,23 +223,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="referrer" content="no-referrer">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="light">
   <title>{{ project_name if project_name else 'VECTOPLAN' }} · VECTOPLAN</title>
 
   <meta http-equiv="Cache-Control" content="no-store, max-age=0, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
 
-  <script>
-    (function () {
-      try {
-        var saved = localStorage.getItem("theme");
-        if (saved === "dark" || saved === "light") {
-          document.documentElement.setAttribute("data-theme", saved);
-        }
-      } catch (e) {}
-    })();
-  </script>
 
   <script>
     (function () {
@@ -824,12 +814,6 @@
         </div>
 
         <div class="toolbar-right">
-          <button id="themeToggleBtn"
-                  class="btn"
-                  type="button"
-                  aria-pressed="false"
-                  title="Theme umschalten">Theme</button>
-
           <a id="viewerOpenRawBtn"
              class="btn btn-link"
              href="{{ resolved_workspace_src }}"

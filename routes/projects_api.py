@@ -184,6 +184,17 @@ except Exception:  # pragma: no cover
     def get_project_service_status() -> Dict[str, Any]:  # type: ignore
         return {"ok": False, "code": "project_service_unavailable"}
 
+try:
+    from services.geocoding_client import (
+        GeocodingError,
+        geocoding_status,
+        search_addresses,
+    )
+except Exception:  # pragma: no cover
+    GeocodingError = RuntimeError  # type: ignore
+    geocoding_status = None  # type: ignore
+    search_addresses = None  # type: ignore
+
 
 try:
     from services.project_invitation_service import (
@@ -2079,6 +2090,63 @@ def projects_sidebar():
 
 
 # ─────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# Server-side address search
+# ------------------------------------------------------------
+
+@bp.get("/v1/geocoding/suggest")
+def geocoding_suggest():
+    persistent_error = _require_persistent_context()
+    if persistent_error is not None:
+        return persistent_error
+
+    query = _request_str("q", "", 256)
+    if len(query) < 3:
+        return _json_response(
+            {
+                "ok": True,
+                "items": [],
+                "provider": "mapbox",
+                "minimum_query_length": 3,
+            },
+            200,
+            no_store=True,
+        )
+
+    if not callable(search_addresses):
+        return _json_error(
+            "Die Adresssuche ist nicht verf\u00fcgbar.",
+            503,
+            code="geocoding_service_unavailable",
+        )
+
+    try:
+        items = search_addresses(
+            query,
+            limit=max(1, min(6, _request_int("limit", 5))),
+            autocomplete=True,
+            permanent=False,
+        )
+    except GeocodingError as exc:
+        return _json_error(
+            getattr(exc, "message", str(exc)),
+            getattr(exc, "status_code", 503),
+            code=getattr(exc, "code", "geocoding_failed"),
+            extra={"retryable": bool(getattr(exc, "retryable", False))},
+        )
+
+    return _json_response(
+        {
+            "ok": True,
+            "items": items,
+            "provider": "mapbox",
+            "attribution": "Mapbox",
+            "status": geocoding_status() if callable(geocoding_status) else {},
+        },
+        200,
+        no_store=True,
+    )
+
 # Project create / detail / update / delete
 # ─────────────────────────────────────────────────────────────
 

@@ -112,39 +112,6 @@
     sans-serif;
 }
 
-:root[data-theme="dark"] {
-  --vp-project-sidebar-bg: var(--vp-surface-sidebar, #101218);
-  --vp-project-sidebar-bg-soft: var(--vp-surface-sidebar-soft, #151822);
-  --vp-project-sidebar-bg-hover: var(--vp-surface-sidebar-hover, rgba(255, 255, 255, 0.06));
-  --vp-project-sidebar-bg-active: var(--vp-surface-sidebar-active, rgba(90, 132, 255, 0.18));
-  --vp-project-sidebar-bg-active-hover: var(--vp-surface-sidebar-active-hover, rgba(90, 132, 255, 0.24));
-
-  --vp-project-sidebar-border: var(--vp-border-subtle, rgba(255, 255, 255, 0.10));
-  --vp-project-sidebar-border-strong: var(--vp-border-strong, rgba(255, 255, 255, 0.18));
-
-  --vp-project-sidebar-text: var(--vp-text-main, #f4f5f7);
-  --vp-project-sidebar-text-muted: var(--vp-text-muted, #a8adbb);
-  --vp-project-sidebar-text-soft: var(--vp-text-soft, #7f8798);
-  --vp-project-sidebar-text-inverse: var(--vp-text-inverse, #ffffff);
-
-  --vp-project-sidebar-accent: var(--vp-accent, #5a84ff);
-  --vp-project-sidebar-accent-soft: var(--vp-accent-soft, rgba(90, 132, 255, 0.16));
-
-  --vp-project-sidebar-success: var(--vp-success, #54d78a);
-  --vp-project-sidebar-success-soft: rgba(84, 215, 138, 0.12);
-  --vp-project-sidebar-success-border: rgba(84, 215, 138, 0.30);
-
-  --vp-project-sidebar-warning: var(--vp-warning, #ffcc66);
-  --vp-project-sidebar-warning-soft: rgba(255, 204, 102, 0.12);
-  --vp-project-sidebar-warning-border: rgba(255, 204, 102, 0.30);
-
-  --vp-project-sidebar-danger: var(--vp-danger, #ff6b6b);
-  --vp-project-sidebar-danger-soft: rgba(255, 107, 107, 0.10);
-  --vp-project-sidebar-danger-border: rgba(255, 107, 107, 0.32);
-
-  --vp-project-sidebar-shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
-  --vp-project-sidebar-focus-ring: 0 0 0 3px rgba(90, 132, 255, 0.34);
-}
 
 /* -------------------------------------------------------------------------- */
 /* Root                                                                       */
@@ -1184,6 +1151,11 @@
 /* -------------------------------------------------------------------------- */
 
 @media (max-width: 900px) {
+  .vp-chat-viewer-with-project-sidebar {
+    box-sizing: border-box;
+    padding-left: var(--vp-project-sidebar-collapsed-width, 64px);
+  }
+
   .vp-project-sidebar {
     --vp-project-sidebar-width: min(320px, 88vw);
 
@@ -1309,5 +1281,51 @@
 
   to {
     transform: rotate(360deg);
+  }
+}/* Fixed light CAD sidebar */
+:root {
+  --vp-project-sidebar-bg: #ffffff;
+  --vp-project-sidebar-bg-soft: #f5f7fa;
+  --vp-project-sidebar-bg-hover: #f0f4f8;
+  --vp-project-sidebar-bg-active: #eaf1ff;
+  --vp-project-sidebar-bg-active-hover: #dce8ff;
+  --vp-project-sidebar-border: #d8e0ea;
+  --vp-project-sidebar-border-strong: #b9c5d3;
+  --vp-project-sidebar-text: #111827;
+  --vp-project-sidebar-text-muted: #4b5563;
+  --vp-project-sidebar-text-soft: #667085;
+  --vp-project-sidebar-accent: #155eef;
+  --vp-project-sidebar-accent-soft: rgba(21, 94, 239, 0.10);
+  --vp-project-sidebar-shadow: 0 12px 30px rgba(16, 24, 40, 0.13);
+  --vp-project-sidebar-radius-sm: 6px;
+  --vp-project-sidebar-radius-md: 8px;
+  --vp-project-sidebar-radius-lg: 10px;
+}
+.vp-project-sidebar__panel {
+  background: #ffffff;
+}
+.vp-project-sidebar__panel::before {
+  border-right-color: var(--vp-project-sidebar-border);
+}
+.vp-project-sidebar__item.is-active {
+  border-color: rgba(21, 94, 239, 0.30);
+  background: var(--vp-project-sidebar-bg-active);
+}
+/* Mobile collapsed sidebar trigger */
+@media (max-width: 900px) {
+  .vp-project-sidebar.is-collapsed .vp-project-sidebar__brand,
+  .vp-project-sidebar[data-project-sidebar-collapsed="true"] .vp-project-sidebar__brand {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .vp-project-sidebar.is-collapsed .vp-project-sidebar__toggle,
+  .vp-project-sidebar[data-project-sidebar-collapsed="true"] .vp-project-sidebar__toggle {
+    opacity: 1;
+    transform: translateX(0);
+    border-color: var(--vp-project-sidebar-border);
+    background: var(--vp-project-sidebar-bg-soft);
+    color: var(--vp-project-sidebar-text);
   }
 }

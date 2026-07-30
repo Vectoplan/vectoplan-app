@@ -1,5 +1,5 @@
 /* /services/app/static/css/cards.css */
-/* Dark UI cards for structured messages */
+/* Light cards for structured messages */
 
 :root{
   --vp-bg:#0e1530;
@@ -158,4 +158,48 @@
 /* Compact tweaks on narrow screens */
 @media (max-width: 800px){
   .card .row{ grid-template-columns:1fr; }
+}
+/* Fixed light structured cards */
+:root {
+  --vp-bg: #ffffff;
+  --vp-bg2: #f8fafc;
+  --vp-border: #d8e0ea;
+  --vp-text: #111827;
+  --vp-muted: #667085;
+  --vp-accent: #155eef;
+  --vp-badge: #cbd5e1;
+  --vp-danger: #b42318;
+  --radius: 8px;
+}
+.card {
+  background: #ffffff;
+  color: var(--vp-text);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+}
+.card .row {
+  border-top-color: #e5eaf0;
+}
+.card .btn {
+  background: #ffffff;
+  color: var(--vp-text);
+}
+.card .btn:hover {
+  background: #eef4ff;
+}
+.card .form input,
+.card .form textarea,
+.card .form select {
+  background: #ffffff;
+  color: var(--vp-text);
+}
+.pill {
+  background: #f1f5f9;
+  color: #475467;
+}
+.card-error_card {
+  border-color: #f0b5b0;
+  background: #fff4f3;
+}
+.card-error_card .card-body {
+  color: #912018;
 }

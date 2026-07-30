@@ -1201,6 +1201,12 @@ function relayProjectNavigation(detail = {}, source = "shell") {
   try {
     const publicId = projectPublicIdFromDetail(detail);
     const targetOrigin = platformParentOrigin();
+    const requestedWorkspace =
+      detail.workspace ||
+      detail.workspaceMode ||
+      detail.workspace_mode ||
+      detail.mode ||
+      "";
 
     if (!publicId || !targetOrigin) return false;
 
@@ -1211,6 +1217,7 @@ function relayProjectNavigation(detail = {}, source = "shell") {
         source: "vectoplan-app.shell",
         detail: {
           projectPublicId: publicId,
+          workspace: requestedWorkspace ? normalizeMode(requestedWorkspace) : "",
           source: String(source || "shell"),
         },
       },
@@ -1792,6 +1799,14 @@ async function setWorkspaceMode(mode, options = {}) {
         versionsClose();
       } catch (_) {}
     }
+    relayProjectNavigation(
+      {
+        projectPublicId: projectPublicId(),
+        workspace: normalized,
+      },
+      options.reason || "workspace_mode"
+    );
+
 
     showStatus("");
 
@@ -1909,6 +1924,7 @@ function wireProjectEventBridge() {
             {
               projectPublicId: projectPublicId(),
               project: currentProject(),
+              workspace: uiState.workspaceMode || dataValue("workspaceMode", "project"),
             },
             "platform_request"
           );
@@ -1928,6 +1944,13 @@ function wireProjectEventBridge() {
         if (!type.startsWith("vectoplan:project:")) return;
 
         handleProjectSaved(data.detail || data, type);
+      } catch (_) {}
+    });
+
+    safeOn(window, "vectoplan:workspace:navigate", (event) => {
+      try {
+        const detail = event?.detail || {};
+        void setWorkspaceMode(detail.mode || detail.workspace || "project");
       } catch (_) {}
     });
   } catch (_) {}
@@ -2165,82 +2188,6 @@ function refreshProjectSidebar() {
   } catch (_) {
     return null;
   }
-}
-
-
-/* ───────────────────────── Theme ───────────────────────── */
-
-function themeGet() {
-  try {
-    const saved = localStorage.getItem("theme");
-    if (saved === "dark" || saved === "light") return saved;
-  } catch (_) {}
-
-  try {
-    const attr = document.documentElement.getAttribute("data-theme");
-    if (attr === "dark" || attr === "light") return attr;
-  } catch (_) {}
-
-  return "light";
-}
-
-function themeApply(theme = "light") {
-  try {
-    const next = theme === "dark" ? "dark" : "light";
-    const root = document.documentElement;
-
-    root.setAttribute("data-theme", next);
-
-    try {
-      localStorage.setItem("theme", next);
-    } catch (_) {}
-
-    const btn = $("themeToggleBtn");
-    if (btn) {
-      const isDark = next === "dark";
-      btn.setAttribute("aria-pressed", String(isDark));
-      btn.textContent = isDark ? "Hell" : "Dunkel";
-      btn.title = isDark
-        ? "Auf helles Theme umschalten"
-        : "Auf dunkles Theme umschalten";
-    }
-
-    try {
-      const frame = viewerFrame();
-      if (frame && frame.contentWindow) {
-        frame.contentWindow.postMessage(
-          {
-            type: "vectoplan:theme:update",
-            theme: next,
-          },
-          "*"
-        );
-      }
-    } catch (_) {}
-  } catch (_) {}
-}
-
-function themeToggle() {
-  try {
-    const current = document.documentElement.getAttribute("data-theme") || "light";
-    themeApply(current === "dark" ? "light" : "dark");
-  } catch (_) {}
-}
-
-function wireThemeToggle() {
-  try {
-    if (window.__VECTOPLAN_THEME_WIRED__) return;
-    window.__VECTOPLAN_THEME_WIRED__ = true;
-
-    const btn = $("themeToggleBtn");
-
-    if (btn && !btn._themeWired) {
-      btn._themeWired = true;
-      safeOn(btn, "click", themeToggle);
-    }
-
-    themeApply(themeGet());
-  } catch (_) {}
 }
 
 
@@ -2755,7 +2702,6 @@ async function boot() {
 
   safeCall("initProjectSidebar", initProjectSidebar);
 
-  safeCall("wireThemeToggle", wireThemeToggle);
   safeCall("wireGlobalStatus", wireGlobalStatus);
   safeCall("wireHotkeys", wireHotkeys);
 

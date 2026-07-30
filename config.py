@@ -511,6 +511,14 @@ _DEFAULT_EDITOR_PUBLIC_URL = "http://localhost:5100"
 _DEFAULT_EDITOR_INTERNAL_URL = "http://vectoplan-editor:5000"
 _DEFAULT_EDITOR_ROUTE = "/editor"
 
+_DEFAULT_CAD_PUBLIC_URL = "http://localhost:5104"
+_DEFAULT_CAD_INTERNAL_URL = "http://vectoplan-cad:5000"
+_DEFAULT_CAD_ROUTE = "/cad"
+
+_DEFAULT_LV_PUBLIC_URL = "http://localhost:5105"
+_DEFAULT_LV_INTERNAL_URL = "http://vectoplan-lv:5000"
+_DEFAULT_LV_ROUTE = "/lv"
+
 _DEFAULT_OPENLAYER_PUBLIC_URL = "http://localhost:5190"
 _DEFAULT_OPENLAYER_INTERNAL_URL = "http://openlayer:8090"
 _DEFAULT_OPENLAYER_ROUTE = "/map"
@@ -556,6 +564,10 @@ _DEFAULT_APP_ALLOWED_FRAME_SRC = (
     "http://127.0.0.1:5000",
     "http://localhost:5100",
     "http://127.0.0.1:5100",
+    "http://localhost:5104",
+    "http://127.0.0.1:5104",
+    "http://localhost:5105",
+    "http://127.0.0.1:5105",
     "http://localhost:5190",
     "http://127.0.0.1:5190",
 )
@@ -570,6 +582,8 @@ _DEFAULT_APP_ALLOWED_CONNECT_SRC = (
     "http://127.0.0.1:5101",
     "http://localhost:5102",
     "http://127.0.0.1:5102",
+    "http://localhost:5104",
+    "http://127.0.0.1:5104",
     "http://localhost:5110",
     "http://127.0.0.1:5110",
     "http://localhost:5182",
@@ -1117,6 +1131,118 @@ class Config:
     EDITOR_IFRAME_URL = VECTOPLAN_EDITOR_IFRAME_URL
     EDITOR_EMBED_ENABLED = VECTOPLAN_EDITOR_EMBED_ENABLED
 
+    # Stateless CAD microservice iframe integration.
+    VECTOPLAN_CAD_PUBLIC_URL = _norm_url(
+        _env_str_first(
+            (
+                "VECTOPLAN_CAD_PUBLIC_URL",
+                "VECTOPLAN_CAD_PUBLIC_BASE_URL",
+                "CAD_PUBLIC_URL",
+            ),
+            _DEFAULT_CAD_PUBLIC_URL,
+        ),
+        _DEFAULT_CAD_PUBLIC_URL,
+    )
+    VECTOPLAN_CAD_PUBLIC_BASE_URL = VECTOPLAN_CAD_PUBLIC_URL
+    VECTOPLAN_CAD_INTERNAL_URL = _norm_url(
+        _env_str_first(
+            (
+                "VECTOPLAN_CAD_INTERNAL_URL",
+                "CAD_INTERNAL_URL",
+            ),
+            _DEFAULT_CAD_INTERNAL_URL,
+        ),
+        _DEFAULT_CAD_INTERNAL_URL,
+    )
+    VECTOPLAN_CAD_ROUTE = _norm_path(
+        _env_str_first(
+            (
+                "VECTOPLAN_CAD_ROUTE",
+                "VECTOPLAN_CAD_EMBED_ROUTE",
+                "CAD_ROUTE",
+            ),
+            _DEFAULT_CAD_ROUTE,
+        ),
+        _DEFAULT_CAD_ROUTE,
+    )
+    VECTOPLAN_CAD_EMBED_ENABLED = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_CAD_EMBED_ENABLED",
+                "CAD_EMBED_ENABLED",
+            ),
+            None,
+        ),
+        True,
+    )
+    VECTOPLAN_CAD_IFRAME_URL = _join_url(
+        VECTOPLAN_CAD_PUBLIC_URL,
+        VECTOPLAN_CAD_ROUTE,
+        f"{_DEFAULT_CAD_PUBLIC_URL}{_DEFAULT_CAD_ROUTE}",
+    )
+    CAD_PUBLIC_URL = VECTOPLAN_CAD_PUBLIC_URL
+    CAD_PUBLIC_BASE_URL = VECTOPLAN_CAD_PUBLIC_BASE_URL
+    CAD_INTERNAL_URL = VECTOPLAN_CAD_INTERNAL_URL
+    CAD_ROUTE = VECTOPLAN_CAD_ROUTE
+    CAD_IFRAME_URL = VECTOPLAN_CAD_IFRAME_URL
+    CAD_EMBED_ENABLED = VECTOPLAN_CAD_EMBED_ENABLED
+
+    # Initial LV microservice iframe integration. The App only forwards the
+    # public project key; LV domain data remains owned by vectoplan-lv.
+    VECTOPLAN_LV_PUBLIC_URL = _norm_url(
+        _env_str_first(
+            (
+                "VECTOPLAN_LV_PUBLIC_URL",
+                "VECTOPLAN_LV_PUBLIC_BASE_URL",
+                "LV_PUBLIC_URL",
+            ),
+            _DEFAULT_LV_PUBLIC_URL,
+        ),
+        _DEFAULT_LV_PUBLIC_URL,
+    )
+    VECTOPLAN_LV_PUBLIC_BASE_URL = VECTOPLAN_LV_PUBLIC_URL
+    VECTOPLAN_LV_INTERNAL_URL = _norm_url(
+        _env_str_first(
+            (
+                "VECTOPLAN_LV_INTERNAL_URL",
+                "LV_INTERNAL_URL",
+            ),
+            _DEFAULT_LV_INTERNAL_URL,
+        ),
+        _DEFAULT_LV_INTERNAL_URL,
+    )
+    VECTOPLAN_LV_ROUTE = _norm_path(
+        _env_str_first(
+            (
+                "VECTOPLAN_LV_ROUTE",
+                "VECTOPLAN_LV_EMBED_ROUTE",
+                "LV_ROUTE",
+            ),
+            _DEFAULT_LV_ROUTE,
+        ),
+        _DEFAULT_LV_ROUTE,
+    )
+    VECTOPLAN_LV_EMBED_ENABLED = _as_bool(
+        _env_first(
+            (
+                "VECTOPLAN_LV_EMBED_ENABLED",
+                "LV_EMBED_ENABLED",
+            ),
+            None,
+        ),
+        True,
+    )
+    VECTOPLAN_LV_IFRAME_URL = _join_url(
+        VECTOPLAN_LV_PUBLIC_URL,
+        VECTOPLAN_LV_ROUTE,
+        f"{_DEFAULT_LV_PUBLIC_URL}{_DEFAULT_LV_ROUTE}",
+    )
+    LV_PUBLIC_URL = VECTOPLAN_LV_PUBLIC_URL
+    LV_PUBLIC_BASE_URL = VECTOPLAN_LV_PUBLIC_BASE_URL
+    LV_INTERNAL_URL = VECTOPLAN_LV_INTERNAL_URL
+    LV_ROUTE = VECTOPLAN_LV_ROUTE
+    LV_IFRAME_URL = VECTOPLAN_LV_IFRAME_URL
+    LV_EMBED_ENABLED = VECTOPLAN_LV_EMBED_ENABLED
     # ───────── OpenLayer microservice iframe integration ─────────
     # Browser-facing OpenLayer URL.
     # This must point to the published host port, not the internal container port.
@@ -1861,6 +1987,8 @@ class Config:
             *VECTOPLAN_APP_ALLOWED_FRAME_SRC_LIST,
             VECTOPLAN_AUTH_PUBLIC_URL,
             VECTOPLAN_EDITOR_PUBLIC_URL,
+            VECTOPLAN_CAD_PUBLIC_URL,
+            VECTOPLAN_LV_PUBLIC_URL,
             OPENLAYER_PUBLIC_URL,
         ]
     )
@@ -1896,6 +2024,8 @@ class Config:
             VECTOPLAN_APP_PUBLIC_URL,
             VECTOPLAN_AUTH_PUBLIC_URL,
             VECTOPLAN_EDITOR_PUBLIC_URL,
+            VECTOPLAN_CAD_PUBLIC_URL,
+            VECTOPLAN_LV_PUBLIC_URL,
             OPENLAYER_PUBLIC_URL,
             VECTOPLAN_CHUNK_PUBLIC_URL,
             VECTOPLAN_LIBRARY_PUBLIC_URL,
@@ -2033,6 +2163,7 @@ class Config:
     MAP_DEFAULT_LAT = _clamp_float(_as_float(_env("MAP_DEFAULT_LAT"), MAP_DEFAULT_CENTER[1]), -90.0, 90.0)
 
     MAP_DEFAULT_ZOOM = _clamp_int(_as_int(_env("MAP_DEFAULT_ZOOM"), 14), 0, 22)
+    MAP_PROJECT_ZOOM = _clamp_int(_as_int(_env("MAP_PROJECT_ZOOM"), 17), 0, 22)
     MAP_MIN_ZOOM = _clamp_int(_as_int(_env("MAP_MIN_ZOOM"), 0), 0, 22)
     MAP_MAX_ZOOM = _clamp_int(_as_int(_env("MAP_MAX_ZOOM"), 22), MAP_MIN_ZOOM, 22)
 

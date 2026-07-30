@@ -213,7 +213,7 @@ export function setStatus(text, { ok = true } = {}) {
     el.textContent = msg;
     el.classList.toggle("hidden", !msg);
 
-    // Colors: best-effort (wir verwenden vorhandene Dark-Panel-Farben)
+    // Colors: best-effort using the fixed light panel palette.
     el.style.borderColor = ok ? "#2a3561" : "#7a2b2b";
     el.style.background = ok ? "#111b3f" : "#2b1111";
   });
