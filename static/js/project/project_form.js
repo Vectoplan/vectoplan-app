@@ -108,6 +108,7 @@
 
   var DEFAULT_REQUEST_TIMEOUT_MS = 30000;
   var MAX_RESPONSE_TEXT_LENGTH = 2 * 1024 * 1024;
+  var GEOCODER_DEBOUNCE_MS = 350;
 
   var VALID_PROJECT_ROLES = {
     owner: true,
@@ -179,6 +180,12 @@
     currentProject: null,
     config: null,
     refs: {},
+    geocoder: {
+      timer: null,
+      controller: null,
+      items: [],
+      activeIndex: -1
+    },
     listeners: []
   };
 
@@ -1458,6 +1465,7 @@
       name: queryById("projectName"),
       description: queryById("projectDescription"),
       addressText: queryById("projectAddressText"),
+      addressMapboxId: queryById("projectAddressMapboxId"),
 
       visibility: queryById("projectVisibility"),
       visibilityOptions: queryAll("[data-project-visibility-option]"),
@@ -1467,6 +1475,9 @@
       visibilityHelp: query("[data-project-visibility-help]"),
 
       addressCounter: query("[data-project-address-counter]"),
+      geocoder: query("[data-project-geocoder]"),
+      geocoderSuggestions: query("[data-project-geocoder-suggestions]"),
+      geocoderStatus: query("[data-project-geocoder-status]"),
       addressCounterCurrent: query("[data-project-address-counter-current]"),
 
       submit: query("[data-project-submit]"),
@@ -1859,6 +1870,199 @@
     } catch (error) {}
   }
 
+  function setGeocoderStatus(message, tone) {
+    try {
+      var node = state.refs && state.refs.geocoderStatus;
+      if (!node) { return; }
+      node.textContent = trimString(message, "");
+      node.setAttribute("data-tone", trimString(tone, "neutral"));
+    } catch (error) {}
+  }
+
+  function closeGeocoderSuggestions() {
+    try {
+      var refs = state.refs || {};
+      state.geocoder.items = [];
+      state.geocoder.activeIndex = -1;
+      if (refs.geocoderSuggestions) {
+        refs.geocoderSuggestions.replaceChildren();
+        setHidden(refs.geocoderSuggestions, true);
+      }
+      if (refs.addressText) {
+        refs.addressText.setAttribute("aria-expanded", "false");
+        refs.addressText.removeAttribute("aria-activedescendant");
+      }
+    } catch (error) {}
+  }
+
+  function selectGeocoderSuggestion(index) {
+    try {
+      var item = state.geocoder.items[index];
+      var label = item && trimString(item.label || item.address_text, "");
+      if (!label || !state.refs.addressText) { return; }
+      setValue(state.refs.addressText, label);
+      setValue(state.refs.addressMapboxId, trimString(item.mapbox_id || item.id, ""));
+      removeFieldError(state.refs.addressText);
+      updateAddressCounter();
+      closeGeocoderSuggestions();
+      setGeocoderStatus("Adresse ausgew\u00e4hlt \u00b7 Powered by Mapbox", "success");
+      if (canWriteProject()) {
+        markDirtyFromInput();
+      }
+    } catch (error) {}
+  }
+
+  function renderGeocoderSuggestions(items) {
+    try {
+      var refs = state.refs || {};
+      var list = refs.geocoderSuggestions;
+      var doc = refs.document || getDocument();
+      if (!list || !doc) { return; }
+
+      list.replaceChildren();
+      state.geocoder.items = Array.isArray(items) ? items.slice(0, 6) : [];
+      state.geocoder.activeIndex = -1;
+
+      if (!state.geocoder.items.length) {
+        closeGeocoderSuggestions();
+        setGeocoderStatus("Keine passende Adresse gefunden \u00b7 Powered by Mapbox", "muted");
+        return;
+      }
+
+      state.geocoder.items.forEach(function addSuggestion(item, index) {
+        var option = doc.createElement("button");
+        option.type = "button";
+        option.className = "vp-project-geocoder__option";
+        option.id = "projectAddressSuggestion-" + String(index);
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-selected", "false");
+        option.setAttribute("data-geocoder-index", String(index));
+
+        var label = doc.createElement("span");
+        label.className = "vp-project-geocoder__option-label";
+        label.textContent = trimString(item.label || item.address_text, "Adresse");
+        option.appendChild(label);
+
+        var meta = doc.createElement("span");
+        meta.className = "vp-project-geocoder__option-meta";
+        meta.textContent = trimString(item.feature_type, "Adresse");
+        option.appendChild(meta);
+
+        addListener(option, "mousedown", function keepFocus(event) {
+          try { event.preventDefault(); } catch (_) {}
+        });
+        addListener(option, "click", function chooseSuggestion() {
+          selectGeocoderSuggestion(index);
+        });
+        list.appendChild(option);
+      });
+
+      setHidden(list, false);
+      if (refs.addressText) {
+        refs.addressText.setAttribute("aria-expanded", "true");
+      }
+      setGeocoderStatus("Adresse ausw\u00e4hlen \u00b7 Powered by Mapbox", "neutral");
+    } catch (error) {
+      closeGeocoderSuggestions();
+    }
+  }
+
+  async function requestGeocoderSuggestions(query) {
+    var cleanQuery = trimString(query, "");
+    if (cleanQuery.length < 3 || !canWriteProject()) {
+      closeGeocoderSuggestions();
+      setGeocoderStatus(
+        cleanQuery ? "Mindestens 3 Zeichen eingeben \u00b7 Powered by Mapbox" : "Adresssuche bereit \u00b7 Powered by Mapbox",
+        "muted"
+      );
+      return;
+    }
+
+    try {
+      if (state.geocoder.controller && typeof state.geocoder.controller.abort === "function") {
+        state.geocoder.controller.abort();
+      }
+      state.geocoder.controller = typeof AbortController === "function" ? new AbortController() : null;
+      setGeocoderStatus("Adresse wird gesucht \u2026", "loading");
+
+      var response = await fetch(
+        "/v1/geocoding/suggest?q=" + encodeURIComponent(cleanQuery) + "&limit=5",
+        {
+          method: "GET",
+          credentials: "same-origin",
+          headers: { "Accept": "application/json" },
+          signal: state.geocoder.controller ? state.geocoder.controller.signal : undefined
+        }
+      );
+      var payload = await response.json().catch(function emptyPayload() { return {}; });
+      if (!response.ok || payload.ok === false) {
+        throw new Error(trimString(payload.message || payload.error, "Adresssuche fehlgeschlagen."));
+      }
+      if (getValue(state.refs.addressText) !== cleanQuery) {
+        return;
+      }
+      renderGeocoderSuggestions(payload.items || []);
+    } catch (error) {
+      if (error && error.name === "AbortError") { return; }
+      closeGeocoderSuggestions();
+      setGeocoderStatus("Adresssuche derzeit nicht verf\u00fcgbar \u00b7 Powered by Mapbox", "error");
+    }
+  }
+
+  function scheduleGeocoderSearch() {
+    try {
+      if (state.geocoder.timer) {
+        clearTimeout(state.geocoder.timer);
+      }
+      var query = getValue(state.refs.addressText);
+      state.geocoder.timer = setTimeout(function runGeocoderSearch() {
+        requestGeocoderSuggestions(query);
+      }, GEOCODER_DEBOUNCE_MS);
+    } catch (error) {}
+  }
+
+  function onGeocoderKeydown(event) {
+    try {
+      var items = state.geocoder.items || [];
+      if (!items.length) {
+        if (event && event.key === "Escape") {
+          closeGeocoderSuggestions();
+        }
+        return;
+      }
+      var next = state.geocoder.activeIndex;
+      if (event.key === "ArrowDown") {
+        next = Math.min(items.length - 1, next + 1);
+      } else if (event.key === "ArrowUp") {
+        next = Math.max(0, next < 0 ? items.length - 1 : next - 1);
+      } else if (event.key === "Enter" && next >= 0) {
+        event.preventDefault();
+        selectGeocoderSuggestion(next);
+        return;
+      } else if (event.key === "Escape") {
+        closeGeocoderSuggestions();
+        return;
+      } else {
+        return;
+      }
+
+      event.preventDefault();
+      state.geocoder.activeIndex = next;
+      var options = queryAll("[data-geocoder-index]");
+      options.forEach(function markOption(option, index) {
+        var active = index === next;
+        option.setAttribute("aria-selected", active ? "true" : "false");
+        option.classList.toggle("is-active", active);
+      });
+      if (state.refs.addressText && options[next]) {
+        state.refs.addressText.setAttribute("aria-activedescendant", options[next].id);
+        if (typeof options[next].scrollIntoView === "function") {
+          options[next].scrollIntoView({ block: "nearest" });
+        }
+      }
+    } catch (error) {}
+  }
+
   function visibilityLabel(value) {
     var normalized = normalizeVisibility(value, "private");
 
@@ -2016,6 +2220,7 @@
         title: name,
         description: getValue(refs.description),
         address_text: addressText,
+        address_mapbox_id: getValue(refs.addressMapboxId),
         address: {
           text: addressText
         },
@@ -2098,6 +2303,7 @@
       setValue(refs.name, p.name || p.display_name || p.displayName || "");
       setValue(refs.description, p.description || "");
       setValue(refs.addressText, p.address_text || p.addressText || address.text || "");
+      setValue(refs.addressMapboxId, "");
       setVisibility(p.visibility || state.config.projectVisibility || "private", { silent: true });
 
       state.currentProject = safeClone(p);
@@ -2852,6 +3058,20 @@
           markDirtyFromInput();
         });
       });
+      addListener(refs.addressText, "input", function onAddressGeocoderInput() {
+        setValue(refs.addressMapboxId, "");
+        updateAddressCounter();
+        scheduleGeocoderSearch();
+      });
+      addListener(refs.addressText, "keydown", onGeocoderKeydown);
+      addListener(refs.addressText, "focus", function onAddressGeocoderFocus() {
+        if (getValue(refs.addressText).length >= 3) {
+          scheduleGeocoderSearch();
+        }
+      });
+      addListener(refs.addressText, "blur", function onAddressGeocoderBlur() {
+        setTimeout(closeGeocoderSuggestions, 140);
+      });
 
       addListener(refs.visibility, "change", onVisibilityInputChange);
       addListener(refs.visibility, "input", onVisibilityInputChange);
@@ -2873,60 +3093,11 @@
             return;
           }
           var type = trimString(data.type || data.kind, "").toLowerCase();
-          if (type === "vectoplan:theme:update" && data.theme) {
-            applyTheme(data.theme);
-          }
           if (type === EVENT_VISIBILITY_CHANGED) {
             onExternalVisibilityChanged({ detail: data.detail || data });
           }
         } catch (error) {}
       });
-    } catch (error) {}
-  }
-
-  function applyTheme(theme) {
-    try {
-      var normalized = trimString(theme, "").toLowerCase();
-
-      if (normalized !== "dark" && normalized !== "light") {
-        return false;
-      }
-
-      document.documentElement.setAttribute("data-theme", normalized);
-
-      try {
-        localStorage.setItem("theme", normalized);
-      } catch (_) {}
-
-      return true;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  function syncTheme() {
-    try {
-      var saved = "";
-
-      try {
-        saved = localStorage.getItem("theme") || "";
-      } catch (_) {
-        saved = "";
-      }
-
-      if (saved === "dark" || saved === "light") {
-        applyTheme(saved);
-        return;
-      }
-
-      try {
-        if (window.parent && window.parent !== window) {
-          var parentTheme = window.parent.document.documentElement.getAttribute("data-theme");
-          if (parentTheme === "dark" || parentTheme === "light") {
-            applyTheme(parentTheme);
-          }
-        }
-      } catch (_) {}
     } catch (error) {}
   }
 
@@ -3111,7 +3282,6 @@
         return state;
       }
 
-      syncTheme();
 
       fillFormFromProject(Object.assign({}, state.currentProject || {}, {
         visibility: state.config.projectVisibility || (state.currentProject && state.currentProject.visibility) || "private",
@@ -3165,6 +3335,13 @@
 
   function destroy() {
     try {
+      if (state.geocoder.timer) {
+        clearTimeout(state.geocoder.timer);
+      }
+      if (state.geocoder.controller && typeof state.geocoder.controller.abort === "function") {
+        state.geocoder.controller.abort();
+      }
+      closeGeocoderSuggestions();
       removeAllListeners();
       state.destroyed = true;
       state.initialized = false;
@@ -3238,7 +3415,6 @@
     validatePayload: validatePayload,
     getSnapshot: getSnapshot,
     setAlert: setAlert,
-    applyTheme: applyTheme,
     setVisibility: setVisibility,
     canWrite: canWriteProject,
     disabledReason: disabledReason,

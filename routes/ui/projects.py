@@ -605,6 +605,8 @@ def _workspace_csp_header_value() -> str:
     try:
         auth_public = _config_url("VECTOPLAN_AUTH_PUBLIC_URL", "http://localhost:5000")
         editor_public = _config_url("VECTOPLAN_EDITOR_PUBLIC_URL", "http://localhost:5100")
+        cad_public = _config_url("VECTOPLAN_CAD_PUBLIC_URL", "http://localhost:5104")
+        lv_public = _config_url("VECTOPLAN_LV_PUBLIC_URL", "http://localhost:5105")
         openlayer_public = _config_url("OPENLAYER_PUBLIC_URL", "http://localhost:5190")
         chunk_public = _config_url("VECTOPLAN_CHUNK_PUBLIC_URL", "http://localhost:5102")
         library_public = _config_url("VECTOPLAN_LIBRARY_PUBLIC_URL", "http://localhost:5101")
@@ -616,6 +618,10 @@ def _workspace_csp_header_value() -> str:
             "http://127.0.0.1:5000",
             editor_public,
             "http://127.0.0.1:5100",
+            cad_public,
+            "http://127.0.0.1:5104",
+            lv_public,
+            "http://127.0.0.1:5105",
             openlayer_public,
             "http://127.0.0.1:5190",
         ]
@@ -626,6 +632,8 @@ def _workspace_csp_header_value() -> str:
             "http://127.0.0.1:5000",
             editor_public,
             "http://127.0.0.1:5100",
+            cad_public,
+            "http://127.0.0.1:5104",
             chunk_public,
             "http://127.0.0.1:5102",
             library_public,
@@ -670,12 +678,17 @@ def _workspace_csp_header_value() -> str:
     except Exception:
         return (
             "frame-src 'self' http://localhost:5000 http://127.0.0.1:5000 "
+            "http://localhost:5104 http://127.0.0.1:5104 "
+            "http://localhost:5105 http://127.0.0.1:5105 "
             "http://localhost:5100 http://127.0.0.1:5100 "
             "http://localhost:5190 http://127.0.0.1:5190; "
             "child-src 'self' http://localhost:5000 http://127.0.0.1:5000 "
+            "http://localhost:5104 http://127.0.0.1:5104 "
+            "http://localhost:5105 http://127.0.0.1:5105 "
             "http://localhost:5100 http://127.0.0.1:5100 "
             "http://localhost:5190 http://127.0.0.1:5190; "
             "connect-src 'self' http://localhost:5000 http://127.0.0.1:5000 "
+            "http://localhost:5104 http://127.0.0.1:5104 "
             "http://localhost:5100 http://127.0.0.1:5100 "
             "http://localhost:5102 http://127.0.0.1:5102 "
             "http://localhost:5101 http://127.0.0.1:5101 "
@@ -856,48 +869,70 @@ def _auth_problem_html_response(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
-      color-scheme: light dark;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0f172a;
-      color: #e5e7eb;
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f7fb;
+      color: #172033;
+    }
+    * {
+      box-sizing: border-box;
     }
     body {
-      margin: 0;
       min-height: 100vh;
+      margin: 0;
       display: grid;
       place-items: center;
       padding: 24px;
+      background: #f4f7fb;
     }
     main {
-      width: min(720px, 100%);
-      border: 1px solid rgba(148, 163, 184, .35);
-      border-radius: 18px;
-      padding: 24px;
-      background: rgba(15, 23, 42, .88);
-      box-shadow: 0 20px 60px rgba(0, 0, 0, .35);
+      width: min(680px, 100%);
+      border: 1px solid #d8e0ec;
+      border-top: 4px solid #2563eb;
+      border-radius: 10px;
+      padding: clamp(22px, 4vw, 34px);
+      background: #ffffff;
+      box-shadow: 0 18px 48px rgba(31, 48, 77, .10);
     }
     h1 {
-      margin: 0 0 10px;
-      font-size: 24px;
+      margin: 0 0 12px;
+      color: #111827;
+      font-size: clamp(22px, 4vw, 28px);
       line-height: 1.2;
+      letter-spacing: -.02em;
     }
     p {
-      margin: 0 0 14px;
-      color: #cbd5e1;
-      line-height: 1.55;
+      margin: 0 0 16px;
+      color: #536176;
+      line-height: 1.6;
     }
     code {
       padding: 2px 6px;
-      border-radius: 6px;
-      background: rgba(148, 163, 184, .18);
+      border: 1px solid #d8e0ec;
+      border-radius: 4px;
+      background: #eef3f9;
+      color: #26364d;
     }
     a {
-      color: #bfdbfe;
+      color: #155eef;
+      font-weight: 650;
+      text-underline-offset: 3px;
     }
     .meta {
-      margin-top: 18px;
+      margin-top: 20px;
+      padding-top: 14px;
+      border-top: 1px solid #e2e8f0;
       font-size: 13px;
-      color: #94a3b8;
+      color: #68758a;
+    }
+    @media (max-width: 540px) {
+      body {
+        place-items: start stretch;
+        padding: 12px;
+      }
+      main {
+        margin-top: 8vh;
+      }
     }
   </style>
 </head>

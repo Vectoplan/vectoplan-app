@@ -28,7 +28,6 @@
   const STORAGE_ACTIVE_TAB = `vectoai.admin.activeTab${CHAT_ID ? ":" + CHAT_ID : ""}`;
 
   // Theme-Key ist global (wie in chat_viewer.html)
-  const STORAGE_THEME_KEY = "theme";
 
   // Migration/Aliases (robust bei umbenannten Tabs)
   // Alt -> Neu (damit alte Hashes/localStorage nicht "kaputt" sind)
@@ -79,46 +78,6 @@
     post({ t: "admin.status", chatId: CHAT_ID, status: "error", error: "admin.js: missing tab/panel structure" });
     return;
   }
-
-  // ───────────────────────── Theme Sync ─────────────────────────
-  function normalizeTheme(v) {
-    const s = String(v || "").trim().toLowerCase();
-    return (s === "dark" || s === "light") ? s : "";
-  }
-
-  function applyTheme(themeRaw) {
-    safe(() => {
-      const theme =
-        normalizeTheme(themeRaw) ||
-        normalizeTheme(safe(() => localStorage.getItem(STORAGE_THEME_KEY), ""));
-
-      if (theme) {
-        document.documentElement.setAttribute("data-theme", theme);
-        return;
-      }
-
-      // Fallback: wenn nichts gesetzt ist, bevorzugtes Systemtheme nutzen
-      const hasAttr = !!document.documentElement.getAttribute("data-theme");
-      if (!hasAttr) {
-        const preferDark = safe(
-          () => window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches,
-          false
-        );
-        document.documentElement.setAttribute("data-theme", preferDark ? "dark" : "light");
-      }
-    });
-  }
-
-  // initial apply (admin.html setzt schon vorab, hier nur Robustheit)
-  applyTheme("");
-
-  // Live theme updates aus Parent (storage event in iframe, same-origin)
-  safe(() => window.addEventListener("storage", (e) => {
-    if (!e) return;
-    if (e.key === STORAGE_THEME_KEY) {
-      applyTheme(e.newValue);
-    }
-  }));
 
   // ───────────────────────── Tab State ─────────────────────────
   function decodeMaybe(s) {
@@ -651,16 +610,11 @@
         chatId: CHAT_ID,
         tab: currentSelectedKey() || "",
         knownTabs: knownKeys.slice(0, 32),
-        theme: safe(() => document.documentElement.getAttribute("data-theme") || "", ""),
         ts: nowISO()
       });
       return;
     }
 
-    if (msg.t === "admin.setTheme") {
-      applyTheme(msg.theme);
-      return;
-    }
 
     if (msg.t === "admin.reloadEmbed") {
       const t = canonicalEmbedTarget(msg.target || msg.name || "");
@@ -729,7 +683,6 @@
       setTab: (k) => setActive(k, { source: "api", focus: true }),
       getTab: () => currentSelectedKey() || "",
       knownTabs: () => knownKeys.slice(),
-      applyTheme: (t) => applyTheme(t),
 
       // Embed helpers
       loadEmbed: (t) => loadEmbed(t, { force: false, source: "api" }),

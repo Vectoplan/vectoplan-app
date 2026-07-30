@@ -241,6 +241,9 @@ except Exception:  # pragma: no cover
             "map",
             "karte",
             "openlayer",
+            "lv",
+            "boq",
+            "leistungsverzeichnis",
         }
 
 
@@ -304,6 +307,8 @@ DEMO_WORKSPACES = {
 EXTERNAL_REDIRECT_WORKSPACES = {
     WORKSPACE_EDITOR3D,
     WORKSPACE_MAP,
+    WORKSPACE_CAD2D,
+    WORKSPACE_LV,
 }
 
 ADMIN_WORKSPACES = {
@@ -582,17 +587,25 @@ _AUTH_BROWSER_ALLOWED_KEYS = {
 }
 
 _INTERNAL_REDIRECT_HOSTS = {
+    "cad",
     "chunk",
     "editor",
+    "lv",
     "openlayer",
+    "server-cad",
     "server-chunk",
     "server-editor",
+    "server-lv",
     "server-openlayer",
+    "vectoplan-cad",
     "vectoplan-chunk",
     "vectoplan-editor",
+    "vectoplan-lv",
     "vectoplan-openlayer",
+    "vectoplan_cad",
     "vectoplan_chunk",
     "vectoplan_editor",
+    "vectoplan_lv",
     "vectoplan_openlayer",
 }
 
@@ -1264,12 +1277,18 @@ def _workspace_runtime_gate(
 
 
 def _configured_redirect_hosts(workspace: str) -> set[str]:
-    keys = (
-        ("VECTOPLAN_EDITOR_PUBLIC_URL", "VECTOPLAN_EDITOR_PUBLIC_BASE_URL", "EDITOR_PUBLIC_URL")
-        if workspace == WORKSPACE_EDITOR3D
-        else ("OPENLAYER_PUBLIC_URL", "OPENLAYER_PUBLIC_BASE_URL", "VECTOPLAN_OPENLAYER_PUBLIC_URL")
-    )
-    defaults = ("localhost:5100", "127.0.0.1:5100") if workspace == WORKSPACE_EDITOR3D else ("localhost:5190", "127.0.0.1:5190")
+    if workspace == WORKSPACE_EDITOR3D:
+        keys = ("VECTOPLAN_EDITOR_PUBLIC_URL", "VECTOPLAN_EDITOR_PUBLIC_BASE_URL", "EDITOR_PUBLIC_URL")
+        defaults = ("localhost:5100", "127.0.0.1:5100")
+    elif workspace == WORKSPACE_CAD2D:
+        keys = ("VECTOPLAN_CAD_PUBLIC_URL", "VECTOPLAN_CAD_PUBLIC_BASE_URL", "CAD_PUBLIC_URL")
+        defaults = ("localhost:5104", "127.0.0.1:5104")
+    elif workspace == WORKSPACE_LV:
+        keys = ("VECTOPLAN_LV_PUBLIC_URL", "VECTOPLAN_LV_PUBLIC_BASE_URL", "LV_PUBLIC_URL")
+        defaults = ("localhost:5105", "127.0.0.1:5105")
+    else:
+        keys = ("OPENLAYER_PUBLIC_URL", "OPENLAYER_PUBLIC_BASE_URL", "VECTOPLAN_OPENLAYER_PUBLIC_URL")
+        defaults = ("localhost:5190", "127.0.0.1:5190")
     hosts: set[str] = set(defaults)
     for key in keys:
         raw = _safe_str(_config_value(key, ""), "", 4000)

@@ -313,6 +313,12 @@ def _apply_default_config(app: Flask) -> None:
     app.config.setdefault("VECTOPLAN_EDITOR_ROUTE", "/editor")
     app.config.setdefault("VECTOPLAN_EDITOR_EMBED_ENABLED", True)
 
+    # Stateless 2D/CAD workspace integration.
+    app.config.setdefault("VECTOPLAN_CAD_PUBLIC_URL", "http://localhost:5104")
+    app.config.setdefault("VECTOPLAN_CAD_INTERNAL_URL", "http://vectoplan-cad:5000")
+    app.config.setdefault("VECTOPLAN_CAD_ROUTE", "/cad")
+    app.config.setdefault("VECTOPLAN_CAD_EMBED_ENABLED", True)
+
     # OpenLayer / Map iframe integration.
     app.config.setdefault("OPENLAYER_PUBLIC_URL", "http://localhost:5190")
     app.config.setdefault("OPENLAYER_INTERNAL_URL", "http://openlayer:8090")

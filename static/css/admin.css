@@ -1,8 +1,8 @@
 /* /services/app/static/css/admin.css */
 
 /* ───────────────────────── Theme Variables ─────────────────────────
-   Default = LIGHT. Umschalten via <html data-theme="dark|light">.
-   Admin folgt dem gleichen Pattern wie chat.css (theme aus localStorage).
+   Festes helles Erscheinungsbild für alle Admin-Arbeitsbereiche.
+   Keine lokale oder systemabhängige Theme-Umschaltung.
 ------------------------------------------------------------------- */
 
 /* Default (light) */
@@ -43,20 +43,6 @@
   :root{ --app-h:100dvh; }
 }
 
-/* Dark Theme */
-:root[data-theme="dark"]{
-  --bg:#0b0f1e;
-  --panel:#0f1530;
-  --text:#e8ecff;
-  --muted:#9aa3c7;
-  --border:#1f2748;
-  --accent:#4a7aff;
-
-  --btn-bg:#121a36;
-  --btn-border:#1f2748;
-  --btn-hover:#1a2346;
-  --btn-active:#162146;
-}
 
 /* ───────────────────────── Base / Resets ───────────────────────── */
 *{ box-sizing:border-box; }
@@ -290,4 +276,21 @@ button, input, textarea{ font:inherit; color:inherit; }
   .admin-panel{
     padding-bottom:calc(var(--pad) + env(safe-area-inset-bottom, 0px));
   }
+}/* Fixed light CAD admin */
+:root {
+  color-scheme: light;
+  --bg: #f3f6fa;
+  --panel: #ffffff;
+  --text: #111827;
+  --muted: #4b5563;
+  --border: #d8e0ea;
+  --accent: #155eef;
+  --btn-border: #b9c5d3;
+  --btn-hover: #eef4ff;
+  --btn-active: #e6efff;
+  --radius: 8px;
+}
+.admin-tabs,
+.embed-head {
+  background: #ffffff;
 }

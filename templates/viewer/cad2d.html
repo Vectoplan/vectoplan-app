@@ -187,8 +187,8 @@
       if (!factory) throw new Error("createViewer API nicht gefunden");
 
       const viewer = await (typeof factory === "function"
-        ? factory({ container: stage, theme: "dark" })
-        : factory.createViewer({ container: stage, theme: "dark" }));
+        ? factory({ container: stage, theme: "light" })
+        : factory.createViewer({ container: stage, theme: "light" }));
 
       if (viewer.loadDXF) await viewer.loadDXF(dxfUrl);
       else if (viewer.open) await viewer.open(dxfUrl,{type:"dxf"});

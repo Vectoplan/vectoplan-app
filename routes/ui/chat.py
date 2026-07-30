@@ -68,12 +68,18 @@ ALLOWED_MIMES = {
 
 DEFAULT_APP_PUBLIC_URL = "http://localhost:5103"
 DEFAULT_EDITOR_PUBLIC_URL = "http://localhost:5100"
+DEFAULT_CAD_PUBLIC_URL = "http://localhost:5104"
+DEFAULT_LV_PUBLIC_URL = "http://localhost:5105"
 DEFAULT_OPENLAYER_PUBLIC_URL = "http://localhost:5190"
 
 DEFAULT_ALLOWED_FRAME_SRC = (
     "self",
     "http://localhost:5100",
     "http://127.0.0.1:5100",
+    "http://localhost:5104",
+    "http://127.0.0.1:5104",
+    "http://localhost:5105",
+    "http://127.0.0.1:5105",
     "http://localhost:5190",
     "http://127.0.0.1:5190",
 )
@@ -339,7 +345,27 @@ def _app_frame_src_values() -> List[str]:
             )
         )
 
-        for origin in (editor_origin, openlayer_origin):
+        cad_origin = _cached_origin_from_url(
+            _cfg_first(
+                (
+                    "VECTOPLAN_CAD_PUBLIC_URL",
+                    "VECTOPLAN_CAD_PUBLIC_BASE_URL",
+                    "CAD_PUBLIC_URL",
+                ),
+                DEFAULT_CAD_PUBLIC_URL,
+            )
+        )
+        lv_origin = _cached_origin_from_url(
+            _cfg_first(
+                (
+                    "VECTOPLAN_LV_PUBLIC_URL",
+                    "VECTOPLAN_LV_PUBLIC_BASE_URL",
+                    "LV_PUBLIC_URL",
+                ),
+                DEFAULT_LV_PUBLIC_URL,
+            )
+        )
+        for origin in (editor_origin, cad_origin, lv_origin, openlayer_origin):
             if origin and origin not in result:
                 result.append(origin)
 
@@ -382,8 +408,12 @@ def _workspace_csp_header_value() -> str:
     except Exception:
         return (
             "frame-src 'self' http://localhost:5100 http://127.0.0.1:5100 "
+            "http://localhost:5104 http://127.0.0.1:5104 "
+            "http://localhost:5105 http://127.0.0.1:5105 "
             "http://localhost:5190 http://127.0.0.1:5190; "
             "child-src 'self' http://localhost:5100 http://127.0.0.1:5100 "
+            "http://localhost:5104 http://127.0.0.1:5104 "
+            "http://localhost:5105 http://127.0.0.1:5105 "
             "http://localhost:5190 http://127.0.0.1:5190; "
             "frame-ancestors 'self' http://localhost:5103 http://127.0.0.1:5103"
         )

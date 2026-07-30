@@ -5,25 +5,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="referrer" content="no-referrer">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="light">
   <title>Admin</title>
 
   <!-- DEV/robust: Browser-Caches für dieses Dokument best-effort reduzieren -->
   <meta http-equiv="Cache-Control" content="no-store, max-age=0, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
-
-  <!-- Theme vorab aus localStorage setzen, um FOUC zu vermeiden -->
-  <script>
-    (function () {
-      try {
-        const saved = localStorage.getItem("theme");
-        if (saved === "dark" || saved === "light") {
-          document.documentElement.setAttribute("data-theme", saved);
-        }
-      } catch (e) {}
-    })();
-  </script>
 
   <!-- Stabilere vh auf Mobile (für CSS: calc(var(--vh, 1vh) * 100)) -->
   <script>
@@ -60,17 +48,6 @@
       --btn-border:#d0d7e2;
       --btn-hover:#f3f6fd;
       --radius:12px;
-    }
-    :root[data-theme="dark"]{
-      --bg:#0b0f1e;
-      --panel:#0f1530;
-      --text:#e8ecff;
-      --muted:#9aa3c7;
-      --border:#1f2748;
-      --accent:#4a7aff;
-      --btn-bg:#121a36;
-      --btn-border:#1f2748;
-      --btn-hover:#1a2346;
     }
     @supports (height: 100svh){ :root{ --app-h:100svh; } }
     @supports (height: 100dvh){ :root{ --app-h:100dvh; } }

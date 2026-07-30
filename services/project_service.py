@@ -310,6 +310,18 @@ except Exception:  # pragma: no cover
     serialize_project_chunk_access_sync_status = None  # type: ignore
     sync_project_chunk_access = None  # type: ignore
 
+try:
+    from services.geocoding_client import (
+        GeocodingError as MapboxGeocodingError,
+        geocode_address as mapbox_geocode_address,
+        geocoding_status as mapbox_geocoding_status,
+    )
+except Exception:  # pragma: no cover
+    MapboxGeocodingError = RuntimeError  # type: ignore
+    mapbox_geocode_address = None  # type: ignore
+    mapbox_geocoding_status = None  # type: ignore
+
+
 
 # ─────────────────────────────────────────────────────────────
 # Constants
@@ -391,6 +403,26 @@ CHUNK_WORLD_TEMPLATE_FLAT = "flat"
 # ─────────────────────────────────────────────────────────────
 # Result / permission objects
 # ─────────────────────────────────────────────────────────────
+
+class ProjectGeocodingError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status_code: int = 422,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = _safe_str(code, "project_geocoding_failed", 120)
+        self.message = _safe_str(
+            message,
+            "Die Projektadresse konnte nicht aufgel\u00f6st werden.",
+            1000,
+        )
+        self.status_code = max(400, min(599, _safe_int(status_code, 422)))
+        self.retryable = bool(retryable)
+
 
 @dataclass(frozen=True)
 class ProjectOperationResult:
@@ -1607,6 +1639,154 @@ def _structured_address_payload_from_geocoder(source: Mapping[str, Any]) -> Dict
         )
         payload["geocode_payload"] = geocoder
 
+    return payload
+
+
+def _mapbox_geocoding_enabled() -> bool:
+    try:
+        if callable(mapbox_geocoding_status):
+            status = _safe_dict(mapbox_geocoding_status())
+            return bool(status.get("enabled") and status.get("configured"))
+
+        return _config_bool("VECTOPLAN_APP_MAPBOX_GEOCODING_ENABLED", False)
+    except Exception:
+        return False
+
+
+def _clear_geocoding_fields(payload: Dict[str, Any]) -> None:
+    present = set(payload.get("__present") or [])
+    for key in (
+        "street",
+        "house_number",
+        "postal_code",
+        "city",
+        "region",
+        "country",
+        "latitude",
+        "longitude",
+    ):
+        payload[key] = None
+        present.add(key)
+    payload["coordinate_srid"] = DEFAULT_COORDINATE_SRID
+    payload["geocode_status"] = GEOCODE_STATUS_NONE
+    payload["geocode_payload"] = {}
+    present.update({"coordinate_srid", "geocode_status", "geocode_payload"})
+    payload["__present"] = present
+
+
+def _enrich_project_payload_with_mapbox(
+    payload: Dict[str, Any],
+    *,
+    existing_project: Any = None,
+) -> Dict[str, Any]:
+    """Resolve address fields from the trusted server-side Mapbox adapter."""
+    if not _mapbox_geocoding_enabled():
+        return payload
+
+    present = set(payload.get("__present") or [])
+    address_was_submitted = "address_text" in present
+    address_text = _safe_str(payload.get("address_text"), "", 256)
+
+    if not address_was_submitted:
+        return payload
+
+    if not address_text:
+        _clear_geocoding_fields(payload)
+        return payload
+
+    if existing_project is not None and address_was_submitted:
+        old_address = _safe_str(
+            get_project_address_text(existing_project, allow_structured_fallback=True),
+            "",
+            256,
+        )
+        has_coordinates = (
+            _safe_float(getattr(existing_project, "latitude", None), None) is not None
+            and _safe_float(getattr(existing_project, "longitude", None), None) is not None
+        )
+        if old_address == address_text and has_coordinates:
+            return payload
+
+    if not callable(mapbox_geocode_address):
+        raise ProjectGeocodingError(
+            "mapbox_geocoder_unavailable",
+            "Die serverseitige Adresssuche ist nicht verf\u00fcgbar.",
+            status_code=503,
+            retryable=True,
+        )
+
+    selected_mapbox_id = _safe_str(payload.get("address_mapbox_id"), "", 255)
+    lookup_query = selected_mapbox_id or address_text
+
+    try:
+        response = mapbox_geocode_address(
+            address=lookup_query,
+            limit=1,
+            permanent=True,
+        )
+    except MapboxGeocodingError as exc:
+        raise ProjectGeocodingError(
+            getattr(exc, "code", "project_geocoding_failed"),
+            getattr(exc, "message", str(exc)),
+            status_code=getattr(exc, "status_code", 503),
+            retryable=getattr(exc, "retryable", False),
+        ) from exc
+    except Exception as exc:
+        raise ProjectGeocodingError(
+            "project_geocoding_failed",
+            "Die Projektadresse konnte nicht gepr\u00fcft werden.",
+            status_code=503,
+            retryable=True,
+        ) from exc
+
+    response = _safe_dict(response)
+    result = _safe_dict(response.get("result"))
+    if not result:
+        raise ProjectGeocodingError(
+            "project_address_not_found",
+            "F\u00fcr diese Eingabe wurde keine eindeutige Adresse gefunden.",
+            status_code=422,
+        )
+
+    resolved_mapbox_id = _safe_str(
+        result.get("mapbox_id") or result.get("id"),
+        "",
+        255,
+    )
+    if selected_mapbox_id and resolved_mapbox_id != selected_mapbox_id:
+        raise ProjectGeocodingError(
+            "project_address_selection_mismatch",
+            "Die ausgew\u00e4hlte Adresse konnte nicht eindeutig best\u00e4tigt werden.",
+            status_code=422,
+        )
+
+    structured = _structured_address_payload_from_geocoder(
+        {"geocoder": result}
+    )
+    if (
+        _safe_float(structured.get("latitude"), None) is None
+        or _safe_float(structured.get("longitude"), None) is None
+    ):
+        raise ProjectGeocodingError(
+            "project_coordinates_unavailable",
+            "F\u00fcr diese Adresse konnten keine g\u00fcltigen Koordinaten ermittelt werden.",
+            status_code=422,
+        )
+
+    canonical_address = _safe_str(
+        result.get("label") or result.get("address_text") or address_text,
+        address_text,
+        256,
+    )
+    payload["address_text"] = canonical_address
+    present.add("address_text")
+    for key, value in structured.items():
+        payload[key] = value
+        present.add(key)
+    payload["geocode_status"] = GEOCODE_STATUS_RESOLVED
+    payload["geocode_payload"] = result
+    present.update({"geocode_status", "geocode_payload"})
+    payload["__present"] = present
     return payload
 
 
@@ -3109,6 +3289,15 @@ def _normalize_project_payload(
             payload["address_text"] = _safe_str(address_text_value, "", 2000) or None
             present.add("address_text")
 
+        selected_mapbox_id = _safe_str(
+            source.get("address_mapbox_id")
+            or source.get("addressMapboxId"),
+            "",
+            255,
+        )
+        if address_text_value is not None and selected_mapbox_id:
+            payload["address_mapbox_id"] = selected_mapbox_id
+
         if not for_update or _payload_has(source, "visibility", "is_public", "public"):
             visibility_input = source.get("visibility")
 
@@ -3120,12 +3309,6 @@ def _normalize_project_payload(
             payload["is_public"] = visibility == PROJECT_VISIBILITY_PUBLIC
             present.add("visibility")
             present.add("is_public")
-
-        structured = _structured_address_payload_from_geocoder(source)
-        if structured:
-            for key, value in structured.items():
-                payload[key] = value
-                present.add(key)
 
         allow_system_refs = _safe_bool(
             source.get("allow_system_refs")
@@ -3269,9 +3452,10 @@ def _apply_project_payload(project: Any, payload: Dict[str, Any]) -> Any:
                     "status": _safe_str(payload.get("geocode_status"), GEOCODE_STATUS_RESOLVED, 40),
                     "payload": _safe_dict(payload.get("geocode_payload")),
                     "updated_at": _iso(_utcnow()),
-                    "source": "geocoder_payload",
+                    "source": "mapbox-geocoding-v6",
                 }
             )
+            geocode.pop("note", None)
             metadata["geocode"] = geocode
             _set_project_metadata(project, metadata)
 
@@ -3520,6 +3704,7 @@ def create_project(
     ) or None
 
     payload = _normalize_project_payload(data, for_update=False)
+    _enrich_project_payload_with_mapbox(payload)
     visibility = _normalize_visibility(payload.get("visibility"), PROJECT_VISIBILITY_PRIVATE)
     project_scope = PROJECT_SCOPE_ACCOUNT if auth_account_id else PROJECT_SCOPE_PERSONAL
     should_provision = _chunk_provisioning_enabled() if provision_chunk is None else bool(provision_chunk)
@@ -3737,6 +3922,8 @@ def update_project(
 
     before = serialize_project(project, user_id=uid, include_permissions=False)
     payload = _normalize_project_payload(data, for_update=True, existing_project=project)
+    if not _project_is_demo(project):
+        _enrich_project_payload_with_mapbox(payload, existing_project=project)
     old_visibility = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
     _apply_project_payload(project, payload)
     new_visibility = _normalize_visibility(getattr(project, "visibility", PROJECT_VISIBILITY_PRIVATE))
@@ -4626,6 +4813,19 @@ def _permission_denied_result(exc: PermissionDenied) -> ProjectOperationResult:
     )
 
 
+def _geocoding_error_result(exc: ProjectGeocodingError) -> ProjectOperationResult:
+    return ProjectOperationResult(
+        ok=False,
+        status_code=getattr(exc, "status_code", 422),
+        code=getattr(exc, "code", "project_geocoding_failed"),
+        error=getattr(exc, "message", str(exc)),
+        payload={
+            "ok": False,
+            "retryable": bool(getattr(exc, "retryable", False)),
+        },
+    )
+
+
 def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[int] = None) -> ProjectOperationResult:
     try:
         context = get_actor_context(user_id)
@@ -4734,6 +4934,8 @@ def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[i
             error=error,
         )
 
+    except ProjectGeocodingError as exc:
+        return _geocoding_error_result(exc)
     except PermissionDenied as exc:
         return _permission_denied_result(exc)
     except Exception as exc:
@@ -4786,6 +4988,9 @@ def update_project_result(
             status_code=200,
             code="project_updated",
         )
+
+    except ProjectGeocodingError as exc:
+        return _geocoding_error_result(exc)
 
     except PermissionDenied as exc:
         return _permission_denied_result(exc)

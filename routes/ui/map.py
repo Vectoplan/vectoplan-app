@@ -987,7 +987,10 @@ def _parse_lon_lat_zoom(project_context: Optional[Dict[str, Any]] = None) -> Tup
     max_zoom = _map_max_zoom()
 
     default_zoom = _clamp_int(
-        _cfg_int("MAP_DEFAULT_ZOOM", DEFAULT_MAP_ZOOM),
+        _cfg_int(
+            "MAP_PROJECT_ZOOM" if project_context else "MAP_DEFAULT_ZOOM",
+            17 if project_context else DEFAULT_MAP_ZOOM,
+        ),
         min_zoom,
         max_zoom,
     )
@@ -1541,7 +1544,10 @@ def _map_json_response(
     max_zoom = _map_max_zoom()
 
     zoom = _clamp_int(
-        _cfg_int("MAP_DEFAULT_ZOOM", DEFAULT_MAP_ZOOM),
+        _cfg_int(
+            "MAP_PROJECT_ZOOM" if project_context else "MAP_DEFAULT_ZOOM",
+            17 if project_context else DEFAULT_MAP_ZOOM,
+        ),
         min_zoom,
         max_zoom,
     )

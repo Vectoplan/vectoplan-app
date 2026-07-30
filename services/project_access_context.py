@@ -402,9 +402,9 @@ def resolve_project_access(
 
     Order:
       1. Technical auth outage / blocked user.
-      2. Public read-only access for public/unlisted published projects.
-      3. Demo project access.
-      4. Authenticated membership/owner permission.
+      2. Authenticated membership/owner permission for persistent projects.
+      3. Public read-only fallback for public/unlisted published projects.
+      4. Demo project access.
       5. Login/permission denial.
     """
 
@@ -547,6 +547,52 @@ def _resolve_project_access_uncached(
         use_cache=True,
     )
 
+    # A published project remains editable for its owner and members. Public
+    # access is only a fallback for actors without project permissions.
+    member_permission_result: Optional[_MemberPermissionEvaluation] = None
+    if authenticated and user_id and not project_is_demo:
+        member_permission_result = _evaluate_member_permission(
+            project,
+            user_id=user_id,
+            workspace=workspace,
+            action=action,
+        )
+
+        if member_permission_result.allowed:
+            permissions = member_permission_result.permissions or _permissions_view_only()
+            read_only = not bool(permissions.get("edit") or permissions.get("manage"))
+            return ProjectAccessContext(
+                ok=True,
+                allowed=True,
+                access_mode="authenticated",
+                code="project_permission_allowed",
+                message="Projektzugriff erlaubt.",
+                status_code=200,
+                workspace=workspace,
+                action=action,
+                read_only=read_only,
+                public_viewer=False,
+                demo_mode=False,
+                authenticated=True,
+                persistent=persistent,
+                user_id=user_id,
+                auth_user_id=auth_user_id,
+                project_id=project_id,
+                project_public_id=project_public_id,
+                project_is_demo=False,
+                role=member_permission_result.role or "member",
+                permissions=permissions,
+                visibility=public_eval.visibility,
+                publication_enabled=public_eval.publication_enabled,
+                workspace_published=public_eval.workspace_published,
+                require_auth=public_eval.require_auth,
+                require_project_permission=public_eval.require_project_permission,
+                publication=public_eval.publication,
+                source=DEFAULT_SOURCE,
+                reason=member_permission_result.reason or "member_permission_allowed",
+                metadata=member_permission_result.metadata,
+            )
+
     if public_eval.allowed:
         permissions = _permissions_public()
         return ProjectAccessContext(
@@ -682,48 +728,12 @@ def _resolve_project_access_uncached(
         )
 
     if authenticated and user_id:
-        permission_result = _evaluate_member_permission(
+        permission_result = member_permission_result or _evaluate_member_permission(
             project,
             user_id=user_id,
             workspace=workspace,
             action=action,
         )
-
-        if permission_result.allowed:
-            permissions = permission_result.permissions or _permissions_view_only()
-            read_only = not bool(permissions.get("edit") or permissions.get("manage"))
-            return ProjectAccessContext(
-                ok=True,
-                allowed=True,
-                access_mode="authenticated",
-                code="project_permission_allowed",
-                message="Projektzugriff erlaubt.",
-                status_code=200,
-                workspace=workspace,
-                action=action,
-                read_only=read_only,
-                public_viewer=False,
-                demo_mode=False,
-                authenticated=True,
-                persistent=persistent,
-                user_id=user_id,
-                auth_user_id=auth_user_id,
-                project_id=project_id,
-                project_public_id=project_public_id,
-                project_is_demo=False,
-                role=permission_result.role or "member",
-                permissions=permissions,
-                visibility=public_eval.visibility,
-                publication_enabled=public_eval.publication_enabled,
-                workspace_published=public_eval.workspace_published,
-                require_auth=public_eval.require_auth,
-                require_project_permission=public_eval.require_project_permission,
-                publication=public_eval.publication,
-                source=DEFAULT_SOURCE,
-                reason=permission_result.reason or "member_permission_allowed",
-                metadata=permission_result.metadata,
-            )
-
         return ProjectAccessContext(
             ok=False,
             allowed=False,

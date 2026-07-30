@@ -1531,10 +1531,13 @@ def _html_error_response(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
-      color-scheme: light dark;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0f172a;
-      color: #e5e7eb;
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f7fb;
+      color: #172033;
+    }
+    * {
+      box-sizing: border-box;
     }
     body {
       min-height: 100vh;
@@ -1542,32 +1545,56 @@ def _html_error_response(
       display: grid;
       place-items: center;
       padding: 24px;
+      background: #f4f7fb;
     }
     main {
-      width: min(620px, 100%);
-      border: 1px solid rgba(148, 163, 184, .35);
-      border-radius: 18px;
-      padding: 24px;
-      background: rgba(15, 23, 42, .86);
-      box-shadow: 0 20px 60px rgba(0, 0, 0, .35);
+      width: min(680px, 100%);
+      border: 1px solid #d8e0ec;
+      border-top: 4px solid #2563eb;
+      border-radius: 10px;
+      padding: clamp(22px, 4vw, 34px);
+      background: #ffffff;
+      box-shadow: 0 18px 48px rgba(31, 48, 77, .10);
     }
     h1 {
-      margin: 0 0 10px;
-      font-size: 22px;
+      margin: 0 0 12px;
+      color: #111827;
+      font-size: clamp(22px, 4vw, 28px);
       line-height: 1.2;
+      letter-spacing: -.02em;
     }
     p {
       margin: 0 0 16px;
-      color: #cbd5e1;
-      line-height: 1.5;
+      color: #536176;
+      line-height: 1.6;
+    }
+    code {
+      padding: 2px 6px;
+      border: 1px solid #d8e0ec;
+      border-radius: 4px;
+      background: #eef3f9;
+      color: #26364d;
     }
     a {
-      color: #bfdbfe;
+      color: #155eef;
+      font-weight: 650;
+      text-underline-offset: 3px;
     }
     .meta {
+      margin-top: 20px;
+      padding-top: 14px;
+      border-top: 1px solid #e2e8f0;
       font-size: 13px;
-      color: #94a3b8;
-      margin-top: 18px;
+      color: #68758a;
+    }
+    @media (max-width: 540px) {
+      body {
+        place-items: start stretch;
+        padding: 12px;
+      }
+      main {
+        margin-top: 8vh;
+      }
     }
   </style>
 </head>

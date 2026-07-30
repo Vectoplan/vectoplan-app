@@ -1361,7 +1361,23 @@
       var collapsedFromDataset = getDatasetValue(root, "projectSidebarCollapsed", "");
       var collapsed;
 
-      if (collapsedFromStorage !== undefined) {
+      var win = getWindow();
+      var mobileViewport = false;
+      try {
+        mobileViewport = !!(
+          win &&
+          (
+            (typeof win.matchMedia === "function" && win.matchMedia("(max-width: 900px)").matches) ||
+            (Number(win.innerWidth) > 0 && Number(win.innerWidth) <= 900)
+          )
+        );
+      } catch (error) {
+        mobileViewport = false;
+      }
+
+      if (mobileViewport) {
+        collapsed = true;
+      } else if (collapsedFromStorage !== undefined) {
         collapsed = toBooleanSafe(collapsedFromStorage, false);
       } else if (collapsedFromDataset !== "") {
         collapsed = toBooleanSafe(collapsedFromDataset, false);
@@ -1371,7 +1387,7 @@
 
       setCollapsed(root, refs, collapsed, {
         persist: false,
-        source: "restore"
+        source: mobileViewport ? "restore-mobile" : "restore"
       });
 
       return collapsed;
