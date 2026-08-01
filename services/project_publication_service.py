@@ -2150,8 +2150,9 @@ class ProjectPublicationService:
         commit: bool = True,
     ) -> ProjectPublicationServiceResult:
         """
-        Convenience-Methode nur für Sichtbarkeit.
-        Bestehende Reiter-Veröffentlichungen bleiben erhalten.
+        Convenience-Methode für Sichtbarkeit.
+        Beim Wechsel auf öffentlich werden zunächst alle Reiter veröffentlicht.
+        Einzelne Reiter können anschließend bewusst deaktiviert werden.
         """
         project = resolve_project(project_or_id)
         if project is None:
@@ -2176,11 +2177,14 @@ class ProjectPublicationService:
 
         policy = get_or_create_publication_policy(project)
         existing = _desired_workspaces_from_policy(policy)
+        normalized_visibility = normalize_publication_visibility(visibility)
+        if normalized_visibility == VISIBILITY_PUBLIC:
+            existing = {workspace: True for workspace in PUBLICATION_WORKSPACES}
 
         return self.update_publication(
             project_or_id=project,
             data={
-                "visibility": visibility,
+                "visibility": normalized_visibility,
                 "published_workspaces": existing,
             },
             actor_user_id=actor_user_id,

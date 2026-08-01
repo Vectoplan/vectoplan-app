@@ -594,7 +594,7 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
 
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ _project_public_id|default('new', true)|e }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ _project_public_id|default('new', true)|e }}-autosave-clean-20260730">
 
   <script>
     (function () {
@@ -894,11 +894,12 @@
 
     {% if _viewer_landing %}
       {% set _has_viewer_workspace_link = (_published_workspaces.get('map') and _map_path) or (_published_workspaces.get('editor3d') and _editor3d_path) or (_published_workspaces.get('cad2d') and _cad2d_path) or (_published_workspaces.get('lv') and _lv_path) or (_published_workspaces.get('versions') and _versions_path) %}
+      {% set _map_preview_path = _map_path ~ ('&' if '?' in _map_path else '?') ~ 'mode=preview&initial_panel=none' if _map_path else '' %}
       <section class="vp-project-viewer-landing" aria-label="Freigegebene Projektansicht" data-project-published-workspaces>
         {% if _published_workspaces.get('map') and _map_path %}
           <iframe
             class="vp-project-map-preview__frame"
-            src="{{ _map_path|e }}"
+            src="{{ _map_preview_path|e }}"
             title="Kartenansicht f&uuml;r {{ _project_display_name|e }}"
             loading="eager"
             referrerpolicy="no-referrer"
@@ -973,78 +974,6 @@
       aria-live="polite"
       hidden
     ></section>
-
-    {% if not _is_new %}
-      <section class="vp-project-card" aria-labelledby="projectRuntimeTitle" data-project-runtime-card>
-        <header class="vp-project-card__header">
-          <div>
-            <h2 id="projectRuntimeTitle" class="vp-project-card__title">Workspace-Bereitschaft</h2>
-            <p class="vp-project-card__text">
-              App-Projekt, Welt-Provisionierung und Rollen-Synchronisation werden getrennt gespeichert und können unabhängig voneinander repariert werden.
-            </p>
-          </div>
-          <div class="vp-project-card__actions">
-            {% if _chunk_editor_ready %}
-              <span class="vp-project-status vp-project-status--configured">3D bereit</span>
-            {% elif _chunk_repair_required %}
-              <span class="vp-project-status vp-project-status--error">Reparatur erforderlich</span>
-            {% elif _chunk_pending %}
-              <span class="vp-project-status vp-project-status--draft">Wird vorbereitet</span>
-            {% else %}
-              <span class="vp-project-status vp-project-status--readonly">Nicht bereit</span>
-            {% endif %}
-          </div>
-        </header>
-
-        <div class="vp-project-grid vp-project-grid--two">
-          <div class="vp-project-field">
-            <span class="vp-project-label">Welt</span>
-            <p class="vp-project-card__text">
-              Angefordert: <strong>{{ _chunk_requested_template|capitalize|e }}</strong>
-              · Effektiv: <strong>{{ _chunk_effective_display|capitalize|e }}</strong>
-            </p>
-          </div>
-
-          <div class="vp-project-field">
-            <span class="vp-project-label">Provisionierung</span>
-            <p class="vp-project-card__text"><strong>{{ _chunk_provisioning_status|replace('_', ' ')|capitalize|e }}</strong></p>
-          </div>
-
-          <div class="vp-project-field">
-            <span class="vp-project-label">Projektzugriff in Chunk</span>
-            <p class="vp-project-card__text"><strong>{% if not _chunk_access_sync_enabled %}Deaktiviert{% else %}{{ _chunk_access_sync_status|replace('_', ' ')|capitalize|e }}{% endif %}</strong></p>
-          </div>
-
-          <div class="vp-project-field">
-            <span class="vp-project-label">Arbeitsbereiche</span>
-            <p class="vp-project-card__text">
-              {% if _map_path %}<a href="{{ _map_path|e }}">Map öffnen</a>{% else %}Map nicht verfügbar{% endif %}
-              {% if _editor3d_path and _chunk_editor_ready %} · <a href="{{ _editor3d_path|e }}">3D öffnen</a>{% elif _editor3d_path %} · 3D noch nicht bereit{% endif %}
-            </p>
-          </div>
-        </div>
-
-        {% if _chunk_fallback_used %}
-          <div class="vp-project-alert vp-project-alert--warning" role="status" data-project-chunk-fallback-alert>
-            <strong>Flat-Fallback aktiv:</strong>
-            Die angeforderte Earth-Welt konnte unter einer bekannten fachlichen Vorbedingung nicht angelegt werden. Das Projekt verwendet kontrolliert eine Flat-Welt.
-            {% if _chunk_fallback_reason == 'earth_reference_missing' %}<span> Grund: Earth-Referenz fehlt.</span>{% elif _chunk_fallback_reason in ['earth_reference_unavailable', 'georeference_unavailable'] %}<span> Grund: Earth-Referenz ist nicht verfügbar.</span>{% elif _chunk_fallback_reason in ['earth_reference_invalid', 'world_provider_precondition_failed'] %}<span> Grund: Earth-Vorbedingung ist nicht erfüllt.</span>{% elif _chunk_fallback_reason %}<span> Grund: kontrollierter fachlicher Fallback.</span>{% endif %}
-          </div>
-        {% endif %}
-
-        {% if _chunk_repair_required %}
-          <div class="vp-project-alert vp-project-alert--error" role="alert" data-project-chunk-repair-alert>
-            <strong>Reparatur erforderlich:</strong>
-            Das App-Projekt bleibt gespeichert. Welt- oder Zugriffssynchronisation muss erneut ausgeführt werden.
-          </div>
-        {% elif _chunk_pending %}
-          <div class="vp-project-alert vp-project-alert--info" role="status" data-project-chunk-pending-alert>
-            <strong>Vorbereitung läuft:</strong>
-            Der Projekt-Workspace ist bereits gespeichert; 3D wird nach erfolgreicher Welt- und Zugriffssynchronisation freigeschaltet.
-          </div>
-        {% endif %}
-      </section>
-    {% endif %}
 
     {% if not _can_view and not _is_new %}
       <section class="vp-project-card vp-project-card--locked" aria-labelledby="projectLockedTitle">
@@ -1147,23 +1076,12 @@
           </section>
         {% endif %}
 
-        <footer class="vp-project-form__footer">
-          {% if _form_can_edit %}
-            <p class="vp-project-readonly">
-              {% if _demo_mode %}
-                Demo-Modus: Änderungen gelten ausschließlich temporär.
-              {% else %}
-                Änderungen werden nach dem Speichern dauerhaft im App-Projekt gespeichert. Welt- und Zugriffssynchronisation erfolgen danach getrennt.
-              {% endif %}
-            </p>
-
-            <div class="vp-project-form__actions">
-              <button type="button" class="vp-project-btn vp-project-btn--secondary" data-project-reset>Zurücksetzen</button>
-              <button type="submit" class="vp-project-btn vp-project-btn--primary" data-project-submit>
-                {% if _is_new %}Projekt erstellen{% else %}Projekt speichern{% endif %}
-              </button>
-            </div>
-          {% else %}
+        {% if _is_new and _form_can_edit %}
+          <div class="vp-project-form__create">
+            <button type="submit" class="vp-project-btn vp-project-btn--primary" data-project-submit>Projekt erstellen</button>
+          </div>
+        {% elif not _form_can_edit %}
+          <footer class="vp-project-form__footer">
             <p class="vp-project-readonly">
               {% if _auth_unavailable %}
                 Speichern ist deaktiviert, weil der Auth-Service nicht erreichbar ist.
@@ -1185,20 +1103,19 @@
                 Du hast für dieses Projekt keine Bearbeitungsberechtigung.
               {% endif %}
             </p>
-          {% endif %}
-        </footer>
-      </form>
+          </footer>
+        {% endif %}      </form>
     {% endif %}
     {% endif %}
   </main>
 
   {% if not _viewer_landing %}
-  <script src="{{ url_for('static', filename='js/project/project_form.js') }}?v={{ _project_public_id|default('new', true)|e }}"></script>
+  <script src="{{ url_for('static', filename='js/project/project_form.js') }}?v={{ _project_public_id|default('new', true)|e }}-autosave-20260730"></script>
   {% endif %}
 
   {% if _show_management_sections %}
-    <script src="{{ url_for('static', filename='js/project/project_publication.js') }}?v={{ _project_public_id|default('new', true)|e }}"></script>
-    <script src="{{ url_for('static', filename='js/project/project_team.js') }}?v={{ _project_public_id|default('new', true)|e }}"></script>
+    <script src="{{ url_for('static', filename='js/project/project_publication.js') }}?v={{ _project_public_id|default('new', true)|e }}-public-defaults-20260731"></script>
+    <script src="{{ url_for('static', filename='js/project/project_team.js') }}?v={{ _project_public_id|default('new', true)|e }}-clean-team-20260730"></script>
   {% endif %}
 
   <script>

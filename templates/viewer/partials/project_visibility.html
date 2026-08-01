@@ -266,26 +266,6 @@
       </p>
     </div>
 
-    <div class="vp-project-card__meta" aria-live="polite">
-      <span
-        class="vp-project-chip {% if _visibility_auth_unavailable or _visibility_user_blocked or _visibility_access_blocked or _visibility_identity_mismatch %}vp-project-chip--error{% elif _visibility == 'private' %}vp-project-chip--muted{% elif _visibility == 'unlisted' %}vp-project-chip--warning{% else %}vp-project-chip--success{% endif %}"
-        data-project-visibility-status
-      >
-        {% if _visibility_auth_unavailable %}
-          Auth nicht erreichbar
-        {% elif _visibility_user_blocked or _visibility_access_blocked %}
-          Zugriff gesperrt
-        {% elif _visibility_identity_mismatch %}
-          Identität inkonsistent
-        {% elif _visibility == 'private' %}
-          Privat
-        {% elif _visibility == 'unlisted' %}
-          Nicht gelistet
-        {% else %}
-          Öffentlich
-        {% endif %}
-      </span>
-    </div>
   </header>
 
   {% if _visibility_disabled_reason %}
@@ -295,20 +275,7 @@
     >
       {{ _visibility_disabled_reason }}
     </div>
-  {% elif _visibility == 'private' %}
-    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-visibility-private-note>
-      Private Projekte veröffentlichen keine Workspaces. Ausgewählte Reiter werden erst bei „Nicht gelistet“ oder „Öffentlich“ wirksam.
-    </div>
-  {% elif _visibility == 'unlisted' %}
-    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-visibility-unlisted-note>
-      Nicht gelistet bedeutet: Das Projekt erscheint nicht in öffentlichen Listen. Nur ausdrücklich veröffentlichte Reiter sind über den Link erreichbar.
-    </div>
-  {% else %}
-    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-visibility-public-note>
-      Öffentlich bedeutet nicht automatisch, dass alle Workspaces sichtbar sind. Reiter werden separat unter „Veröffentlichte Reiter“ freigegeben.
-    </div>
   {% endif %}
-
   <input
     type="hidden"
     id="projectVisibility"
@@ -351,19 +318,6 @@
     {% endfor %}
   </div>
 
-  <p class="vp-project-help" data-project-visibility-help>
-    {% if _visibility_public_viewer %}
-      Öffentliche Ansicht: Die Sichtbarkeit kann hier nicht geändert werden.
-    {% elif _visibility_is_viewer %}
-      Viewer können die Projektsichtbarkeit ansehen, aber nicht ändern.
-    {% elif _visibility == 'private' %}
-      Privat ist der sichere Standard. Zugriff erhalten ausschließlich berechtigte Projektmitglieder.
-    {% elif _visibility == 'unlisted' %}
-      Nicht gelistet eignet sich für Linkfreigaben. Veröffentlichte Reiter werden weiterhin einzeln gesteuert.
-    {% else %}
-      Öffentlich macht nur die grundsätzlich freigegebenen Bereiche erreichbar. Team-, Admin- und Systemdaten bleiben privat.
-    {% endif %}
-  </p>
 
   <span class="vp-project-sr-only" data-project-visibility-current-label aria-live="polite">
     {% if _visibility == 'public' %}Öffentlich{% elif _visibility == 'unlisted' %}Nicht gelistet{% else %}Privat{% endif %}

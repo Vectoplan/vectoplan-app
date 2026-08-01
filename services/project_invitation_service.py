@@ -8,9 +8,9 @@ Zweck:
 - Fachliche Service-Schicht für Projekt-Einladungen.
 - Prüft Projektberechtigungen.
 - Prüft E-Mail-Adressen gegen vectoplan-auth.
-- Erzeugt keine lokalen Benutzeraccounts.
+- Erzeugt keine Auth-Benutzerkonten; verifizierte Auth-Identitäten erhalten nur einen lokalen AppUser-Link.
 - Erzeugt keinen Default-User.
-- Nutzt AppUser nur als bestehenden lokalen Link.
+- Nutzt AppUser ausschließlich als lokalen Link und Projekt-FK für verifizierte Auth-Identitäten.
 - Speichert ProjectInvitation-Datensätze.
 - Stößt optional Einladungsversand über vectoplan-auth an.
 - Nimmt Einladungen nur an, wenn der eingeloggte Auth-User bereits einen lokalen
@@ -40,6 +40,7 @@ import uuid
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Tuple
 
 
@@ -1738,6 +1739,73 @@ def find_linked_app_user(auth_user_id: Any = None, email: Any = None) -> Optiona
     return None
 
 
+def ensure_linked_app_user(identity: Mapping[str, Any], email: Any) -> Tuple[Optional[Any], bool]:
+    """Create only the local FK/profile shadow for a verified auth identity."""
+    if AppUser is None or db is None:
+        return None, False
+
+    payload = _safe_dict(identity)
+    detail = _safe_dict(payload.get("identity") or payload.get("user") or payload.get("data"))
+    auth_user_id = (
+        _safe_str(payload.get("auth_user_id"), "", 160)
+        or _safe_str(detail.get("auth_user_id"), "", 160)
+        or _safe_str(detail.get("user_id"), "", 160)
+        or _safe_str(detail.get("id"), "", 160)
+    )
+    normalized_email = normalize_email(email)
+    if not auth_user_id or not _safe_bool(payload.get("registered"), False):
+        return None, False
+
+    linked = find_linked_app_user(auth_user_id=auth_user_id, email=None)
+    if linked is not None:
+        return linked, False
+
+    email_match = find_linked_app_user(auth_user_id=None, email=normalized_email)
+    if email_match is not None:
+        existing_auth_id = _safe_str(getattr(email_match, "auth_user_id", None), "", 160)
+        if existing_auth_id and existing_auth_id != auth_user_id:
+            raise ValueError("email_is_linked_to_different_auth_identity")
+        linked = email_match
+    else:
+        linked = AppUser()
+
+    display_name = (
+        _safe_str(detail.get("display_name"), "", 255)
+        or _safe_str(detail.get("displayName"), "", 255)
+        or _safe_str(detail.get("name"), "", 255)
+        or normalized_email
+    )
+    username = _safe_str(detail.get("username") or detail.get("handle"), "", 120) or None
+
+    if hasattr(linked, "link_auth") and callable(linked.link_auth):
+        linked.link_auth(
+            auth_user_id=auth_user_id,
+            auth_account_id=detail.get("auth_account_id") or detail.get("account_id"),
+            email=normalized_email,
+            display_name=display_name,
+            username=username,
+            plan=detail.get("plan"),
+            plan_status=detail.get("plan_status"),
+            roles=detail.get("roles"),
+            entitlements=detail.get("entitlements"),
+            auth_state="verified_by_email_lookup",
+            auth_status="linked",
+            raw_auth={"source": "project_invitation", "verified": True},
+        )
+    else:
+        _setattr_if_present(linked, "auth_user_id", auth_user_id)
+        _setattr_if_present(linked, "email", normalized_email)
+        _setattr_if_present(linked, "display_name", display_name)
+        _setattr_if_present(linked, "auth_status", "linked")
+    _setattr_if_present(linked, "is_placeholder", False)
+    _setattr_if_present(linked, "is_active", True)
+    if hasattr(linked, "normalize") and callable(linked.normalize):
+        linked.normalize()
+    _session_add(linked)
+    db.session.flush()
+    return linked, email_match is None
+
+
 # ---------------------------------------------------------------------------
 # Membership helpers
 # ---------------------------------------------------------------------------
@@ -1869,6 +1937,9 @@ def _apply_role_to_membership(membership: Any, role: Any) -> None:
     try:
         if hasattr(membership, "status"):
             membership.status = MEMBERSHIP_STATUS_ACTIVE
+        for field_name in ("revoked_at", "revoked_by_user_id", "revoke_reason", "expires_at"):
+            if hasattr(membership, field_name):
+                setattr(membership, field_name, None)
     except Exception:
         pass
 
@@ -2526,12 +2597,14 @@ class ProjectInvitationService:
         project = resolve_project(project_or_id)
         if project is None:
             return _result(ok=False, code="project_not_found", message="Projekt nicht gefunden.", status_code=404)
+
         actor_context = get_actor_context(actor_user_id)
         actor_id = _actor_user_id(actor_context)
         actor_auth_user_id = _actor_auth_user_id(actor_context)
         denied = _require_manage_permission(project, actor_context)
         if denied is not None:
             return denied
+
         normalized_email = normalize_email(email)
         if not is_valid_email(normalized_email):
             return _result(
@@ -2543,210 +2616,221 @@ class ProjectInvitationService:
             role_error.project = project
             return role_error
         assert normalized_role is not None
-        identity = require_registered_email_identity(normalized_email, use_cache=True)
-        if not _safe_bool(identity.get("ok"), False) or not _safe_bool(identity.get("registered"), False):
-            code = _safe_str(identity.get("code"), "user_not_registered", 120)
-            status = _safe_int(identity.get("status_code"), None) or (404 if code == "user_not_registered" else 503 if code in AUTH_UNAVAILABLE_CODES else 400)
+
+        identity = _safe_dict(require_registered_email_identity(normalized_email, use_cache=True))
+        identity_registered = _safe_bool(identity.get("ok"), False) and _safe_bool(identity.get("registered"), False)
+        identity_code = _safe_str(identity.get("code"), "user_not_registered", 120)
+        is_unregistered = identity_code in {"user_not_registered", "not_registered", "identity_not_found"} or _safe_int(identity.get("status_code"), 0) == 404
+
+        if not identity_registered and not is_unregistered:
+            status = _safe_int(identity.get("status_code"), None) or (503 if identity_code in AUTH_UNAVAILABLE_CODES else 400)
             _write_audit_event(
                 project, ACTION_INVITATION_FAILED, actor_user_id=actor_id,
-                message="Project invitation rejected before creation.",
-                metadata={"email": normalized_email, "role": normalized_role, "code": code, "identity": _redact_sensitive(identity)},
+                message="Project email access lookup failed.",
+                metadata={"email": normalized_email, "role": normalized_role, "code": identity_code},
             )
             try:
                 _commit_or_flush(commit=commit)
             except Exception:
                 pass
             return _result(
-                ok=False, code=code,
-                message=_safe_str(identity.get("message"), "Einladungen sind nur an bereits registrierte Accounts möglich.", 1000),
+                ok=False, code=identity_code,
+                message=_safe_str(identity.get("message"), "Die E-Mail-Adresse konnte nicht geprüft werden.", 1000),
                 project=project, identity=_safe_dict(_redact_sensitive(identity)), status_code=status,
             )
-        target_auth_user_id = _safe_str(identity.get("auth_user_id"), "", 160)
-        if not target_auth_user_id:
+
+        target_auth_user_id = _safe_str(identity.get("auth_user_id"), "", 160) if identity_registered else ""
+        if identity_registered and not target_auth_user_id:
             return _result(
                 ok=False, code="auth_identity_incomplete",
-                message="vectoplan-auth hat keine kanonische User-ID für die registrierte Identität geliefert.",
+                message="vectoplan-auth hat keine kanonische User-ID für diese Identität geliefert.",
                 project=project, identity=_safe_dict(_redact_sensitive(identity)), status_code=503,
             )
+
         lock_key = f"invite:{_project_id(project)}:{normalized_email}"
         try:
             with _keyed_lock(lock_key):
+                if identity_registered:
+                    try:
+                        linked_user, local_link_created = ensure_linked_app_user(identity, normalized_email)
+                        linked_user_id = _safe_int(getattr(linked_user, "id", None))
+                        if linked_user is None or not linked_user_id:
+                            raise RuntimeError("local_user_link_required")
+
+                        existing_membership = _find_membership(_project_id(project), linked_user_id)
+                        if existing_membership is not None and _safe_str(getattr(existing_membership, "role", ""), "", 40).lower() == ROLE_OWNER:
+                            return _result(
+                                ok=True, code="user_already_project_member",
+                                message="Der Projektbesitzer hat bereits Zugriff.",
+                                project=project, membership=existing_membership,
+                                identity=_safe_dict(_redact_sensitive(identity)), status_code=200,
+                                data={"idempotent": True, "direct_access": True, "registered": True},
+                            )
+
+                        membership_input = SimpleNamespace(project_id=_project_id(project), role=normalized_role)
+                        membership_ok, membership, membership_code = _create_or_update_membership_from_invitation(
+                            membership_input, local_user_id=linked_user_id, actor_context=actor_context
+                        )
+                        if not membership_ok or membership is None:
+                            raise RuntimeError(membership_code or "membership_create_failed")
+                        _session_add(membership)
+                        previous_invitation = _find_active_invitation_for_email(_project_id(project), normalized_email)
+                        if previous_invitation is not None:
+                            if hasattr(previous_invitation, "mark_accepted"):
+                                previous_invitation.mark_accepted(
+                                    accepted_by_user_id=linked_user_id,
+                                    accepted_by_auth_user_id=target_auth_user_id,
+                                    membership_id=getattr(membership, "id", None),
+                                )
+                            else:
+                                _setattr_if_present(previous_invitation, "status", STATUS_ACCEPTED)
+                                _setattr_if_present(previous_invitation, "accepted_at", utcnow())
+                                _setattr_if_present(previous_invitation, "accepted_by_user_id", linked_user_id)
+                                _setattr_if_present(previous_invitation, "accepted_by_auth_user_id", target_auth_user_id)
+                            _session_add(previous_invitation)
+                        _write_audit_event(
+                            project, "member_access_granted_by_email", actor_user_id=actor_id,
+                            message="Project access granted to registered auth identity.",
+                            metadata={
+                                "email": normalized_email,
+                                "role": normalized_role,
+                                "auth_user_id": target_auth_user_id,
+                                "membership_code": membership_code,
+                                "local_link_created": bool(local_link_created),
+                            },
+                        )
+                        _commit_or_flush(commit=commit)
+                    except Exception as exc:
+                        _rollback_safely()
+                        _log_exception("direct project access failed", project_id=_project_id(project), email=normalized_email)
+                        return _result(
+                            ok=False, code="project_member_access_failed",
+                            message="Der Projektzugriff konnte nicht erteilt werden.",
+                            project=project, identity=_safe_dict(_redact_sensitive(identity)),
+                            status_code=500, error=str(exc),
+                        )
+
+                    access_sync = _sync_access_after_invitation_accept(
+                        project, actor_auth_user_id=actor_auth_user_id, commit=commit
+                    )
+                    code = "project_member_access_updated" if membership_code == "membership_updated" else "project_member_access_granted"
+                    return _result(
+                        ok=True, code=code,
+                        message="Projektzugriff wurde erteilt.",
+                        project=project, membership=membership,
+                        identity=_safe_dict(_redact_sensitive(identity)),
+                        chunk_access_sync=access_sync,
+                        status_code=200 if membership_code == "membership_updated" else 201,
+                        data={
+                            "email": normalized_email,
+                            "role": normalized_role,
+                            "registered": True,
+                            "direct_access": True,
+                            "local_user_link_created": bool(local_link_created),
+                            "email_dispatch_required": False,
+                            "local_committed": bool(commit),
+                        },
+                    )
+
                 existing_pending = _find_active_invitation_for_email(_project_id(project), normalized_email)
                 if existing_pending is not None:
                     return _result(
-                        ok=True, code="invitation_already_pending",
-                        message="Für diese E-Mail-Adresse existiert bereits eine aktive Einladung.",
-                        project=project, invitation=existing_pending, identity=_safe_dict(_redact_sensitive(identity)), status_code=200,
-                        data={"idempotent": True},
+                        ok=True, code="invitation_placeholder_already_pending",
+                        message="Diese E-Mail-Adresse ist bereits vorgemerkt.",
+                        project=project, invitation=existing_pending,
+                        identity=_safe_dict(_redact_sensitive(identity)), status_code=200,
+                        data={"idempotent": True, "registered": False, "email_dispatch_placeholder": True},
                     )
-                linked_user = find_linked_app_user(auth_user_id=target_auth_user_id, email=None)
-                if linked_user is not None:
-                    linked_user_id = _safe_int(getattr(linked_user, "id", None))
-                    existing_membership = _find_membership(_project_id(project), linked_user_id)
-                    if existing_membership is not None and _membership_is_active(existing_membership):
-                        return _result(
-                            ok=True, code="user_already_project_member",
-                            message="Dieser registrierte User ist bereits Projektmitglied.",
-                            project=project, membership=existing_membership, identity=_safe_dict(_redact_sensitive(identity)),
-                            status_code=200, data={"idempotent": True},
-                        )
-                invitation: Optional[Any] = None
-                plain_token: Optional[str] = None
+
+                invitation = None
+                plain_token = None
+                placeholder_identity = {
+                    **identity,
+                    "ok": True,
+                    "registered": False,
+                    "email": normalized_email,
+                    "code": "email_invitation_placeholder",
+                    "message": "E-Mail-Einladung ist vorgemerkt.",
+                }
+                invitation_metadata = {
+                    **_safe_dict(metadata),
+                    "created_by_service": "project_invitation_service",
+                    "email_dispatch_placeholder": True,
+                    "dispatch_implemented": False,
+                }
                 try:
                     if hasattr(ProjectInvitation, "create_pending"):
                         invitation, plain_token = ProjectInvitation.create_pending(
                             project_id=_project_id(project), project_public_id=_project_public_id(project),
                             email=normalized_email, role=normalized_role, invited_by_user_id=actor_id,
-                            invited_by_auth_user_id=actor_auth_user_id, identity=identity, message=message,
-                            metadata={
-                                **_safe_dict(metadata),
-                                "created_by_service": "project_invitation_service",
-                                "default_user_removed": True,
-                                "target_auth_user_id": target_auth_user_id,
-                            },
+                            invited_by_auth_user_id=actor_auth_user_id, identity=placeholder_identity,
+                            message=message, metadata=invitation_metadata,
                             expires_in_days=expires_in_days, generate_token=True,
                         )
                     else:
                         invitation, plain_token = _manual_create_pending_invitation(
                             project_id=_project_id(project), project_public_id=_project_public_id(project),
                             email=normalized_email, role=normalized_role, invited_by_user_id=actor_id,
-                            invited_by_auth_user_id=actor_auth_user_id, identity=identity, message=message,
-                            metadata={
-                                **_safe_dict(metadata),
-                                "created_by_service": "project_invitation_service",
-                                "default_user_removed": True,
-                                "target_auth_user_id": target_auth_user_id,
-                            },
+                            invited_by_auth_user_id=actor_auth_user_id, identity=placeholder_identity,
+                            message=message, metadata=invitation_metadata,
                             expires_in_days=expires_in_days,
                         )
                     if invitation is None:
                         raise RuntimeError("project_invitation_create_returned_none")
-                    _setattr_if_present(invitation, "auth_user_id", target_auth_user_id)
-                    if linked_user is not None:
-                        _setattr_if_present(invitation, "target_user_id", _safe_int(getattr(linked_user, "id", None)))
                     safe_public_url = build_invitation_url(invitation, plain_token=None, include_token=False)
                     if safe_public_url:
                         _setattr_if_present(invitation, "invitation_url", safe_public_url)
                     _session_add(invitation)
                     _write_audit_event(
                         project, ACTION_INVITATION_CREATED, actor_user_id=actor_id,
-                        message="Project invitation created.",
-                        metadata={
-                            "invitation_id": getattr(invitation, "public_id", None),
-                            "email": normalized_email, "role": normalized_role,
-                            "target_auth_user_id": target_auth_user_id,
-                        },
+                        message="Unregistered email invitation placeholder created.",
+                        metadata={"invitation_id": getattr(invitation, "public_id", None), "email": normalized_email, "role": normalized_role},
                     )
                     _commit_or_flush(commit=commit)
                 except Exception as exc:
                     _rollback_safely()
-                    _log_exception("invite_by_email local persistence failed", project_id=_project_id(project), email=normalized_email)
+                    _log_exception("invitation placeholder persistence failed", project_id=_project_id(project), email=normalized_email)
                     return _result(
-                        ok=False, code="project_invitation_create_failed",
-                        message="Die Einladung konnte nicht erstellt werden.", project=project,
-                        invitation=invitation, identity=_safe_dict(_redact_sensitive(identity)),
-                        status_code=500, error=str(exc),
+                        ok=False, code="project_invitation_placeholder_failed",
+                        message="Die E-Mail-Adresse konnte nicht vorgemerkt werden.",
+                        project=project, invitation=invitation,
+                        identity=_safe_dict(_redact_sensitive(identity)), status_code=500, error=str(exc),
                     )
-                if not commit:
-                    data = {
-                        "email": normalized_email, "role": normalized_role,
-                        "dispatch_requested": bool(dispatch), "dispatch_deferred": bool(dispatch),
-                        "local_committed": False, "no_user_created": True,
-                    }
-                    if include_token_in_result and plain_token:
-                        data["invitation_token"] = plain_token
-                        data["invitation_url_with_token"] = build_invitation_url(invitation, plain_token=plain_token, include_token=True)
-                    return _result(
-                        ok=True, code="project_invitation_created_dispatch_deferred",
-                        message="Einladung wurde im aktuellen Transaktionskontext erstellt; der Versand ist bis nach dem Commit zurückgestellt.",
-                        project=project, invitation=invitation, identity=_safe_dict(_redact_sensitive(identity)),
-                        dispatch={"ok": True, "code": "invitation_dispatch_deferred", "deferred": bool(dispatch)},
-                        status_code=201, data=data,
-                    )
-                dispatch_result: Dict[str, Any]
-                if dispatch:
-                    invitation_url = build_invitation_url(
-                        invitation, plain_token=plain_token, include_token=include_token_in_dispatch_url
-                    )
-                    dispatch_result = dispatch_project_invitation_identity(
-                        email=normalized_email, project_public_id=_project_public_id(project), role=normalized_role,
-                        invited_by_auth_user_id=actor_auth_user_id, invitation_id=getattr(invitation, "public_id", None),
-                        invitation_url=invitation_url, message=_safe_str(message, "", 4000) or None,
-                        metadata={
-                            "project_id": _project_id(project),
-                            "project_public_id": _project_public_id(project),
-                            "invitation_public_id": getattr(invitation, "public_id", None),
-                            "idempotency_key": f"project-invitation:{getattr(invitation, 'public_id', '')}",
-                        },
-                        require_registered=False,
-                    )
-                else:
-                    dispatch_result = {
-                        "ok": True, "code": "invitation_dispatch_skipped",
-                        "message": "Einladungsversand wurde übersprungen.",
-                        "external_sent": False, "status_code": 200,
-                    }
-                safe_dispatch = _safe_dict(_redact_sensitive(dispatch_result))
-                dispatch_ok = _safe_bool(dispatch_result.get("ok"), False)
-                try:
-                    if hasattr(invitation, "apply_dispatch_result"):
-                        invitation.apply_dispatch_result(dispatch_result)
-                    if dispatch and not dispatch_ok:
-                        if hasattr(invitation, "mark_failed"):
-                            invitation.mark_failed(dispatch_result.get("message") or dispatch_result.get("error"))
-                        else:
-                            _setattr_if_present(invitation, "status", STATUS_FAILED)
-                    _session_add(invitation)
-                    _write_audit_event(
-                        project, ACTION_INVITATION_DISPATCHED if dispatch_ok else ACTION_INVITATION_FAILED,
-                        actor_user_id=actor_id,
-                        message="Project invitation dispatched." if dispatch_ok else "Project invitation dispatch failed.",
-                        metadata={
-                            "invitation_id": getattr(invitation, "public_id", None),
-                            "email": normalized_email, "role": normalized_role,
-                            "dispatch": safe_dispatch, "invitation_persisted": True,
-                        },
-                    )
-                    _commit_or_flush(commit=True)
-                except Exception as exc:
-                    _rollback_safely()
-                    return _result(
-                        ok=False, code="invitation_dispatch_state_persist_failed",
-                        message="Die Einladung wurde gespeichert und möglicherweise versendet, aber der Versandstatus konnte nicht gespeichert werden.",
-                        project=project, invitation=invitation, identity=_safe_dict(_redact_sensitive(identity)),
-                        dispatch=safe_dispatch, status_code=500, error=str(exc),
-                        data={"invitation_persisted": True, "dispatch_state_unknown": True, "repair_required": True},
-                    )
+
                 data = {
-                    "email": normalized_email, "role": normalized_role,
-                    "dispatch_requested": bool(dispatch), "linked_app_user_found": linked_user is not None,
-                    "no_user_created": True, "invitation_persisted": True, "local_committed": True,
+                    "email": normalized_email,
+                    "role": normalized_role,
+                    "registered": False,
+                    "direct_access": False,
+                    "email_dispatch_placeholder": True,
+                    "email_dispatch_implemented": False,
+                    "dispatch_requested": bool(dispatch),
+                    "dispatch_sent": False,
+                    "invitation_persisted": True,
+                    "local_committed": bool(commit),
                 }
                 if include_token_in_result and plain_token:
                     data["invitation_token"] = plain_token
                     data["invitation_url_with_token"] = build_invitation_url(invitation, plain_token=plain_token, include_token=True)
-                if dispatch_ok:
-                    return _result(
-                        ok=True, code="project_invitation_created", message="Einladung wurde erstellt.",
-                        project=project, invitation=invitation, identity=_safe_dict(_redact_sensitive(identity)),
-                        dispatch=safe_dispatch, status_code=201, data=data,
-                    )
-                code = _safe_str(dispatch_result.get("code"), "invitation_dispatch_failed", 120)
-                status = _safe_int(dispatch_result.get("status_code"), None) or (503 if _safe_bool(dispatch_result.get("auth_unavailable"), False) else 502)
                 return _result(
-                    ok=False, code=code,
-                    message=_safe_str(dispatch_result.get("message"), "Die Einladung wurde gespeichert, konnte aber nicht versendet werden.", 1000),
-                    project=project, invitation=invitation, identity=_safe_dict(_redact_sensitive(identity)),
-                    dispatch=safe_dispatch, status_code=status,
-                    data={**data, "dispatch_failed": True, "retryable": status >= 500},
+                    ok=True, code="project_invitation_placeholder_created",
+                    message="E-Mail-Adresse wurde vorgemerkt. Der Versand wird später ergänzt.",
+                    project=project, invitation=invitation,
+                    identity=_safe_dict(_redact_sensitive(identity)),
+                    dispatch={
+                        "ok": True,
+                        "code": "email_dispatch_placeholder",
+                        "message": "Der E-Mail-Versand ist noch nicht implementiert.",
+                        "external_sent": False,
+                    },
+                    status_code=201, data=data,
                 )
         except TimeoutError:
             return _result(
                 ok=False, code="project_invitation_busy",
-                message="Eine parallele Einladungsaktion für diese E-Mail-Adresse läuft bereits.",
+                message="Eine parallele Zugriffsaktion für diese E-Mail-Adresse läuft bereits.",
                 project=project, status_code=409, data={"retryable": True},
             )
-
     def revoke_invitation(
         self,
         project_or_id: Any,

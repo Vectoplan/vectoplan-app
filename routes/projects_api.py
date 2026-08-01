@@ -2812,7 +2812,7 @@ def project_invitations_list(project_id: str):
         user_id = _current_user_id_optional()
         _require_project_permission_checked(project, PERMISSION_MANAGE, user_id, allow_public_view=False)
 
-        include_terminal = _request_bool("include_terminal", True)
+        include_terminal = _request_bool("include_terminal", False)
         include_private = _request_bool("include_private", False)
 
         result = list_project_invitations(

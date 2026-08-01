@@ -13,7 +13,7 @@
   Sicherheitsregeln:
   - Admin, Team, Rechte, Einstellungen und Systemreferenzen werden nie als
     veröffentlichbare Workspaces gesendet.
-  - Public/Unlisted bedeutet nicht automatisch, dass alle Workspaces öffentlich sind.
+  - Der Wechsel auf Public aktiviert initial alle Reiter; einzelne Reiter können danach bewusst deaktiviert werden.
   - Private Projekte haben effektiv keine veröffentlichten Workspaces.
   - Demo, Public Viewer, Read-only, Auth-Ausfall, User-Block und fehlendes Manage-/Publish-Recht
     deaktivieren das Speichern im Frontend. Backend bleibt die Wahrheit.
@@ -153,6 +153,8 @@
     currentData: null,
     lastResponse: null,
     lastError: null,
+    autoSaveTimer: null,
+    autoSaveDelay: 500,
     config: null,
     refs: {},
     listeners: []
@@ -1838,7 +1840,27 @@
     }
   }
 
-  async function savePublication() {
+  function schedulePublicationSave(delay) {
+    try {
+      if (state.autoSaveTimer !== null) {
+        clearTimeout(state.autoSaveTimer);
+        state.autoSaveTimer = null;
+      }
+      if (!state.isDirty || state.isNew) {
+        return;
+      }
+      state.autoSaveTimer = setTimeout(function runPublicationAutoSave() {
+        state.autoSaveTimer = null;
+        if (state.isDirty && canWritePublication()) {
+          void savePublication({ autosave: true });
+        }
+      }, Math.max(150, Number(delay) || state.autoSaveDelay));
+    } catch (error) {}
+  }
+
+  async function savePublication(options) {
+    var saveOptions = isObject(options) ? options : {};
+    var isAutoSave = !!saveOptions.autosave;
     try {
       var validation = validateBeforeSave();
 
@@ -1854,7 +1876,9 @@
       var payload = buildPayloadForSave();
 
       setSaving(true);
-      setAlert("info", "Veröffentlichung wird gespeichert…");
+      if (!isAutoSave) {
+        setAlert("info", "Veröffentlichung wird gespeichert…");
+      }
 
       var response = await requestJson(buildEndpoint(), {
         method: "PATCH",
@@ -1876,7 +1900,11 @@
         state.refs.card.classList.remove(CLASS_ERROR);
       }
 
-      setAlert("success", "Veröffentlichung wurde gespeichert.");
+      if (isAutoSave) {
+        setAlert("", "");
+      } else {
+        setAlert("success", "Veröffentlichung wurde gespeichert.");
+      }
       emitChangeEvent(response, publication);
 
       return true;
@@ -2107,6 +2135,7 @@
       applyData(data, { keepDirty: true });
       setDirty(true);
       setAlert("", "");
+      schedulePublicationSave();
     } catch (error) {}
   }
 
@@ -2160,6 +2189,11 @@
       if (state.refs.root) state.refs.root.setAttribute("data-project-visibility", visibility);
       var data = collectData();
       data.visibility = visibility;
+      if (visibility === "public") {
+        var allPublished = emptyWorkspaceMap(true);
+        data.published_workspaces = allPublished;
+        data.publishedWorkspaces = safeClone(allPublished);
+      }
       data.effective_published_workspaces = effectiveWorkspaces(visibility, data.published_workspaces);
       data.effectivePublishedWorkspaces = safeClone(data.effective_published_workspaces);
       if (visibility === "private") {
@@ -2169,7 +2203,10 @@
         data.requireProjectPermission = true;
       }
       applyData(data, { keepDirty: true });
-      if (canWritePublication()) setDirty(true);
+      if (canWritePublication()) {
+        setDirty(true);
+        schedulePublicationSave();
+      }
     } catch (error) {}
   }
 

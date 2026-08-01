@@ -384,54 +384,13 @@
         Lege fest, welche Workspace-Reiter über öffentliche oder nicht gelistete Projektlinks sichtbar sein dürfen.
       </p>
     </div>
-    <div class="vp-project-card__meta" aria-live="polite">
-      <span
-        class="vp-project-chip {% if _pub_auth_unavailable or _pub_user_blocked or _pub_access_blocked or _pub_identity_mismatch %}vp-project-chip--error{% elif _pub_visibility == 'private' %}vp-project-chip--muted{% elif _pub_has_effective %}vp-project-chip--success{% else %}vp-project-chip--warning{% endif %}"
-        data-project-publication-status
-      >
-        {% if _pub_identity_mismatch %}Identität inkonsistent{% elif _pub_auth_unavailable %}Auth nicht erreichbar{% elif _pub_user_blocked or _pub_access_blocked %}Zugriff gesperrt{% elif _pub_visibility == 'private' %}Privat{% elif _pub_has_effective %}Reiter veröffentlicht{% else %}Keine Reiter veröffentlicht{% endif %}
-      </span>
-    </div>
   </header>
 
   {% if _pub_disabled_reason %}
     <div class="vp-project-inline-note {% if _pub_auth_unavailable or _pub_user_blocked or _pub_access_blocked or _pub_identity_mismatch %}vp-project-inline-note--error{% elif _pub_demo_mode %}vp-project-inline-note--demo{% else %}vp-project-inline-note--locked{% endif %}" data-project-publication-disabled-note>
       {{ _pub_disabled_reason }}
     </div>
-  {% elif _pub_visibility == 'private' %}
-    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-publication-private-note>
-      Das Projekt ist privat. Ausgewählte Reiter werden erst bei „Nicht gelistet“ oder „Öffentlich“ wirksam.
-    </div>
-  {% elif _pub_visibility == 'unlisted' %}
-    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-publication-unlisted-note>
-      Nur Personen mit dem Projektlink können die explizit veröffentlichten Reiter öffnen.
-    </div>
-  {% else %}
-    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-publication-public-note>
-      Nur aktivierte Reiter werden veröffentlicht. Team- und Verwaltungsbereiche bleiben privat.
-    </div>
   {% endif %}
-
-  {% if not _pub_editor_available %}
-    <div class="vp-project-inline-note {% if _pub_editor_unavailable_reason == 'chunk_repair_required' %}vp-project-inline-note--error{% else %}vp-project-inline-note--locked{% endif %}" data-project-publication-editor3d-note data-reason="{{ _pub_editor_unavailable_reason|e }}">
-      <strong>3D-Freigabe nicht verfügbar:</strong>
-      {% if _pub_editor_unavailable_reason == 'chunk_not_ready' %}
-        Die Chunk-Welt ist noch nicht vollständig provisioniert.
-      {% elif _pub_editor_unavailable_reason == 'chunk_access_not_ready' %}
-        Die erforderliche Rollen- und Access-Synchronisation ist noch nicht bereit.
-      {% elif _pub_editor_unavailable_reason == 'public_editor3d_not_verified' %}
-        Ein serverseitig verifizierter öffentlicher Read-only-3D-Vertrag fehlt.
-      {% else %}
-        Der Chunk-Zustand ist fehlgeschlagen oder reparaturbedürftig.
-      {% endif %}
-      {% if _pub_editor_requested %}<span> Eine frühere 3D-Auswahl wird bis zur Behebung nicht gesendet.</span>{% endif %}
-    </div>
-  {% endif %}
-
-  <p class="vp-project-help" data-project-publication-summary>
-    {% if _pub_visibility == 'private' %}Private Projekte veröffentlichen keine Workspaces.{% elif _pub_has_effective %}Ausgewählte Reiter sind für den aktuellen Veröffentlichungsmodus sichtbar.{% else %}Das Projekt ist {{ _pub_visibility }}, aber kein Workspace ist veröffentlicht.{% endif %}
-  </p>
-
   <div class="vp-project-publication-grid" data-project-publication-options>
     {% for item in _pub_items %}
       {% set _pub_item_disabled = true if not _pub_can_write or not item.available else false %}
@@ -508,27 +467,7 @@
     {% endif %}
   </div>
 
-  <div class="vp-project-publication-never-public" data-project-publication-never-public>
-    <p class="vp-project-help">Nie öffentlich: Admin, Team, Einstellungen, Rechte, System und Systemreferenzen.</p>
-  </div>
 
-  <div class="vp-project-publication-actions" data-project-publication-actions>
-    <button
-      type="button"
-      class="vp-project-btn vp-project-btn--secondary"
-      data-project-publication-reset
-      {% if not _pub_can_write %}disabled{% endif %}
-      {% if _pub_disabled_reason %}title="{{ _pub_disabled_reason|e }}"{% endif %}
-    >Zurücksetzen</button>
-
-    <button
-      type="button"
-      class="vp-project-btn vp-project-btn--primary"
-      data-project-publication-save
-      {% if not _pub_can_write %}disabled{% endif %}
-      {% if _pub_disabled_reason %}title="{{ _pub_disabled_reason|e }}"{% endif %}
-    >Veröffentlichung speichern</button>
-  </div>
 
   <script type="application/json" data-project-publication-initial-json>
     {{ {
