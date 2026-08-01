@@ -3136,7 +3136,18 @@ def _is_external_workspace_key(workspace: Any) -> bool:
 
 
 def _request_extra_embed_params() -> Dict[str, Any]:
-    allowed = {"theme", "lang", "locale", "camera", "view", "spawn", "mode", "quality", "renderer"}
+    allowed = {
+        "theme",
+        "lang",
+        "locale",
+        "camera",
+        "view",
+        "spawn",
+        "mode",
+        "quality",
+        "renderer",
+        "initial_panel",
+    }
     if _config_bool("VECTOPLAN_VIEWER_ALLOW_DEBUG_EMBED_PARAMS", False):
         allowed.update({"debug", "debug_ui", "debug_chunks", "devtools"})
     blocked = {

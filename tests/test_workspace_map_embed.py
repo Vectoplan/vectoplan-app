@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import os
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
-from services.workspace_embed_service import _map_project_view_params
+from flask import Flask
+
+from routes.viewer import _request_extra_embed_params
+from services import project_publication_service as publication_service
+from services.workspace_embed_service import _clean_extra_query_params, _map_project_view_params
 
 
 class WorkspaceMapEmbedTests(unittest.TestCase):
@@ -69,6 +74,64 @@ class WorkspaceMapEmbedTests(unittest.TestCase):
             {},
         )
 
+
+class WorkspacePresentationQueryTests(unittest.TestCase):
+    def test_initial_panel_is_forwarded_without_security_parameters(self) -> None:
+        app = Flask(__name__)
+
+        with app.test_request_context("/?mode=preview&initial_panel=none&token=must-not-leak"):
+            self.assertEqual(
+                _request_extra_embed_params(),
+                {"mode": "preview", "initial_panel": "none"},
+            )
+
+        self.assertEqual(
+            _clean_extra_query_params(
+                {"mode": "preview", "initial_panel": "none", "token": "must-not-leak"}
+            ),
+            {"mode": "preview", "initial_panel": "none"},
+        )
+
+
+class ProjectPublicationDefaultsTests(unittest.TestCase):
+    def test_public_visibility_selects_every_publication_workspace(self) -> None:
+        project = SimpleNamespace(public_id="prj_public_defaults", is_demo=False)
+        update_publication = Mock(return_value="updated")
+
+        with (
+            patch.object(publication_service, "resolve_project", return_value=project),
+            patch.object(publication_service, "_project_is_demo", return_value=False),
+            patch.object(
+                publication_service,
+                "get_or_create_publication_policy",
+                return_value=object(),
+            ),
+            patch.object(
+                publication_service,
+                "_desired_workspaces_from_policy",
+                return_value={"project": True, "map": False},
+            ),
+        ):
+            service = publication_service.ProjectPublicationService()
+            service.update_publication = update_publication
+
+            result = service.set_visibility(
+                project,
+                "public",
+                actor_user_id=7,
+                commit=False,
+            )
+
+        self.assertEqual(result, "updated")
+        payload = update_publication.call_args.kwargs["data"]
+        self.assertEqual(payload["visibility"], "public")
+        self.assertEqual(
+            payload["published_workspaces"],
+            {
+                workspace: True
+                for workspace in publication_service.PUBLICATION_WORKSPACES
+            },
+        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -208,7 +208,7 @@
 {% set project_sidebar_items_raw = project_sidebar_obj.get('items', []) %}
 {% set project_sidebar_items = project_sidebar_items_raw if project_sidebar_items_raw is sequence and project_sidebar_items_raw is not string else [] %}
 {% set project_sidebar_enabled_raw = project_sidebar_obj.get('enabled', true) %}
-{% set project_sidebar_default_collapsed = project_sidebar_obj.get('defaultCollapsed', project_sidebar_obj.get('default_collapsed', false)) %}
+{% set project_sidebar_default_collapsed = true if is_public_viewer else project_sidebar_obj.get('defaultCollapsed', project_sidebar_obj.get('default_collapsed', false)) %}
 {% set project_sidebar_current_title = project_sidebar_obj.get('currentTitle', project_sidebar_obj.get('current_title', project_name if project_name else 'Aktuelles Projekt')) %}
 {% set project_sidebar_current_subtitle = project_sidebar_obj.get('currentSubtitle', project_sidebar_obj.get('current_subtitle', 'Projekt definieren' if not project_is_configured else 'Projekt aktiv')) %}
 {% set project_sidebar_storage_key = project_sidebar_obj.get('storageKey', project_sidebar_obj.get('storage_key', 'vectoplan.projectSidebar.v1')) %}
@@ -248,9 +248,9 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}?v={{ chat_id_s }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_sidebar.css') }}?v={{ chat_id_s }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ project_public_id|default('new', true) }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}?v={{ chat_id_s }}-icon-tooltips-20260730">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_sidebar.css') }}?v={{ chat_id_s }}-project-list-20260730">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ project_public_id|default('new', true) }}-calm-palette-20260730">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/notice_stream.css') }}?v={{ project_public_id|default('new', true) }}">
 
   <script>
@@ -717,113 +717,115 @@
     {% include "partials/project_sidebar.html" ignore missing %}
 
     <aside class="viewer-panel" id="viewer-panel" aria-label="Arbeitsbereich">
-      <div class="viewer-toolbar">
-        <div class="toolbar-left">
-          <div role="group" aria-label="Arbeitsbereich" class="mode-group">
-            <button id="modeProjectBtn"
-                    class="btn"
-                    type="button"
-                    aria-pressed="{{ 'true' if resolved_default_mode == 'project' else 'false' }}"
-                    title="Projekt"
-                    data-workspace-mode-button="project"
-                    data-workspace-key="project"
-                    data-workspace-path="{{ resolved_project_url }}">
-              Projekt
-            </button>
+      <nav class="workspace-rail" aria-label="Projektfunktionen">
+        <div role="group" aria-label="Arbeitsbereich wechseln" class="mode-group">
+          <button id="modeProjectBtn"
+                  class="btn workspace-rail__button"
+                  type="button"
+                  aria-label="Einstellungen"
+                  aria-pressed="{{ 'true' if resolved_default_mode == 'project' else 'false' }}"
+                  title="Einstellungen"
+                  data-workspace-mode-button="project"
+                  data-workspace-key="project"
+                  data-workspace-path="{{ resolved_project_url }}">
+            <span class="workspace-rail__icon workspace-rail__icon--settings" aria-hidden="true">&#9881;</span>
+            <span class="workspace-rail__label">Einstellungen</span>
+          </button>
 
-            <button id="modeMapBtn"
-                    class="btn"
-                    type="button"
-                    aria-pressed="{{ 'true' if resolved_default_mode == 'map' else 'false' }}"
-                    title="Map"
-                    data-workspace-mode-button="map"
-                    data-workspace-key="map"
-                    data-workspace-path="{{ map_page_path }}"
-                    data-requires-configured-project="true"
-                    {% if not map_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
-              Map
-            </button>
+          <button id="modeMapBtn"
+                  class="btn workspace-rail__button"
+                  type="button"
+                  aria-label="Map"
+                  aria-pressed="{{ 'true' if resolved_default_mode == 'map' else 'false' }}"
+                  title="Map"
+                  data-workspace-mode-button="map"
+                  data-workspace-key="map"
+                  data-workspace-path="{{ map_page_path }}"
+                  data-requires-configured-project="true"
+                  {% if not map_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+            <span class="workspace-rail__icon workspace-rail__icon--map" aria-hidden="true"></span>
+            <span class="workspace-rail__label">Map</span>
+          </button>
 
-            <button id="mode3dBtn"
-                    class="btn"
-                    type="button"
-                    aria-pressed="{{ 'true' if resolved_default_mode == '3d' else 'false' }}"
-                    title="3D"
-                    data-workspace-mode-button="3d"
-                    data-workspace-key="editor3d"
-                    data-workspace-path="{{ initial_editor_path }}"
-                    data-requires-configured-project="true"
-                    {% if not editor3d_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
-              3D
-            </button>
+          <button id="mode3dBtn"
+                  class="btn workspace-rail__button"
+                  type="button"
+                  aria-label="3D"
+                  aria-pressed="{{ 'true' if resolved_default_mode == '3d' else 'false' }}"
+                  title="3D"
+                  data-workspace-mode-button="3d"
+                  data-workspace-key="editor3d"
+                  data-workspace-path="{{ initial_editor_path }}"
+                  data-requires-configured-project="true"
+                  {% if not editor3d_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+            <span class="workspace-rail__icon workspace-rail__icon--text" aria-hidden="true">3D</span>
+            <span class="workspace-rail__label">3D</span>
+          </button>
 
-            <button id="mode2dBtn"
-                    class="btn"
-                    type="button"
-                    aria-pressed="{{ 'true' if resolved_default_mode == '2d' else 'false' }}"
-                    title="2D"
-                    data-workspace-mode-button="2d"
-                    data-workspace-key="cad2d"
-                    data-workspace-path="{{ cad2d_page_path }}"
-                    data-requires-configured-project="true"
-                    {% if not cad2d_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
-              2D
-            </button>
+          <button id="mode2dBtn"
+                  class="btn workspace-rail__button"
+                  type="button"
+                  aria-label="2D"
+                  aria-pressed="{{ 'true' if resolved_default_mode == '2d' else 'false' }}"
+                  title="2D"
+                  data-workspace-mode-button="2d"
+                  data-workspace-key="cad2d"
+                  data-workspace-path="{{ cad2d_page_path }}"
+                  data-requires-configured-project="true"
+                  {% if not cad2d_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+            <span class="workspace-rail__icon workspace-rail__icon--text" aria-hidden="true">2D</span>
+            <span class="workspace-rail__label">2D</span>
+          </button>
 
-            <button id="modeLvBtn"
-                    class="btn"
-                    type="button"
-                    aria-pressed="{{ 'true' if resolved_default_mode == 'lv' else 'false' }}"
-                    title="Leistungsverzeichnis"
-                    data-workspace-mode-button="lv"
-                    data-workspace-key="lv"
-                    data-workspace-path="{{ lv_page_path }}"
-                    data-requires-configured-project="true"
-                    {% if not lv_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
-              LV
-            </button>
+          <button id="modeLvBtn"
+                  class="btn workspace-rail__button"
+                  type="button"
+                  aria-label="Leistungsverzeichnis"
+                  aria-pressed="{{ 'true' if resolved_default_mode == 'lv' else 'false' }}"
+                  title="Leistungsverzeichnis"
+                  data-workspace-mode-button="lv"
+                  data-workspace-key="lv"
+                  data-workspace-path="{{ lv_page_path }}"
+                  data-requires-configured-project="true"
+                  {% if not lv_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+            <span class="workspace-rail__icon workspace-rail__icon--list" aria-hidden="true"></span>
+            <span class="workspace-rail__label">LV</span>
+          </button>
 
-            <button id="versionsToggleBtn"
-                    class="btn"
-                    type="button"
-                    aria-pressed="{{ 'true' if resolved_default_mode == 'versions' else 'false' }}"
-                    title="Versionen"
-                    data-workspace-mode-button="versions"
-                    data-workspace-key="versions"
-                    data-workspace-path="{{ versions_page_path }}"
-                    data-versions-api-path="{{ versions_path }}"
-                    data-requires-configured-project="true"
-                    {% if not versions_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
-              Versionen
-            </button>
+          <button id="versionsToggleBtn"
+                  class="btn workspace-rail__button"
+                  type="button"
+                  aria-label="Versionen"
+                  aria-pressed="{{ 'true' if resolved_default_mode == 'versions' else 'false' }}"
+                  title="Versionen"
+                  data-workspace-mode-button="versions"
+                  data-workspace-key="versions"
+                  data-workspace-path="{{ versions_page_path }}"
+                  data-versions-api-path="{{ versions_path }}"
+                  data-requires-configured-project="true"
+                  {% if not versions_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+            <span class="workspace-rail__icon workspace-rail__icon--history" aria-hidden="true"></span>
+            <span class="workspace-rail__label">Versionen</span>
+          </button>
 
-            {% if can_manage_project %}
-              <button id="modeAdminBtn"
-                      class="btn"
-                      type="button"
-                      aria-pressed="{{ 'true' if resolved_default_mode == 'admin' else 'false' }}"
-                      title="Admin"
-                      data-workspace-mode-button="admin"
-                      data-workspace-key="admin"
-                      data-workspace-path="{{ admin_page_path }}"
-                      {% if not admin_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
-                Admin
-              </button>
-            {% endif %}
-          </div>
+          {% if can_manage_project %}
+            <button id="modeAdminBtn"
+                    class="btn workspace-rail__button"
+                    type="button"
+                    aria-label="Admin"
+                    aria-pressed="{{ 'true' if resolved_default_mode == 'admin' else 'false' }}"
+                    title="Admin"
+                    data-workspace-mode-button="admin"
+                    data-workspace-key="admin"
+                    data-workspace-path="{{ admin_page_path }}"
+                    {% if not admin_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+              <span class="workspace-rail__icon workspace-rail__icon--settings" aria-hidden="true">⚙</span>
+              <span class="workspace-rail__label">Admin</span>
+            </button>
+          {% endif %}
         </div>
 
-        <div class="toolbar-right">
-          <a id="viewerOpenRawBtn"
-             class="btn btn-link"
-             href="{{ resolved_workspace_src }}"
-             target="_blank"
-             rel="noopener noreferrer"
-             title="Aktuelle Ansicht im neuen Tab öffnen"
-             aria-label="Aktuelle Ansicht öffnen">Öffnen</a>
-        </div>
-      </div>
-
+      </nav>
       <section id="versionsDropdown"
                class="versions-dropdown hidden"
                aria-label="Versionen"
@@ -859,7 +861,8 @@
 
   <script src="{{ url_for('static', filename='js/chat/project_sidebar_data.js') }}?v={{ chat_id_s }}"></script>
   <script src="{{ url_for('static', filename='js/chat/project_sidebar_resize.js') }}?v={{ chat_id_s }}"></script>
-  <script src="{{ url_for('static', filename='js/chat/project_sidebar.js') }}?v={{ chat_id_s }}"></script>
-  <script type="module" src="{{ url_for('static', filename='js/chat/main.js') }}?v={{ chat_id_s }}"></script>
+  <script src="{{ url_for('static', filename='js/chat/project_sidebar.js') }}?v={{ chat_id_s }}-force-public-sidebar-20260731"></script>
+  <script src="{{ url_for('static', filename='js/chat/icon_tooltips.js') }}?v={{ chat_id_s }}-icon-tooltips-20260730"></script>
+  <script type="module" src="{{ url_for('static', filename='js/chat/main.js') }}?v={{ chat_id_s }}-workspace-settings-20260731"></script>
 </body>
 </html>

@@ -28,6 +28,11 @@
 
 {% set _raw_default_collapsed = _project_sidebar.get('defaultCollapsed', _project_sidebar.get('default_collapsed', false)) %}
 {% set _is_default_collapsed = true if _raw_default_collapsed in [true, 'true', 'True', 'TRUE', '1', 1, 'on', 'ON', 'yes', 'YES'] else false %}
+{% set _force_collapsed_raw = is_public_viewer|default(false) %}
+{% set _force_collapsed = true if _force_collapsed_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'on', 'ON', 'yes', 'YES'] else false %}
+{% if _force_collapsed %}
+  {% set _is_default_collapsed = true %}
+{% endif %}
 
 {% set _current_chat_id = _project_sidebar.get('currentChatId', _project_sidebar.get('current_chat_id', chat_id|default('', true))) %}
 
@@ -116,6 +121,7 @@
   data-project-sidebar-api-path="{{ _api_path|e }}"
   data-project-sidebar-create-project-url="{{ _create_project_url|e }}"
   data-project-sidebar-collapsed="{{ 'true' if _is_default_collapsed else 'false' }}"
+  data-project-sidebar-force-collapsed="{{ 'true' if _force_collapsed else 'false' }}"
   data-project-sidebar-current-chat-id="{{ _current_chat_id|e }}"
   data-project-sidebar-current-project-id="{{ _current_project_id|e }}"
   data-project-sidebar-current-title="{{ _current_title|e }}"
@@ -137,24 +143,44 @@
     --vp-project-sidebar-collapsed-width: {{ _collapsed_width }}px;
   "
 >
+  <script>
+    (function restoreProjectSidebarBeforePaint(sidebar) {
+      try {
+        var stored = JSON.parse(
+          window.localStorage.getItem({{ _storage_key|tojson }}) || "{}"
+        );
+        var mobile = (
+          typeof window.matchMedia === "function" &&
+          window.matchMedia("(max-width: 900px)").matches
+        );
+        var hasStoredState = stored && typeof stored.collapsed === "boolean";
+        var forceCollapsed = {{ _force_collapsed|tojson }};
+        var collapsed = forceCollapsed || mobile || (hasStoredState ? stored.collapsed : false);
+
+        if (!forceCollapsed && !mobile && !hasStoredState) {
+          return;
+        }
+
+        sidebar.classList.toggle("is-collapsed", collapsed);
+        sidebar.classList.toggle("is-expanded", !collapsed);
+        sidebar.setAttribute(
+          "data-project-sidebar-collapsed",
+          collapsed ? "true" : "false"
+        );
+      } catch (error) {
+        /* The regular controller remains the safe fallback. */
+      }
+    })(document.currentScript.parentElement);
+  </script>
   <div
     id="vp-project-sidebar-panel"
     class="vp-project-sidebar__panel"
     data-project-sidebar-panel
   >
     <header class="vp-project-sidebar__header" data-project-sidebar-header>
-      <a
-        class="vp-project-sidebar__brand"
-        href="/"
-        data-project-sidebar-home
-        title="VECTOPLAN Start"
-        aria-label="VECTOPLAN Projektübersicht öffnen"
-      >
-        <span class="vp-project-sidebar__brand-mark" aria-hidden="true">VP</span>
-        <span class="vp-project-sidebar__brand-text" data-project-sidebar-expanded-only>
-          VECTOPLAN
-        </span>
-      </a>
+      <span class="vp-project-sidebar__heading" data-project-sidebar-expanded-only>
+        Projekte
+      </span>
 
       <button
         type="button"
@@ -166,6 +192,7 @@
         title="{{ 'Projektleiste ausklappen' if _is_default_collapsed else 'Projektleiste einklappen' }}"
         data-label-expanded="Projektleiste einklappen"
         data-label-collapsed="Projektleiste ausklappen"
+        {% if _force_collapsed %}disabled aria-disabled="true"{% endif %}
       >
         <span class="vp-project-sidebar__toggle-icon" aria-hidden="true">
           <span class="vp-project-sidebar__toggle-line"></span>
@@ -174,49 +201,6 @@
         </span>
       </button>
     </header>
-
-    <section
-      class="vp-project-sidebar__current"
-      data-project-sidebar-current
-      data-project-sidebar-expanded-only
-      aria-label="Aktuelles Projekt"
-    >
-      <a
-        class="vp-project-sidebar__current-link"
-        href="{{ _current_href|e }}"
-        data-project-sidebar-current-link
-        title="{{ _current_title|e }}"
-      >
-        <span
-          class="vp-project-sidebar__current-avatar"
-          aria-hidden="true"
-          data-project-sidebar-current-initial
-        >
-          {{ (_current_title|string)[:1]|upper if _current_title else 'P' }}
-        </span>
-
-        <span class="vp-project-sidebar__current-body">
-          <span
-            class="vp-project-sidebar__current-kicker"
-            data-project-sidebar-current-kicker
-          >
-            Aktuell
-          </span>
-          <span
-            class="vp-project-sidebar__current-title"
-            data-project-sidebar-current-title
-          >
-            {{ _current_title }}
-          </span>
-          <span
-            class="vp-project-sidebar__current-subtitle"
-            data-project-sidebar-current-subtitle
-          >
-            {{ _current_subtitle }}
-          </span>
-        </span>
-      </a>
-    </section>
 
     <section
       class="vp-project-sidebar__actions"
@@ -235,27 +219,6 @@
         <span class="vp-project-sidebar__create-text">Neues Projekt</span>
       </a>
 
-      <div class="vp-project-sidebar__search-wrap" data-project-sidebar-search-wrap>
-        <label
-          class="vp-project-sidebar__label"
-          for="vp-project-sidebar-search"
-        >
-          Projekte suchen
-        </label>
-
-        <input
-          id="vp-project-sidebar-search"
-          class="vp-project-sidebar__search"
-          type="search"
-          name="project-sidebar-search"
-          value=""
-          autocomplete="off"
-          autocapitalize="off"
-          spellcheck="false"
-          placeholder="Projekt suchen"
-          data-project-sidebar-search
-        >
-      </div>
     </section>
 
     <div
@@ -470,33 +433,11 @@
       class="vp-project-sidebar__footer"
       data-project-sidebar-footer
     >
-      <div
-        class="vp-project-sidebar__meta"
-        data-project-sidebar-expanded-only
-      >
-        <span class="vp-project-sidebar__meta-label">
-          Projekte
-        </span>
-        <span
-          class="vp-project-sidebar__meta-value"
-          data-project-sidebar-count
-        >
-          {{ _project_items_count if _has_project_items else 1 }}
-        </span>
-      </div>
-
-      <button
-        type="button"
-        class="vp-project-sidebar__refresh"
-        data-project-sidebar-refresh
-        title="Projektliste aktualisieren"
-        aria-label="Projektliste aktualisieren"
-      >
-        <span class="vp-project-sidebar__refresh-icon" aria-hidden="true">↻</span>
-        <span class="vp-project-sidebar__refresh-text" data-project-sidebar-expanded-only>
-          Aktualisieren
-        </span>
-      </button>
+      <nav class="vp-project-sidebar__legal" aria-label="Rechtliche Informationen">
+        <a href="/imprint" target="_top" data-platform-path="/imprint">Impressum</a>
+        <span aria-hidden="true">·</span>
+        <a href="/privacy" target="_top" data-platform-path="/privacy">Datenschutz</a>
+      </nav>
     </footer>
   </div>
 

@@ -58,7 +58,7 @@ const MODE_TO_BUTTON_ID = {
 };
 
 const MODE_TITLE = {
-  project: "Projekt",
+  project: "Einstellungen",
   "3d": "VECTOPLAN Editor",
   editor: "VECTOPLAN Editor",
   editor3d: "VECTOPLAN Editor",
@@ -1659,7 +1659,7 @@ function syncWorkspaceGating(options = {}) {
       if (!allowed) {
         btn.title = workspaceModeDisabledMessage(mode);
       } else if (mode === "project") {
-        btn.title = "Projekt";
+        btn.title = "Einstellungen";
       } else {
         btn.title = MODE_TITLE[mode] || "Arbeitsbereich";
       }

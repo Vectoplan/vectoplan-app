@@ -901,6 +901,28 @@
     }
   }
 
+  function preparePlatformLinks(root) {
+    try {
+      var referrer = trimString(getDocument().referrer, "");
+
+      if (!referrer) {
+        return;
+      }
+
+      var platformOrigin = new URL(referrer).origin;
+      var links = Array.prototype.slice.call(root.querySelectorAll("[data-platform-path]"));
+
+      links.forEach(function preparePlatformLink(link) {
+        var path = trimString(link.getAttribute("data-platform-path"), "");
+
+        if (path && path.charAt(0) === "/") {
+          link.setAttribute("href", platformOrigin + path);
+        }
+      });
+    } catch (error) {
+      /* Keep the same-origin fallback links. */
+    }
+  }
   function queryRefs(root) {
     try {
       return {
@@ -1313,7 +1335,11 @@
   function setCollapsed(root, refs, collapsed, options) {
     try {
       var opts = isObject(options) ? options : {};
-      var isCollapsed = !!collapsed;
+      var forceCollapsed = toBooleanSafe(
+        getDatasetValue(root, "projectSidebarForceCollapsed", "false"),
+        false
+      );
+      var isCollapsed = forceCollapsed ? true : !!collapsed;
 
       root.classList.toggle(CLASS_COLLAPSED, isCollapsed);
       root.classList.toggle(CLASS_EXPANDED, !isCollapsed);
@@ -1332,7 +1358,7 @@
 
       var config = getConfig(root, opts);
 
-      if (opts.persist !== false) {
+      if (opts.persist !== false && !forceCollapsed) {
         writeStorage(config.storageKey, {
           collapsed: isCollapsed
         });
@@ -1359,6 +1385,10 @@
       var storage = readStorage(config.storageKey);
       var collapsedFromStorage = storage.collapsed;
       var collapsedFromDataset = getDatasetValue(root, "projectSidebarCollapsed", "");
+      var forceCollapsed = toBooleanSafe(
+        getDatasetValue(root, "projectSidebarForceCollapsed", "false"),
+        false
+      );
       var collapsed;
 
       var win = getWindow();
@@ -1375,7 +1405,9 @@
         mobileViewport = false;
       }
 
-      if (mobileViewport) {
+      if (forceCollapsed) {
+        collapsed = true;
+      } else if (mobileViewport) {
         collapsed = true;
       } else if (collapsedFromStorage !== undefined) {
         collapsed = toBooleanSafe(collapsedFromStorage, false);
@@ -1387,7 +1419,7 @@
 
       setCollapsed(root, refs, collapsed, {
         persist: false,
-        source: mobileViewport ? "restore-mobile" : "restore"
+        source: forceCollapsed ? "restore-forced" : mobileViewport ? "restore-mobile" : "restore"
       });
 
       return collapsed;
@@ -1523,6 +1555,7 @@
 
       var opts = isObject(options) ? options : {};
       var refs = queryRefs(root);
+      preparePlatformLinks(root);
       var cleanup = [];
       var config = getConfig(root, opts);
 
@@ -1793,6 +1826,13 @@
 
           rememberItem(navItem, state.config);
 
+          /*
+            Nach der Auswahl bleibt mehr Platz für den Workspace. Der Zustand
+            wird vor der nativen Navigation gespeichert und auf der Zielseite
+            wiederhergestellt.
+          */
+          collapse("item-selected");
+          closeMobile("item-selected");
           dispatch(root, "vectoplan:project-sidebar:item-selected", {
             item: navItem,
             href: href,

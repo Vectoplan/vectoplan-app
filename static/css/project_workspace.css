@@ -617,7 +617,7 @@ a {
 .vp-project-field.is-invalid .vp-project-textarea,
 .vp-project-field.is-invalid .vp-project-select {
   border-color: var(--vp-project-danger);
-  box-shadow: 0 0 0 3px rgba(180, 35, 24, 0.16);
+  box-shadow: 0 0 0 3px rgba(21, 94, 239, 0.18);
 }
 
 
@@ -2224,6 +2224,18 @@ a {
   --vp-project-accent-hover: #004eeb;
   --vp-project-accent-soft: rgba(21, 94, 239, 0.08);
   --vp-project-accent-border: rgba(21, 94, 239, 0.26);
+  --vp-project-success: #155eef;
+  --vp-project-success-bg: #eff4ff;
+  --vp-project-success-border: #b2ccff;
+  --vp-project-warning: #344054;
+  --vp-project-warning-bg: #f8fafc;
+  --vp-project-warning-border: #cbd5e1;
+  --vp-project-danger: #344054;
+  --vp-project-danger-bg: #f8fafc;
+  --vp-project-danger-border: #cbd5e1;
+  --vp-project-info: #155eef;
+  --vp-project-info-bg: #eff4ff;
+  --vp-project-info-border: #b2ccff;
   --vp-project-radius-sm: 6px;
   --vp-project-radius-md: 8px;
   --vp-project-radius-lg: 10px;
@@ -2653,5 +2665,62 @@ body.vp-project-page--viewer-landing {
 
   .vp-project-viewer-landing .vp-project-workspace-link small {
     display: none;
+  }
+}
+/* Clean autosave settings and compact team layout. */
+.vp-project-form__create {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 0 20px;
+}
+
+.vp-project-card--team .vp-project-card__header,
+.vp-project-card--publication .vp-project-card__header,
+[data-project-visibility-card] .vp-project-card__header {
+  align-items: flex-start;
+}
+
+.vp-project-team-invite {
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--vp-project-border);
+}
+
+.vp-project-team-row {
+  grid-template-columns: minmax(260px, 1fr) minmax(130px, 180px) auto;
+  padding: 11px 12px;
+  background: #ffffff;
+}
+
+.vp-project-team-row--owner {
+  background: var(--vp-project-accent-soft);
+}
+
+.vp-project-team-row--invitation {
+  background: var(--vp-project-surface-soft);
+}
+
+.vp-project-avatar--pending {
+  border-color: var(--vp-project-accent-border);
+  background: var(--vp-project-accent-soft);
+  color: var(--vp-project-accent);
+}
+
+.vp-project-team-invitations[hidden] {
+  display: none !important;
+}
+
+.vp-project-team-row__role .vp-project-role-chip {
+  border-color: var(--vp-project-accent-border);
+  background: var(--vp-project-accent-soft);
+  color: var(--vp-project-accent);
+}
+
+@media (max-width: 820px) {
+  .vp-project-team-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .vp-project-team-row__actions {
+    grid-column: 1 / -1;
   }
 }

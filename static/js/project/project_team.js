@@ -1065,6 +1065,7 @@
       refreshInvitations: query("[data-project-team-invitations-refresh]", card),
       members: query("[data-project-team-members]", card),
       invitations: query("[data-project-team-invitations]", card),
+      invitationsSection: query("[data-project-team-invitations-section]", card),
       initialJson: query("[data-project-team-initial-json]", card)
     };
   }
@@ -1313,7 +1314,7 @@
         } catch (error) {}
       });
 
-      queryAll("[data-project-team-member-save], [data-project-team-member-remove]", state.refs.card).forEach(function disableMemberAction(button) {
+      queryAll("[data-project-team-member-remove]", state.refs.card).forEach(function disableMemberAction(button) {
         try {
           var row = closest(button, "[data-project-team-member]");
           var role = normalizeProjectRole((row && row.getAttribute("data-role")) || button.getAttribute("data-current-role"), ROLE_VIEWER);
@@ -1349,26 +1350,23 @@
       var user = isObject(source.user) ? source.user : {};
       var localUserId = positiveLocalUserId(source.user_id || source.userId || user.id || user.user_id || user.userId);
       var role = normalizeProjectRole(source.role || source.project_role || source.projectRole, ROLE_VIEWER);
+      var rawName = trimString(user.display_name || user.displayName || source.display_name || source.displayName || user.name || source.name || user.handle || source.handle, "", 200);
+      var displayName = !rawName || rawName === "Unbekannter Benutzer" || /^User \d+$/.test(rawName)
+        ? (role === ROLE_OWNER ? "Projektbesitzer" : "Mitglied")
+        : rawName;
       return {
         user_id: localUserId,
         userId: localUserId,
         role: role,
         status: lowerString(source.status, "active", 80),
-        display_name: trimString(user.display_name || user.displayName || source.display_name || source.displayName || user.name || source.name || user.handle || source.handle, localUserId ? "User " + localUserId : "Unbekannter Benutzer", 200),
+        display_name: displayName,
         email: trimString(user.email || source.email || source.user_email || source.userEmail, "", 320),
-        permissions: isObject(source.permissions) ? sanitizeBrowserValue(source.permissions, 0) : {},
-        can_view: toBooleanSafe(source.can_view !== undefined ? source.can_view : source.canView, role !== ""),
-        can_edit: role === ROLE_OWNER || role === ROLE_ADMIN || role === ROLE_EDITOR,
-        can_manage: role === ROLE_OWNER || role === ROLE_ADMIN,
-        can_manage_team: role === ROLE_OWNER || role === ROLE_ADMIN,
-        can_delete: role === ROLE_OWNER,
-        can_embed: role === ROLE_OWNER || role === ROLE_ADMIN
+        permissions: isObject(source.permissions) ? sanitizeBrowserValue(source.permissions, 0) : {}
       };
     } catch (error) {
       return null;
     }
   }
-
   function sanitizeInvitation(invitation) {
     try {
       var source = isObject(invitation) ? invitation : {};
@@ -1481,15 +1479,12 @@
   function renderMembers(members) {
     try {
       var container = state.refs.members;
-      if (!container) {
-        return;
-      }
+      if (!container) return;
       removeChildren(container);
       var list = isArray(members) ? members : [];
       if (!list.length) {
         var empty = createElement("div", "vp-project-empty");
-        append(empty, createElement("p", "", "Keine Projektmitglieder geladen."));
-        append(empty, createElement("p", "vp-project-help", "Mitglieder werden ausschließlich für berechtigte Projektverwalter geladen."));
+        append(empty, createElement("p", "", "Noch keine Mitglieder vorhanden."));
         append(container, empty);
         return;
       }
@@ -1498,86 +1493,54 @@
         try {
           var userId = memberUserId(member);
           var role = memberRole(member);
-          var status = memberStatus(member);
           var name = memberDisplayName(member);
           var email = memberEmail(member);
           var isOwner = role === ROLE_OWNER;
           var row = createElement("article", "vp-project-team-row" + (isOwner ? " vp-project-team-row--owner" : ""));
-          if (!row) {
-            return;
-          }
+          if (!row) return;
           row.setAttribute("data-project-team-member", "");
           row.setAttribute("data-user-id", userId);
           row.setAttribute("data-role", role);
-          row.setAttribute("data-status", status);
+          row.setAttribute("data-status", memberStatus(member));
           row.setAttribute("data-owner", isOwner ? "true" : "false");
 
           var identity = createElement("div", "vp-project-team-row__identity");
           var avatar = createElement("div", "vp-project-avatar", name ? name.charAt(0).toUpperCase() : "?");
-          if (avatar) {
-            avatar.setAttribute("aria-hidden", "true");
-          }
+          if (avatar) avatar.setAttribute("aria-hidden", "true");
           var identityText = createElement("div");
           append(identityText, createElement("h4", "vp-project-team-row__name", name));
-          append(identityText, createElement("p", "vp-project-team-row__meta", email || (userId ? "Lokale Benutzerreferenz " + userId : "Unbekannte Benutzerreferenz")));
+          if (email) append(identityText, createElement("p", "vp-project-team-row__meta", email));
           append(identity, avatar);
           append(identity, identityText);
 
           var roleBox = createElement("div", "vp-project-team-row__role");
-          append(roleBox, createRoleSelect(userId, role));
-
-          var permissions = createElement("div", "vp-project-team-row__permissions");
-          if (permissions) {
-            permissions.setAttribute("aria-label", "Effektive Rechte");
-          }
-          appendPermissionChip(permissions, "Ansehen");
-          if (role === ROLE_OWNER || role === ROLE_ADMIN || role === ROLE_EDITOR) {
-            appendPermissionChip(permissions, "Bearbeiten");
-          }
-          if (role === ROLE_OWNER || role === ROLE_ADMIN) {
-            appendPermissionChip(permissions, "Verwalten");
-            appendPermissionChip(permissions, "Team");
-          }
-          if (role === ROLE_OWNER) {
-            appendPermissionChip(permissions, "Löschen");
+          if (isOwner) {
+            append(roleBox, createElement("span", "vp-project-role-chip", "Owner"));
+          } else {
+            append(roleBox, createRoleSelect(userId, role));
           }
 
           var actions = createElement("div", "vp-project-team-row__actions");
-          var save = createElement("button", "vp-project-btn vp-project-btn--ghost", "Rolle speichern");
-          if (save) {
-            save.type = "button";
-            save.setAttribute("data-project-team-member-save", "");
-            save.setAttribute("data-user-id", userId);
-            save.setAttribute("data-current-role", role);
-            save.disabled = !canOperate() || isOwner || !userId;
-            if (isOwner) {
-              save.setAttribute("title", "Owner werden ausschließlich über die Eigentumsübertragung geändert.");
+          if (!isOwner) {
+            var remove = createElement("button", "vp-project-btn vp-project-btn--danger", "Entfernen");
+            if (remove) {
+              remove.type = "button";
+              remove.setAttribute("data-project-team-member-remove", "");
+              remove.setAttribute("data-user-id", userId);
+              remove.setAttribute("data-current-role", role);
+              remove.disabled = !canOperate() || !userId;
             }
+            append(actions, remove);
           }
-          var remove = createElement("button", "vp-project-btn vp-project-btn--danger", "Entfernen");
-          if (remove) {
-            remove.type = "button";
-            remove.setAttribute("data-project-team-member-remove", "");
-            remove.setAttribute("data-user-id", userId);
-            remove.setAttribute("data-current-role", role);
-            remove.disabled = !canOperate() || isOwner || !userId;
-            if (isOwner) {
-              remove.setAttribute("title", "Übertrage zuerst die Eigentümerschaft.");
-            }
-          }
-          append(actions, save);
-          append(actions, remove);
 
           append(row, identity);
           append(row, roleBox);
-          append(row, permissions);
           append(row, actions);
           append(container, row);
         } catch (error) {}
       });
     } catch (error) {}
   }
-
   function invitationId(invitation) {
     var inv = isObject(invitation) ? invitation : {};
     return safeInvitationId(inv.public_id || inv.publicId || inv.invitation_id || inv.invitationId || inv.id);
@@ -1586,17 +1549,12 @@
   function renderInvitations(invitations) {
     try {
       var container = state.refs.invitations;
-      if (!container) {
-        return;
-      }
+      var section = state.refs.invitationsSection;
+      if (!container) return;
       removeChildren(container);
       var list = isArray(invitations) ? invitations : [];
-      if (!list.length) {
-        var empty = createElement("div", "vp-project-empty");
-        append(empty, createElement("p", "", "Keine Einladungen vorhanden."));
-        append(container, empty);
-        return;
-      }
+      setHidden(section, !list.length);
+      if (!list.length) return;
 
       list.forEach(function renderInvitation(invitation) {
         try {
@@ -1606,9 +1564,7 @@
           var role = normalizeAssignableRole(inv.role, ROLE_VIEWER) || ROLE_VIEWER;
           var status = lowerString(inv.status, "pending", 80);
           var row = createElement("article", "vp-project-team-row vp-project-team-row--invitation");
-          if (!row) {
-            return;
-          }
+          if (!row) return;
           row.setAttribute("data-project-team-invitation", "");
           row.setAttribute("data-invitation-id", id);
           row.setAttribute("data-role", role);
@@ -1616,26 +1572,15 @@
 
           var identity = createElement("div", "vp-project-team-row__identity");
           var avatar = createElement("div", "vp-project-avatar vp-project-avatar--pending", "@");
-          if (avatar) {
-            avatar.setAttribute("aria-hidden", "true");
-          }
+          if (avatar) avatar.setAttribute("aria-hidden", "true");
           var identityText = createElement("div");
-          append(identityText, createElement("h4", "vp-project-team-row__name", email || "Ausstehende Einladung"));
-          var meta = "Status: " + statusLabel(status);
-          if (inv.created_at) {
-            meta += " · erstellt " + inv.created_at;
-          }
-          if (inv.expires_at) {
-            meta += " · gültig bis " + inv.expires_at;
-          }
-          append(identityText, createElement("p", "vp-project-team-row__meta", meta));
+          append(identityText, createElement("h4", "vp-project-team-row__name", email || "Vorgemerkte Adresse"));
+          append(identityText, createElement("p", "vp-project-team-row__meta", "E-Mail-Versand folgt"));
           append(identity, avatar);
           append(identity, identityText);
 
           var roleBox = createElement("div", "vp-project-team-row__role");
           append(roleBox, createElement("span", "vp-project-role-chip", roleLabel(role)));
-          var permissions = createElement("div", "vp-project-team-row__permissions");
-          appendPermissionChip(permissions, "wartet auf Annahme", "vp-project-permission-chip--pending");
           var actions = createElement("div", "vp-project-team-row__actions");
           var revoke = createElement("button", "vp-project-btn vp-project-btn--danger", "Widerrufen");
           if (revoke) {
@@ -1648,14 +1593,12 @@
           append(actions, revoke);
           append(row, identity);
           append(row, roleBox);
-          append(row, permissions);
           append(row, actions);
           append(container, row);
         } catch (error) {}
       });
     } catch (error) {}
   }
-
   function renderAll() {
     renderMembers(state.members);
     renderInvitations(state.invitations);
@@ -1945,7 +1888,7 @@
       }
 
       setSaving(true);
-      setMessage("info", "Einladung wird geprüft und erstellt…");
+      setMessage("info", "Zugriff wird geprüft…");
       var response = await requestJson(state.invitationsUrl, {
         method: "POST",
         body: safeJsonStringify({ email: email, role: role })
@@ -1960,8 +1903,9 @@
       }
       state.lastResponse = responseSummary(response);
       state.lastError = null;
-      setMessage("success", "Einladung wurde erstellt.");
-      emitChangeEvent(EVENT_INVITATION_CREATED, { action: "invitation_created", role: role, requestId: state.lastResponse.requestId });
+      var directAccess = state.lastResponse.code === "project_member_access_granted" || state.lastResponse.code === "project_member_access_updated" || state.lastResponse.code === "user_already_project_member";
+      setMessage("success", directAccess ? "Projektzugriff wurde erteilt." : "Adresse wurde vorgemerkt. Der E-Mail-Versand folgt später.");
+      emitChangeEvent(EVENT_INVITATION_CREATED, { action: directAccess ? "member_access_granted" : "invitation_placeholder_created", role: role, requestId: state.lastResponse.requestId });
       await refreshTeam({ silent: true });
       return true;
     } catch (error) {
@@ -2397,8 +2341,17 @@
     } catch (error) {}
   }
 
+  function onMemberRoleChange(event) {
+    try {
+      var select = event && event.target ? closest(event.target, "[data-project-team-member-role]") : null;
+      if (!select || select.disabled) return;
+      void saveMemberRole(select.getAttribute("data-user-id"));
+    } catch (error) {}
+  }
+
   function wireEvents() {
     addListener(state.refs.card, "click", onCardClick);
+    addListener(state.refs.card, "change", onMemberRoleChange);
     addListener(state.refs.inviteEmail, "keydown", onInviteKeydown);
     addListener(getWindow(), "message", onMessage);
   }

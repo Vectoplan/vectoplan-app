@@ -4261,9 +4261,29 @@ def list_project_memberships(project: Any, *, include_inactive: bool = False) ->
         result: List[Dict[str, Any]] = []
         for row in rows:
             if callable(permissions_serialize_membership):
-                result.append(permissions_serialize_membership(row, include_private=True))
+                item = permissions_serialize_membership(row, include_private=True)
             else:
-                result.append(model_serialize_membership(row, include_private=True))
+                item = model_serialize_membership(row, include_private=True)
+
+            item = _safe_dict(item)
+            local_user = _app_user_by_local_id(getattr(row, "user_id", None))
+            if local_user is not None:
+                display_name = _safe_str(
+                    getattr(local_user, "display_name", None)
+                    or getattr(local_user, "name", None)
+                    or getattr(local_user, "email", None),
+                    "Projektmitglied",
+                    255,
+                )
+                item["user"] = {
+                    "id": getattr(local_user, "id", None),
+                    "public_id": getattr(local_user, "public_id", None),
+                    "display_name": display_name,
+                    "email": _safe_str(getattr(local_user, "email", None), "", 320),
+                }
+                item["display_name"] = display_name
+                item["email"] = item["user"]["email"]
+            result.append(item)
 
         return result
 

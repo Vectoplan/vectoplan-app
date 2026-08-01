@@ -176,6 +176,8 @@
     isLoading: false,
     lastSavedAt: null,
     lastError: null,
+    autoSaveTimer: null,
+    autoSaveDelay: 700,
     originalPayload: null,
     currentProject: null,
     config: null,
@@ -2594,6 +2596,52 @@
     }
   }
 
+  function canAutoSaveProject() {
+    try {
+      if (state.isNew || state.isSaving || !state.isDirty || !canWriteProject()) {
+        return false;
+      }
+      var payload = collectPayload();
+      return !!(
+        trimString(payload.name, "") &&
+        trimString(payload.address_text, "") &&
+        VALID_VISIBILITIES[normalizeVisibility(payload.visibility, "")]
+      );
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function scheduleAutoSave(delay) {
+    try {
+      if (state.autoSaveTimer !== null) {
+        clearTimeout(state.autoSaveTimer);
+        state.autoSaveTimer = null;
+      }
+      if (state.isNew || !state.isDirty) {
+        return;
+      }
+      state.autoSaveTimer = setTimeout(function runAutoSave() {
+        state.autoSaveTimer = null;
+        if (canAutoSaveProject()) {
+          void saveProject({ autosave: true });
+        }
+      }, Math.max(150, Number(delay) || state.autoSaveDelay));
+    } catch (error) {}
+  }
+
+  function flushAutoSave() {
+    try {
+      if (state.autoSaveTimer !== null) {
+        clearTimeout(state.autoSaveTimer);
+        state.autoSaveTimer = null;
+      }
+      if (canAutoSaveProject()) {
+        void saveProject({ autosave: true });
+      }
+    } catch (error) {}
+  }
+
   function markDirtyFromInput() {
     try {
       if (state.isSaving || !canWriteProject()) {
@@ -2604,6 +2652,7 @@
       setDirty(true);
       setRootState("saved", false);
       setAlert("", "");
+      scheduleAutoSave();
     } catch (error) {}
   }
 
@@ -2824,8 +2873,10 @@
     }
   }
 
-  async function saveProject() {
+  async function saveProject(options) {
     var wasNew = !!state.isNew;
+    var saveOptions = isObject(options) ? options : {};
+    var isAutoSave = !!saveOptions.autosave && !wasNew;
 
     try {
       if (!guardCanMutate("save")) {
@@ -2845,7 +2896,9 @@
 
       setSaving(true);
       setRootState("error", false);
-      setAlert("info", wasNew ? "Projekt wird erstellt…" : "Projekt wird gespeichert…");
+      if (!isAutoSave) {
+        setAlert("info", wasNew ? "Projekt wird erstellt…" : "Projekt wird gespeichert…");
+      }
 
       var method = wasNew ? "POST" : "PATCH";
       var url = wasNew
@@ -2870,7 +2923,11 @@
 
       var detail = updateAfterSave(response, wasNew);
       var outcome = saveOutcome(response, wasNew);
-      setAlert(outcome.warning ? "warning" : "success", outcome.message);
+      if (outcome.warning || !isAutoSave) {
+        setAlert(outcome.warning ? "warning" : "success", outcome.message);
+      } else {
+        setAlert("", "");
+      }
       if (wasNew && state.projectPersisted) {
         redirectAfterCreate(detail);
       }
@@ -2957,6 +3014,10 @@
         event.preventDefault();
       }
 
+      if (state.autoSaveTimer !== null) {
+        clearTimeout(state.autoSaveTimer);
+        state.autoSaveTimer = null;
+      }
       void saveProject();
     } catch (error) {}
   }
@@ -3071,6 +3132,7 @@
       });
       addListener(refs.addressText, "blur", function onAddressGeocoderBlur() {
         setTimeout(closeGeocoderSuggestions, 140);
+        flushAutoSave();
       });
 
       addListener(refs.visibility, "change", onVisibilityInputChange);

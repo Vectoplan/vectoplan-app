@@ -274,36 +274,7 @@
   <header class="vp-project-card__header">
     <div>
       <h2 id="projectTeamTitle" class="vp-project-card__title">Team und Rechte</h2>
-      <p class="vp-project-card__text">
-        Verwalte App-seitige Projektrollen. Änderungen werden zuerst im Projekt gespeichert und anschließend mit dem Chunk-Zugriff abgeglichen.
-      </p>
-    </div>
-
-    <div class="vp-project-card__meta" aria-live="polite">
-      <span
-        class="vp-project-chip {% if _team_auth_unavailable or not _team_identity_consistent or _team_local_link_blocked or _team_user_blocked or _team_access_blocked or _team_sync_repair %}vp-project-chip--error{% elif _team_sync_required and _team_sync_status in _access_sync_pending_statuses %}vp-project-chip--warning{% elif _team_form_enabled %}vp-project-chip--success{% elif _team_is_new %}vp-project-chip--warning{% else %}vp-project-chip--muted{% endif %}"
-        data-project-team-status
-      >
-        {% if _team_auth_unavailable %}
-          Auth nicht erreichbar
-        {% elif not _team_identity_consistent or _team_local_link_state == 'identity_mismatch' %}
-          Identität inkonsistent
-        {% elif _team_user_blocked or _team_access_blocked or _team_local_link_blocked %}
-          Zugriff gesperrt
-        {% elif _team_sync_repair %}
-          Chunk-Zugriff reparieren
-        {% elif _team_sync_required and _team_sync_status in _access_sync_pending_statuses %}
-          Chunk-Zugriff ausstehend
-        {% elif _team_form_enabled %}
-          Verwaltung aktiv
-        {% elif _team_is_new %}
-          Erst speichern
-        {% elif _team_demo_mode %}
-          Demo
-        {% else %}
-          Geschützt
-        {% endif %}
-      </span>
+      <p class="vp-project-card__text">Füge Personen per E-Mail hinzu und verwalte ihre Projektrolle.</p>
     </div>
   </header>
 
@@ -316,21 +287,9 @@
     </div>
   {% endif %}
 
-  {% if _team_sync_repair %}
-    <div class="vp-project-inline-note vp-project-inline-note--error" data-project-team-access-sync-note>
-      <strong>Chunk-Zugriff muss repariert werden:</strong>
-      Die App-Mitgliedschaften bleiben gespeichert. Der nachgelagerte Zugriffsabgleich ist noch nicht konsistent.
-    </div>
-  {% elif _team_sync_required and _team_sync_status in _access_sync_pending_statuses %}
-    <div class="vp-project-inline-note vp-project-inline-note--locked" data-project-team-access-sync-note>
-      <strong>Chunk-Zugriff wird synchronisiert:</strong>
-      Änderungen an Rollen oder Mitgliedschaften sind bereits in der App gespeichert.
-    </div>
-  {% endif %}
-
   {% if _team_can_read %}
     <section class="vp-project-team-invite" aria-labelledby="projectTeamInviteTitle" data-project-team-invite>
-      <h3 id="projectTeamInviteTitle" class="vp-project-subtitle">Person einladen</h3>
+      <h3 id="projectTeamInviteTitle" class="vp-project-subtitle">Person hinzufügen</h3>
 
       <div class="vp-project-team-invite__grid">
         <div class="vp-project-field">
@@ -348,9 +307,7 @@
             {% if not _team_form_enabled %}disabled{% endif %}
             {% if _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
           >
-          <p class="vp-project-help">
-            Die Adresse muss bereits bei vectoplan-auth registriert sein. Es wird kein Benutzerkonto in vectoplan-app erzeugt.
-          </p>
+          <p class="vp-project-help">Registrierte Accounts erhalten sofort Zugriff. Andere Adressen werden vorgemerkt; der E-Mail-Versand folgt später.</p>
         </div>
 
         <div class="vp-project-field">
@@ -363,9 +320,9 @@
             {% if not _team_form_enabled %}disabled{% endif %}
             {% if _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
           >
-            <option value="viewer" selected>Viewer | Ansehen</option>
-            <option value="editor">Editor | Bearbeiten</option>
-            <option value="admin">Admin | Projekt verwalten</option>
+            <option value="viewer" selected>Viewer</option>
+            <option value="editor">Editor</option>
+            <option value="admin">Admin</option>
           </select>
         </div>
 
@@ -376,9 +333,7 @@
             data-project-team-invite-submit
             {% if not _team_form_enabled %}disabled{% endif %}
             {% if _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
-          >
-            Einladung senden
-          </button>
+          >Zugriff geben</button>
         </div>
       </div>
 
@@ -389,19 +344,7 @@
       <div class="vp-project-section-header">
         <div>
           <h3 id="projectMembersTitle" class="vp-project-subtitle">Mitglieder</h3>
-          <p class="vp-project-help">
-            Rollen bestimmen die App- und Chunk-Zugriffsprojektion. Owner können nur über den dedizierten Eigentümertransfer gewechselt werden.
-          </p>
-        </div>
-        <div class="vp-project-section-actions">
-          <button
-            type="button"
-            class="vp-project-btn vp-project-btn--secondary"
-            data-project-team-members-refresh
-            {% if not _members_path %}disabled{% endif %}
-          >
-            Aktualisieren
-          </button>
+          <p class="vp-project-help">Rollen werden beim Ändern automatisch gespeichert.</p>
         </div>
       </div>
 
@@ -411,39 +354,20 @@
             {% set _member = member if member is mapping else {} %}
             {% set _member_user_raw = _member.get('user', {}) %}
             {% set _member_user = _member_user_raw if _member_user_raw is mapping else {} %}
-
-            {# Explicit local AppUser reference only. Never fall back to membership.id. #}
-            {% set _member_user_id = _member.get('user_id') %}
-            {% if not _member_user_id %}{% set _member_user_id = _member.get('userId') %}{% endif %}
-            {% if not _member_user_id %}{% set _member_user_id = _member_user.get('id') %}{% endif %}
-            {% if not _member_user_id %}{% set _member_user_id = _member_user.get('user_id') %}{% endif %}
-            {% if not _member_user_id %}{% set _member_user_id = _member_user.get('userId', '') %}{% endif %}
+            {% set _member_user_id = _member.get('user_id', _member.get('userId', _member_user.get('id', _member_user.get('user_id', _member_user.get('userId', ''))))) %}
             {% set _member_user_id_text = _member_user_id|string if _member_user_id else '' %}
             {% set _member_user_id_valid = true if _member_user_id_text and _member_user_id_text.isdigit() and (_member_user_id_text|int) > 0 else false %}
             {% if not _member_user_id_valid %}{% set _member_user_id = '' %}{% endif %}
-
-            {% set _member_name = _member_user.get('display_name', _member_user.get('displayName', _member.get('display_name', _member.get('displayName', _member_user.get('name', _member.get('name', _member_user.get('handle', _member.get('handle', 'Unbekannter Benutzer')))))))) %}
-            {% set _member_email = _member_user.get('email', _member.get('email', _member.get('user_email', _member.get('userEmail', '')))) %}
-
             {% set _member_role_raw = _member.get('role', _member.get('project_role', _member.get('projectRole', 'viewer'))) %}
             {% set _member_role_text = _member_role_raw|string|lower|replace('-', '_')|replace(' ', '_') %}
-            {% if _member_role_text in ['administrator', 'manager'] %}
-              {% set _member_role = 'admin' %}
-            {% elif _member_role_text in ['owner', 'admin', 'editor', 'viewer'] %}
-              {% set _member_role = _member_role_text %}
-            {% else %}
-              {% set _member_role = 'viewer' %}
-            {% endif %}
-
-            {% set _member_status = _member.get('status', 'active')|string|lower %}
-            {% set _member_active = false if _member_status in _inactive_member_statuses else true %}
+            {% if _member_role_text in ['administrator', 'manager'] %}{% set _member_role = 'admin' %}
+            {% elif _member_role_text in ['owner', 'admin', 'editor', 'viewer'] %}{% set _member_role = _member_role_text %}
+            {% else %}{% set _member_role = 'viewer' %}{% endif %}
             {% set _member_owner = true if _member_role == 'owner' else false %}
-            {% set _member_can_view = true if _member_active else false %}
-            {% set _member_can_edit = true if _member_active and _member_role in ['owner', 'admin', 'editor'] else false %}
-            {% set _member_can_manage = true if _member_active and _member_role in ['owner', 'admin'] else false %}
-            {% set _member_can_manage_team = _member_can_manage %}
-            {% set _member_can_delete = true if _member_active and _member_role == 'owner' else false %}
-            {% set _member_can_embed = true if _member_active and _member_role in ['owner', 'admin'] else false %}
+            {% set _member_name = _member_user.get('display_name', _member_user.get('displayName', _member.get('display_name', _member.get('displayName', _member_user.get('name', _member.get('name', _member_user.get('handle', _member.get('handle', '')))))))) %}
+            {% if not _member_name %}{% set _member_name = 'Projektbesitzer' if _member_owner else 'Mitglied' %}{% endif %}
+            {% set _member_email = _member_user.get('email', _member.get('email', _member.get('user_email', _member.get('userEmail', '')))) %}
+            {% set _member_status = _member.get('status', 'active')|string|lower %}
 
             <article
               class="vp-project-team-row{% if _member_owner %} vp-project-team-row--owner{% endif %}"
@@ -457,178 +381,89 @@
                 <div class="vp-project-avatar" aria-hidden="true">{{ (_member_name|string)[:1]|upper }}</div>
                 <div>
                   <h4 class="vp-project-team-row__name">{{ _member_name }}</h4>
-                  <p class="vp-project-team-row__meta">
-                    {% if _member_email %}
-                      {{ _member_email }}
-                    {% elif _member_user_id %}
-                      Lokale Benutzerreferenz vorhanden
-                    {% else %}
-                      Lokale Benutzerreferenz fehlt
-                    {% endif %}
-                  </p>
+                  {% if _member_email %}<p class="vp-project-team-row__meta">{{ _member_email }}</p>{% endif %}
                 </div>
               </div>
 
               <div class="vp-project-team-row__role">
-                <label class="vp-project-sr-only" for="projectMemberRole{{ loop.index }}">
-                  Rolle für {{ _member_name }}
-                </label>
-                <select
-                  id="projectMemberRole{{ loop.index }}"
-                  class="vp-project-select vp-project-select--compact"
-                  data-project-team-member-role
-                  data-user-id="{{ _member_user_id|e }}"
-                  data-current-role="{{ _member_role|e }}"
-                  {% if not _team_form_enabled or _member_owner or not _member_user_id %}disabled{% endif %}
-                >
-                  <option value="viewer" {% if _member_role == 'viewer' %}selected{% endif %}>Viewer</option>
-                  <option value="editor" {% if _member_role == 'editor' %}selected{% endif %}>Editor</option>
-                  <option value="admin" {% if _member_role == 'admin' %}selected{% endif %}>Admin</option>
-                  {% if _member_owner %}<option value="owner" selected>Owner</option>{% endif %}
-                </select>
-              </div>
-
-              <div class="vp-project-team-row__permissions" aria-label="Effektive Rechte">
-                {% if _member_can_view %}<span class="vp-project-permission-chip">Ansehen</span>{% endif %}
-                {% if _member_can_edit %}<span class="vp-project-permission-chip">Bearbeiten</span>{% endif %}
-                {% if _member_can_manage %}<span class="vp-project-permission-chip">Verwalten</span>{% endif %}
-                {% if _member_can_manage_team %}<span class="vp-project-permission-chip">Team</span>{% endif %}
-                {% if _member_can_delete %}<span class="vp-project-permission-chip">Löschen</span>{% endif %}
-                {% if _member_can_embed %}<span class="vp-project-permission-chip">Einbetten</span>{% endif %}
-                {% if not _member_active %}<span class="vp-project-permission-chip vp-project-permission-chip--muted">Nicht aktiv</span>{% endif %}
+                {% if _member_owner %}
+                  <span class="vp-project-role-chip">Owner</span>
+                {% else %}
+                  <label class="vp-project-sr-only" for="projectMemberRole{{ loop.index }}">Rolle für {{ _member_name }}</label>
+                  <select
+                    id="projectMemberRole{{ loop.index }}"
+                    class="vp-project-select vp-project-select--compact"
+                    data-project-team-member-role
+                    data-user-id="{{ _member_user_id|e }}"
+                    data-current-role="{{ _member_role|e }}"
+                    {% if not _team_form_enabled or not _member_user_id %}disabled{% endif %}
+                  >
+                    <option value="viewer" {% if _member_role == 'viewer' %}selected{% endif %}>Viewer</option>
+                    <option value="editor" {% if _member_role == 'editor' %}selected{% endif %}>Editor</option>
+                    <option value="admin" {% if _member_role == 'admin' %}selected{% endif %}>Admin</option>
+                  </select>
+                {% endif %}
               </div>
 
               <div class="vp-project-team-row__actions">
-                <button
-                  type="button"
-                  class="vp-project-btn vp-project-btn--ghost"
-                  data-project-team-member-save
-                  data-user-id="{{ _member_user_id|e }}"
-                  data-current-role="{{ _member_role|e }}"
-                  {% if not _team_form_enabled or _member_owner or not _member_user_id %}disabled{% endif %}
-                  {% if _member_owner %}title="Owner können nur über den Eigentümertransfer geändert werden."{% elif not _member_user_id %}title="Lokale AppUser-ID fehlt."{% elif _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
-                >
-                  Rolle speichern
-                </button>
-
-                <button
-                  type="button"
-                  class="vp-project-btn vp-project-btn--danger"
-                  data-project-team-member-remove
-                  data-user-id="{{ _member_user_id|e }}"
-                  data-current-role="{{ _member_role|e }}"
-                  {% if not _team_form_enabled or _member_owner or not _member_user_id %}disabled{% endif %}
-                  {% if _member_owner %}title="Owner können nicht über diese Oberfläche entfernt werden."{% elif not _member_user_id %}title="Lokale AppUser-ID fehlt."{% elif _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
-                >
-                  Entfernen
-                </button>
+                {% if not _member_owner %}
+                  <button
+                    type="button"
+                    class="vp-project-btn vp-project-btn--danger"
+                    data-project-team-member-remove
+                    data-user-id="{{ _member_user_id|e }}"
+                    data-current-role="{{ _member_role|e }}"
+                    {% if not _team_form_enabled or not _member_user_id %}disabled{% endif %}
+                    {% if not _member_user_id %}title="Lokale AppUser-ID fehlt."{% elif _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
+                  >Entfernen</button>
+                {% endif %}
               </div>
             </article>
           {% endfor %}
         {% else %}
-          <div class="vp-project-empty" data-project-team-members-empty>
-            <p>Noch keine zusätzlichen Mitglieder geladen.</p>
-            <p class="vp-project-help">Die Liste kann über „Aktualisieren“ neu geladen werden.</p>
-          </div>
+          <div class="vp-project-empty" data-project-team-members-empty><p>Noch keine Mitglieder vorhanden.</p></div>
         {% endif %}
       </div>
     </section>
 
-    <section class="vp-project-team-invitations" aria-labelledby="projectInvitationsTitle" data-project-team-invitations-section>
+    <section class="vp-project-team-invitations" aria-labelledby="projectInvitationsTitle" data-project-team-invitations-section{% if _team_invitations|length == 0 %} hidden{% endif %}>
       <div class="vp-project-section-header">
         <div>
-          <h3 id="projectInvitationsTitle" class="vp-project-subtitle">Einladungen</h3>
-          <p class="vp-project-help">
-            Einladungen bleiben ausstehend, bis der kanonisch registrierte Account sie annimmt.
-          </p>
-        </div>
-        <div class="vp-project-section-actions">
-          <button
-            type="button"
-            class="vp-project-btn vp-project-btn--secondary"
-            data-project-team-invitations-refresh
-            {% if not _invitations_path %}disabled{% endif %}
-          >
-            Aktualisieren
-          </button>
+          <h3 id="projectInvitationsTitle" class="vp-project-subtitle">Vorgemerkte Einladungen</h3>
+          <p class="vp-project-help">Der automatische E-Mail-Versand wird später ergänzt.</p>
         </div>
       </div>
 
       <div class="vp-project-team-list vp-project-team-list--invitations" data-project-team-invitations aria-live="polite">
-        {% if _team_invitations|length > 0 %}
-          {% for invitation in _team_invitations %}
-            {% set _inv = invitation if invitation is mapping else {} %}
-            {% set _inv_id = _inv.get('public_id', _inv.get('publicId', _inv.get('invitation_id', _inv.get('invitationId', '')))) %}
-            {% set _inv_email = _inv.get('email', _inv.get('invitee_email', _inv.get('inviteeEmail', _inv.get('email_normalized', _inv.get('emailNormalized', ''))))) %}
-            {% set _inv_role_raw = _inv.get('role', 'viewer') %}
-            {% set _inv_role_text = _inv_role_raw|string|lower %}
-            {% if _inv_role_text in ['admin', 'administrator', 'manager'] %}
-              {% set _inv_role = 'admin' %}
-            {% elif _inv_role_text in ['editor', 'viewer'] %}
-              {% set _inv_role = _inv_role_text %}
-            {% else %}
-              {% set _inv_role = 'viewer' %}
-            {% endif %}
-            {% set _inv_status = _inv.get('status', 'pending')|string|lower %}
-            {% set _inv_terminal = true if _inv_status in _terminal_invitation_statuses else false %}
-            {% set _inv_created_at = _inv.get('created_at', _inv.get('createdAt', '')) %}
-            {% set _inv_expires_at = _inv.get('expires_at', _inv.get('expiresAt', '')) %}
+        {% for invitation in _team_invitations %}
+          {% set _inv = invitation if invitation is mapping else {} %}
+          {% set _inv_id = _inv.get('public_id', _inv.get('publicId', _inv.get('invitation_id', _inv.get('invitationId', '')))) %}
+          {% set _inv_email = _inv.get('email', _inv.get('invitee_email', _inv.get('inviteeEmail', _inv.get('email_normalized', _inv.get('emailNormalized', ''))))) %}
+          {% set _inv_role_raw = _inv.get('role', 'viewer') %}
+          {% set _inv_role_text = _inv_role_raw|string|lower %}
+          {% if _inv_role_text in ['admin', 'administrator', 'manager'] %}{% set _inv_role = 'admin' %}
+          {% elif _inv_role_text in ['editor', 'viewer'] %}{% set _inv_role = _inv_role_text %}
+          {% else %}{% set _inv_role = 'viewer' %}{% endif %}
+          {% set _inv_status = _inv.get('status', 'pending')|string|lower %}
+          {% set _inv_terminal = true if _inv_status in _terminal_invitation_statuses else false %}
 
-            <article
-              class="vp-project-team-row vp-project-team-row--invitation"
-              data-project-team-invitation
-              data-invitation-id="{{ _inv_id|e }}"
-              data-role="{{ _inv_role|e }}"
-              data-status="{{ _inv_status|e }}"
-            >
-              <div class="vp-project-team-row__identity">
-                <div class="vp-project-avatar vp-project-avatar--pending" aria-hidden="true">@</div>
-                <div>
-                  <h4 class="vp-project-team-row__name">{{ _inv_email if _inv_email else 'Ausstehende Einladung' }}</h4>
-                  <p class="vp-project-team-row__meta">
-                    Status: {{ _inv_status }}
-                    {% if _inv_created_at %} · erstellt {{ _inv_created_at }}{% endif %}
-                    {% if _inv_expires_at %} · gültig bis {{ _inv_expires_at }}{% endif %}
-                  </p>
-                </div>
+          <article class="vp-project-team-row vp-project-team-row--invitation" data-project-team-invitation data-invitation-id="{{ _inv_id|e }}" data-role="{{ _inv_role|e }}" data-status="{{ _inv_status|e }}">
+            <div class="vp-project-team-row__identity">
+              <div class="vp-project-avatar vp-project-avatar--pending" aria-hidden="true">@</div>
+              <div>
+                <h4 class="vp-project-team-row__name">{{ _inv_email if _inv_email else 'Vorgemerkte Adresse' }}</h4>
+                <p class="vp-project-team-row__meta">E-Mail-Versand folgt</p>
               </div>
-
-              <div class="vp-project-team-row__role">
-                <span class="vp-project-role-chip">
-                  {% if _inv_role == 'admin' %}Admin{% elif _inv_role == 'editor' %}Editor{% else %}Viewer{% endif %}
-                </span>
-              </div>
-
-              <div class="vp-project-team-row__permissions">
-                <span class="vp-project-permission-chip{% if not _inv_terminal %} vp-project-permission-chip--pending{% else %} vp-project-permission-chip--muted{% endif %}">
-                  {% if _inv_terminal %}abgeschlossen{% else %}wartet auf Annahme{% endif %}
-                </span>
-              </div>
-
-              <div class="vp-project-team-row__actions">
-                <button
-                  type="button"
-                  class="vp-project-btn vp-project-btn--danger"
-                  data-project-team-invitation-revoke
-                  data-invitation-id="{{ _inv_id|e }}"
-                  data-status="{{ _inv_status|e }}"
-                  {% if not _team_form_enabled or not _inv_id or _inv_terminal %}disabled{% endif %}
-                  {% if _inv_terminal %}title="Diese Einladung ist bereits abgeschlossen."{% elif _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
-                >
-                  Widerrufen
-                </button>
-              </div>
-            </article>
-          {% endfor %}
-        {% else %}
-          <div class="vp-project-empty" data-project-team-invitations-empty>
-            <p>Keine Einladungen vorhanden.</p>
-          </div>
-        {% endif %}
+            </div>
+            <div class="vp-project-team-row__role"><span class="vp-project-role-chip">{% if _inv_role == 'admin' %}Admin{% elif _inv_role == 'editor' %}Editor{% else %}Viewer{% endif %}</span></div>
+            <div class="vp-project-team-row__actions">
+              <button type="button" class="vp-project-btn vp-project-btn--danger" data-project-team-invitation-revoke data-invitation-id="{{ _inv_id|e }}" data-status="{{ _inv_status|e }}" {% if not _team_form_enabled or not _inv_id or _inv_terminal %}disabled{% endif %}>Widerrufen</button>
+            </div>
+          </article>
+        {% endfor %}
       </div>
     </section>
   {% endif %}
-
   <script type="application/json" data-project-team-initial-json>
     {
       "chunk_access_sync": {
