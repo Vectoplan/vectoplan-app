@@ -243,17 +243,23 @@ Projektformular wird mit vorhandenen Daten angezeigt
 
 ### 3D öffnen
 
+Bei einem bestehenden, konfigurierten Projekt beginnt das 3D-Vorladen bereits beim Rendern der Projektseite. Das zweite iframe bleibt unsichtbar, aber aktiv und wird mit `loading="eager"` sowie hoher Fetch-Priorität angefordert.
+
 ```text
+Projektseite wird geöffnet
+  ↓
+verborgenes iframe lädt /ui/project/<project_public_id>/editor
+  ↓
+vectoplan-editor startet Bootstrap und Chunk-Verbindung
+  ↓
+erster radialer Chunk-Batch wird geladen und gerendert
+  ↓
 User klickt 3D
   ↓
-main.js prüft, ob Projekt konfiguriert ist
-  ↓
-iframe lädt /ui/project/<project_public_id>/editor
-  ↓
-routes/ui/editor.py baut browserfähige Editor-URL
-  ↓
-vectoplan-editor wird im iframe geöffnet
+dasselbe bereits laufende iframe wird sichtbar geschaltet
 ```
+
+Beim Wechsel zu Map, Einstellungen oder Creative-Inventar bleibt das Editor-iframe erhalten. Dadurch werden Three.js-Szene, Chunk-Registry und Verbindung nicht neu gestartet.
 
 ### Map öffnen
 

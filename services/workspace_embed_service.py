@@ -1332,6 +1332,32 @@ def _canonical_auth_user_id(current_user: Mapping[str, Any]) -> str:
     )
 
 
+def _canonical_auth_username(current_user: Mapping[str, Any]) -> str:
+    user = _safe_dict(current_user)
+    auth = _safe_dict(user.get("auth"))
+    nested_user = _safe_dict(user.get("user"))
+    auth_user = _safe_dict(auth.get("user"))
+    return _safe_str(
+        _first_value(
+            user.get("username"),
+            user.get("preferred_username"),
+            user.get("handle"),
+            nested_user.get("username"),
+            nested_user.get("preferred_username"),
+            nested_user.get("handle"),
+            auth.get("username"),
+            auth.get("preferred_username"),
+            auth.get("handle"),
+            auth_user.get("username"),
+            auth_user.get("preferred_username"),
+            auth_user.get("handle"),
+            default="",
+        ),
+        "",
+        80,
+    )
+
+
 def _project_public_id(project: Any = None, project_payload: Optional[Mapping[str, Any]] = None) -> str:
     payload = _safe_dict(project_payload)
     value = _first_value(
@@ -2352,6 +2378,7 @@ def _base_embed_params(
                 "world_id": _safe_str(chunk.get("chunk_world_id"), "", 240),
                 "universe_id": _safe_str(chunk.get("chunk_universe_id"), "", 240),
                 "auth_user_id": _canonical_auth_user_id(current_user),
+                "auth_username": _canonical_auth_username(current_user),
                 "role": access.role or (ROLE_VIEWER if access.public_viewer else ""),
                 "public": bool(access.public_viewer),
                 "demo": bool(access.demo_mode),

@@ -848,11 +848,25 @@
       </section>
 
       <iframe id="viewer-frame"
-              class="viewer-iframe"
+              class="viewer-iframe is-workspace-active"
               title="VECTOPLAN Workspace"
-              src="{{ resolved_workspace_src }}"
+              src="{{ resolved_project_url if resolved_default_mode == '3d' else resolved_workspace_src }}"
+              data-workspace-frame="standard"
+              aria-hidden="false"
               referrerpolicy="no-referrer"
               allow="fullscreen; pointer-lock; clipboard-read; clipboard-write"
+              loading="eager"></iframe>
+
+      <iframe id="editor-preload-frame"
+              class="viewer-iframe viewer-iframe--editor"
+              title="VECTOPLAN Editor"
+              src="{{ initial_editor_path if editor3d_workspace_enabled and initial_editor_path else 'about:blank' }}"
+              data-workspace-frame="editor3d"
+              data-preloaded="true"
+              aria-hidden="true"
+              referrerpolicy="no-referrer"
+              allow="fullscreen; pointer-lock; clipboard-read; clipboard-write"
+              fetchpriority="high"
               loading="eager"></iframe>
 
       <div class="overlay" aria-hidden="true"></div>
