@@ -514,6 +514,18 @@ a:hover{
   min-height:0;
   border:0;
   background:#ffffff;
+  grid-area:1 / 1;
+  opacity:0;
+  visibility:hidden;
+  pointer-events:none;
+  z-index:0;
+}
+
+.viewer-iframe.is-workspace-active{
+  opacity:1;
+  visibility:visible;
+  pointer-events:auto;
+  z-index:1;
 }
 
 .overlay{

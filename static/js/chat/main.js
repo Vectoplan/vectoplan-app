@@ -1322,6 +1322,73 @@ function viewerFrame() {
   }
 }
 
+function editorPreloadFrame() {
+  try {
+    return $("editor-preload-frame");
+  } catch (_) {
+    return document.getElementById("editor-preload-frame");
+  }
+}
+
+function requestEditorRuntimeStatus(frame = editorPreloadFrame()) {
+  try {
+    if (!frame || !frame.contentWindow) return false;
+
+    frame.contentWindow.postMessage(
+      {
+        type: "vectoplan-app:editor-status-request",
+        kind: "vectoplan-app:editor-status-request",
+        source: "vectoplan-app",
+      },
+      "*"
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function setWorkspaceFrameActive(frame, active) {
+  try {
+    if (!frame) return;
+    frame.classList.toggle("is-workspace-active", Boolean(active));
+    frame.setAttribute("aria-hidden", active ? "false" : "true");
+    frame.dataset.workspaceActive = active ? "true" : "false";
+  } catch (_) {}
+}
+
+function activateWorkspaceFrame(mode) {
+  try {
+    const editorActive = normalizeMode(mode) === "3d";
+    setWorkspaceFrameActive(viewerFrame(), !editorActive);
+    setWorkspaceFrameActive(editorPreloadFrame(), editorActive);
+  } catch (_) {}
+}
+
+function prepareEditorPreloadFrame(nextSrc) {
+  try {
+    const frame = editorPreloadFrame();
+    const rawSrc = String(nextSrc || "").trim();
+    if (!frame || !rawSrc || isUnsafeLegacyTarget(rawSrc)) return false;
+
+    applyIframeCapabilities(frame);
+    const currentTarget = frame.dataset.target || frame.getAttribute("src") || "";
+    if (stableLocalUrl(currentTarget) === stableLocalUrl(rawSrc)) {
+      requestEditorRuntimeStatus(frame);
+      return true;
+    }
+
+    uiState.editorReady = false;
+    frame.dataset.target = rawSrc;
+    frame.dataset.preloaded = "true";
+    frame.dataset.editorReady = "false";
+    makeIframeLoadHandlers(frame, rawSrc, "3d");
+    frame.src = rawSrc;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 function setRawOpenUrl(url) {
   try {
     const a = $("viewerOpenRawBtn");
@@ -1334,10 +1401,10 @@ function setRawOpenUrl(url) {
 
 function setFrameTitle(mode) {
   try {
-    const frame = viewerFrame();
+    const normalized = normalizeMode(mode);
+    const frame = normalized === "3d" ? editorPreloadFrame() : viewerFrame();
     if (!frame) return;
 
-    const normalized = normalizeMode(mode);
     frame.setAttribute("title", MODE_TITLE[normalized] || "Arbeitsbereich");
   } catch (_) {}
 }
@@ -1400,6 +1467,10 @@ function makeIframeLoadHandlers(frame, rawSrc, mode) {
       loaded = true;
       clear();
       hideWorkspaceFallback();
+
+      if (normalizedMode === "3d") {
+        requestEditorRuntimeStatus(frame);
+      }
 
       try {
         uiState.lastWorkspaceLoad = {
@@ -1486,6 +1557,19 @@ function hardSwapIframe(nextSrc, options = {}) {
     }
 
     hideWorkspaceFallback();
+    const currentTarget = oldFrame.dataset.target || oldFrame.getAttribute("src") || "";
+    if (
+      options.force !== true &&
+      stableLocalUrl(currentTarget) === stableLocalUrl(rawSrc)
+    ) {
+      setFrameDataset(oldFrame, {
+        mode: normalizedMode,
+        key: canonicalTabKey(normalizedMode),
+        target: rawSrc,
+      });
+      setRawOpenUrl(rawSrc);
+      return true;
+    }
 
     try {
       uiState.lastViewerUrl = "";
@@ -1745,10 +1829,39 @@ async function setWorkspaceMode(mode, options = {}) {
       return false;
     }
 
+    if (requested !== "3d") {
+      uiState.pendingEditorWorkspace = null;
+    }
+
+    if (
+      requested === "3d"
+      && options.editorReadyActivation !== true
+      && uiState.editorReady !== true
+    ) {
+      const pendingTarget = editorUrl();
+      prepareEditorPreloadFrame(pendingTarget);
+      uiState.pendingEditorWorkspace = {
+        persist: shouldPersist,
+        requestedAt: Date.now(),
+        reason: options.reason || "editor-preload",
+      };
+
+      setUiMode(requested);
+      activateWorkspaceFrame("project");
+      setRawOpenUrl(pendingTarget);
+
+      try {
+        versionsClose();
+      } catch (_) {}
+
+      return true;
+    }
+
     const normalized = setUiMode(requested);
     let target = "";
 
     if (normalized === "project") {
+      activateWorkspaceFrame(normalized);
       target = projectUrl();
       hardSwapIframe(cacheBustLocalUrl(target), {
         mode: "project",
@@ -1756,23 +1869,25 @@ async function setWorkspaceMode(mode, options = {}) {
       });
     } else if (normalized === "3d") {
       target = editorUrl();
-      hardSwapIframe(cacheBustLocalUrl(target), {
-        mode: "3d",
-        title: "VECTOPLAN Editor",
-      });
+      prepareEditorPreloadFrame(target);
+      activateWorkspaceFrame(normalized);
+      setRawOpenUrl(target);
     } else if (normalized === "map") {
+      activateWorkspaceFrame(normalized);
       target = mapUrl();
       hardSwapIframe(cacheBustLocalUrl(target), {
         mode: "map",
         title: "Karte",
       });
     } else if (normalized === "2d") {
+      activateWorkspaceFrame(normalized);
       target = await resolve2dUrl();
       hardSwapIframe(cacheBustLocalUrl(target), {
         mode: "2d",
         title: "2D Ansicht",
       });
     } else if (normalized === "lv") {
+      activateWorkspaceFrame(normalized);
       target = lvUrl();
       hardSwapIframe(cacheBustLocalUrl(target), {
         mode: "lv",
@@ -1783,6 +1898,7 @@ async function setWorkspaceMode(mode, options = {}) {
       target = versionsPageUrl() || projectUrl();
       setRawOpenUrl(target);
     } else if (normalized === "admin") {
+      activateWorkspaceFrame(normalized);
       target = adminUrl();
       hardSwapIframe(cacheBustLocalUrl(target), {
         mode: "admin",
@@ -1830,6 +1946,18 @@ async function applyInitialWorkspaceMode() {
         currentFrame.getAttribute("src") || currentFrame.src || "",
         normalizeMode(cfgValue("defaultMode", dataValue("defaultMode", "project")))
       );
+    }
+  } catch (_) {}
+
+  try {
+    const editorFrame = editorPreloadFrame();
+    if (editorFrame) {
+      applyIframeCapabilities(editorFrame);
+      const editorTarget = editorUrl();
+      if (editorTarget) {
+        editorFrame.dataset.target = editorTarget;
+        makeIframeLoadHandlers(editorFrame, editorTarget, "3d");
+      }
     }
   } catch (_) {}
 
@@ -2495,19 +2623,50 @@ function wireEditorEventBridge() {
       try {
         if (!event || !event.data) return;
 
+        const frame = editorPreloadFrame();
+        if (!frame || !frame.contentWindow || event.source !== frame.contentWindow) return;
+
         const data = event.data;
         const type = String(data.type || data.kind || "").toLowerCase();
 
-        if (!type.includes("editor") && !type.includes("vectoplan")) {
+        if (
+          String(data.source || "").toLowerCase() !== "vectoplan-editor"
+          || (!type.includes("editor") && !type.includes("vectoplan"))
+        ) {
           return;
         }
 
         uiState.lastEditorMessage = data;
         uiState.lastEditorMessageTs = Date.now();
 
-        if (type.includes("ready")) {
+        if (type === "vectoplan-editor:ready") {
           uiState.editorReady = true;
+          frame.dataset.editorReady = "true";
           hideWorkspaceFallback();
+
+          const pending = uiState.pendingEditorWorkspace;
+          uiState.pendingEditorWorkspace = null;
+
+          if (pending && normalizeMode(uiState.workspaceMode) === "3d") {
+            void setWorkspaceMode("3d", {
+              persist: pending.persist !== false,
+              reason: "editor-preload-ready",
+              editorReadyActivation: true,
+            });
+          }
+        }
+
+        if (type === "vectoplan-editor:exit-requested") {
+          void setWorkspaceMode("project", {
+            persist: true,
+            reason: "editor-exit-requested",
+          });
+          return;
+        }
+
+        if (type.includes("destroyed") || type.includes("failed")) {
+          uiState.editorReady = false;
+          frame.dataset.editorReady = "false";
         }
 
         if (type.includes("selection")) {
@@ -2521,6 +2680,8 @@ function wireEditorEventBridge() {
         }
       } catch (_) {}
     });
+
+    requestEditorRuntimeStatus();
   } catch (_) {}
 }
 
@@ -2700,6 +2861,12 @@ async function boot() {
 
   safeCall("exposeWorkspaceDebugApi", exposeWorkspaceDebugApi);
 
+
+  safeCall("wireEditorEventBridge", wireEditorEventBridge);
+  safeCall("prepareEditorPreloadFrame", () => {
+    if (!projectToolsEnabled()) return false;
+    return prepareEditorPreloadFrame(editorUrl());
+  });
   safeCall("initProjectSidebar", initProjectSidebar);
 
   safeCall("wireGlobalStatus", wireGlobalStatus);
@@ -2719,7 +2886,6 @@ async function boot() {
   safeCall("wireVersionsDropdown", wireVersionsDropdown);
 
   safeCall("wire2dEventBridge", wire2dEventBridge);
-  safeCall("wireEditorEventBridge", wireEditorEventBridge);
   safeCall("wireRefreshEvents", wireRefreshEvents);
 
   await safeAwait("applyInitialWorkspaceMode", applyInitialWorkspaceMode);
