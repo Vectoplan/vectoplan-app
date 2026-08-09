@@ -1847,8 +1847,25 @@ async function setWorkspaceMode(mode, options = {}) {
       };
 
       setUiMode(requested);
-      activateWorkspaceFrame("project");
+      // Show the editor immediately while its mandatory boot gate is active.
+      // The editor owns the white loading screen and the live chunk/mesh
+      // progress, so keeping this iframe hidden would leave an empty workspace
+      // and conceal the actual loading state from the user.
+      activateWorkspaceFrame(requested);
       setRawOpenUrl(pendingTarget);
+
+      // Keep the outer Platform route in sync as soon as the user selects 3D.
+      // Waiting for vectoplan-editor:ready made /2d remain in the address bar
+      // throughout the (potentially long) world warmup.
+      relayProjectNavigation(
+        {
+          projectPublicId: projectPublicId(),
+          workspace: requested,
+        },
+        options.reason || "editor-preload"
+      );
+
+      showStatus("3D-Welt und Chunks werden vorbereitet …");
 
       try {
         versionsClose();

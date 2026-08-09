@@ -50,6 +50,8 @@ Wichtig:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
+import unicodedata
 import uuid
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set
 
@@ -105,6 +107,7 @@ try:
         serialize_project_version as model_serialize_project_version,
         serialize_service_link as model_serialize_service_link,
         utcnow as model_utcnow,
+        project_public_id as generate_project_public_id,
     )
 except Exception as exc:  # pragma: no cover
     raise RuntimeError("project_service requires modular models package") from exc
@@ -311,6 +314,23 @@ except Exception:  # pragma: no cover
     sync_project_chunk_access = None  # type: ignore
 
 try:
+    from services.core_client import (
+        CoreClientError,
+        core_project_id_from_project,
+        ensure_core_project_for_app_project,
+        is_core_provisioning_enabled,
+        is_core_provisioning_required,
+        mark_core_provisioning_failed,
+    )
+except Exception:  # pragma: no cover
+    CoreClientError = RuntimeError  # type: ignore
+    core_project_id_from_project = None  # type: ignore
+    ensure_core_project_for_app_project = None  # type: ignore
+    is_core_provisioning_enabled = None  # type: ignore
+    is_core_provisioning_required = None  # type: ignore
+    mark_core_provisioning_failed = None  # type: ignore
+
+try:
     from services.geocoding_client import (
         GeocodingError as MapboxGeocodingError,
         geocode_address as mapbox_geocode_address,
@@ -356,6 +376,7 @@ GEOCODE_STATUS_RESOLVED = "resolved"
 GEOCODE_STATUS_FAILED = "failed"
 
 SERVICE_CHUNK = "chunk"
+SERVICE_CORE = "core"
 SERVICE_EDITOR = "editor3d"
 SERVICE_OPENLAYER = "openlayer"
 SERVICE_APP = "app"
@@ -809,6 +830,38 @@ def _payload_has(source: Mapping[str, Any], *keys: str) -> bool:
         return any(key in source for key in keys)
     except Exception:
         return False
+
+
+def _generated_project_cost_center(project: Any) -> str:
+    """Build a stable, readable cost centre from project name and public id."""
+
+    public_id = _safe_str(getattr(project, "public_id", None), "", 120)
+    if not public_id:
+        public_id = generate_project_public_id()
+        try:
+            project.public_id = public_id
+        except Exception:
+            pass
+    name = _safe_str(getattr(project, "name", None), "PROJEKT", 255)
+    normalized = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", normalized).strip("-").upper()
+    slug = slug[:42] or "PROJEKT"
+    suffix = re.sub(r"[^A-Za-z0-9]", "", public_id)[-8:].upper() or uuid.uuid4().hex[:8].upper()
+    return f"KST-{slug}-{suffix}"[:80]
+
+
+def _project_cost_center(project: Any) -> str:
+    settings = _safe_dict(getattr(project, "settings", None))
+    return _safe_str(settings.get("cost_center"), "", 80) or _generated_project_cost_center(project)
+
+
+def _ensure_project_cost_center(project: Any) -> str:
+    cost_center = _project_cost_center(project)
+    settings = _safe_dict(getattr(project, "settings", None))
+    if _safe_str(settings.get("cost_center"), "", 80) != cost_center:
+        settings["cost_center"] = cost_center
+        project.settings = settings
+    return cost_center
 
 
 def _project_is_demo(project: Any) -> bool:
@@ -2265,6 +2318,104 @@ def _chunk_access_sync_enabled() -> bool:
     return _config_bool("VECTOPLAN_APP_CHUNK_ACCESS_SYNC_ENABLED", True)
 
 
+def _core_provisioning_enabled() -> bool:
+    try:
+        if callable(is_core_provisioning_enabled):
+            return bool(is_core_provisioning_enabled())
+    except Exception:
+        pass
+    return _config_bool("VECTOPLAN_APP_CORE_PROVISION_ON_PROJECT_CREATE", True)
+
+
+def _core_provisioning_required() -> bool:
+    try:
+        if callable(is_core_provisioning_required):
+            return bool(is_core_provisioning_required())
+    except Exception:
+        pass
+    return _config_bool("VECTOPLAN_APP_CORE_PROVISIONING_REQUIRED", False)
+
+
+def _ensure_project_core_link_best_effort(project: Any, *, actor_user_id: Optional[int]) -> Dict[str, Any]:
+    """Ensure Core after the App transaction and persist a retryable result."""
+    if project is None or _project_is_demo(project) or not _core_provisioning_enabled():
+        return {"ok": True, "status": "disabled"}
+    if not callable(ensure_core_project_for_app_project):
+        result = {
+            "ok": False,
+            "status": "error",
+            "error": {"code": "core_client_unavailable", "message": "services.core_client is unavailable"},
+        }
+        return result
+
+    try:
+        result = _safe_dict(ensure_core_project_for_app_project(project))
+        db.session.add(project)
+        _record_project_event(
+            project,
+            action="core_project_linked",
+            category="service_link",
+            actor_user_id=actor_user_id,
+            payload={"service": SERVICE_CORE, "result": result},
+            commit=False,
+        )
+        db.session.commit()
+        return result
+    except Exception as exc:
+        _db_rollback_safely()
+        try:
+            if callable(mark_core_provisioning_failed):
+                mark_core_provisioning_failed(project, exc)
+            db.session.add(project)
+            _record_project_event(
+                project,
+                action="core_provisioning_failed",
+                category="service_link",
+                actor_user_id=actor_user_id,
+                payload={
+                    "service": SERVICE_CORE,
+                    "code": _safe_str(getattr(exc, "code", None), "core_provisioning_failed", 160),
+                    "message": _safe_str(str(exc), "Core provisioning failed.", 2000),
+                    "retryable": bool(getattr(exc, "retryable", True)),
+                },
+                commit=False,
+            )
+            db.session.commit()
+        except Exception:
+            _db_rollback_safely()
+        return {
+            "ok": False,
+            "status": "error",
+            "error": {
+                "code": _safe_str(getattr(exc, "code", None), "core_provisioning_failed", 160),
+                "message": _safe_str(str(exc), "Core provisioning failed.", 2000),
+                "retryable": bool(getattr(exc, "retryable", True)),
+            },
+        }
+
+
+def ensure_project_core_link_on_access(
+    project: Any,
+    *,
+    actor_user_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Backfill a missing Core project once when an existing project opens CAD."""
+    if project is None or _project_is_demo(project) or not _core_provisioning_enabled():
+        return {"ok": True, "status": "disabled"}
+    if callable(core_project_id_from_project):
+        existing_id = _safe_str(core_project_id_from_project(project), "", 240)
+        if existing_id:
+            return {
+                "ok": True,
+                "status": "ready",
+                "coreProjectId": existing_id,
+                "created": False,
+                "changed": False,
+                "cached": True,
+            }
+    return _ensure_project_core_link_best_effort(project, actor_user_id=actor_user_id)
+
+
 def _should_attempt_chunk_provision(project: Any, *, force: bool = False) -> bool:
     if project is None or _project_is_demo(project):
         return False
@@ -2910,6 +3061,9 @@ def serialize_project(
         payload["is_unlisted"] = False if is_demo else visibility == PROJECT_VISIBILITY_UNLISTED
         payload["isUnlisted"] = False if is_demo else visibility == PROJECT_VISIBILITY_UNLISTED
 
+        payload["cost_center"] = _project_cost_center(project)
+        payload["costCenter"] = payload["cost_center"]
+
         payload["is_demo"] = is_demo
         payload["isDemo"] = is_demo
         payload["project_scope"] = getattr(project, "project_scope", PROJECT_SCOPE_DEMO if is_demo else PROJECT_SCOPE_PERSONAL)
@@ -3271,6 +3425,22 @@ def _normalize_project_payload(
             description = _safe_str(source.get("description"), "", 10000)
             payload["description"] = description or None
             present.add("description")
+
+        if not for_update or _payload_has(source, "cost_center", "costCenter"):
+            existing_settings = _safe_dict(getattr(existing_project, "settings", None))
+            existing_settings.update(_safe_dict(source.get("settings")))
+            cost_center = _safe_str(
+                source.get("cost_center")
+                if source.get("cost_center") is not None
+                else source.get("costCenter"),
+                "",
+                80,
+            )
+            if not cost_center and existing_project is not None:
+                cost_center = _generated_project_cost_center(existing_project)
+            existing_settings["cost_center"] = cost_center
+            payload["settings"] = existing_settings
+            present.add("settings")
 
         raw_address = source.get("address")
         address = _safe_dict(raw_address)
@@ -3747,6 +3917,7 @@ def create_project(
             **_safe_dict(payload.get("metadata")),
         },
     )
+    _ensure_project_cost_center(project)
 
     try:
         if payload.get("geocode_payload") or payload.get("geocode_status"):
@@ -3888,6 +4059,13 @@ def create_project(
             except Exception:
                 _db_rollback_safely()
 
+    if commit:
+        core_result = _ensure_project_core_link_best_effort(project, actor_user_id=uid)
+        try:
+            setattr(project, "_last_core_operation_result", core_result)
+        except Exception:
+            pass
+
     return project
 
 
@@ -3983,6 +4161,13 @@ def update_project(
             setattr(project, "_last_chunk_operation_result", result)
         except Exception as exc:
             _log_exception("post-update chunk provisioning failed", exc)
+
+    if commit and not _project_is_demo(project):
+        core_result = _ensure_project_core_link_best_effort(project, actor_user_id=uid)
+        try:
+            setattr(project, "_last_core_operation_result", core_result)
+        except Exception:
+            pass
 
     return project
 
@@ -4893,6 +5078,9 @@ def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[i
         chunk = _project_chunk_refs(project)
         last_result = getattr(project, "_last_chunk_operation_result", None)
         last_result_payload = last_result.to_dict() if hasattr(last_result, "to_dict") else {}
+        last_core_result = _safe_dict(getattr(project, "_last_core_operation_result", None))
+        service_refs = _safe_dict(getattr(project, "service_refs", None))
+        core_ref = _safe_dict(service_refs.get("core"))
 
         provisioning_status = _safe_str(
             chunk.get("provisioning_status"),
@@ -4927,6 +5115,22 @@ def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[i
         }:
             code = "project_created_chunk_pending"
 
+        core_ready = bool(
+            last_core_result.get("ok")
+            and last_core_result.get("status") in {"ready", "disabled"}
+        ) or core_ref.get("status") == "ready"
+        if not core_ready:
+            code = "project_created_core_repair_required"
+            if _core_provisioning_required():
+                response_ok = False
+                status_code = 503
+                core_error = _safe_dict(last_core_result.get("error")) or _safe_dict(core_ref.get("error"))
+                error = _safe_str(
+                    core_error.get("message"),
+                    "Das App-Projekt wurde gespeichert, aber das Core-Projekt konnte nicht bereitgestellt werden.",
+                    2000,
+                )
+
         payload = {
             "ok": response_ok,
             "project_persisted": True,
@@ -4941,6 +5145,7 @@ def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[i
             "sidebar_item": serialize_project_sidebar_item(project, user_id=user_id),
             "redirect_url": project_public_url(project),
             "chunk": chunk,
+            "core": last_core_result or core_ref or {"ok": core_ready, "status": "ready" if core_ready else "pending"},
         }
         if last_result_payload:
             payload["chunk_operation"] = last_result_payload
@@ -5553,6 +5758,7 @@ __all__ = [
     "delete_project_result",
     "ensure_project_chunk_link",
     "ensure_project_chunk_link_result",
+    "ensure_project_core_link_on_access",
     "ensure_project_user",
     "get_actor_account_id",
     "get_actor_auth_user_id",

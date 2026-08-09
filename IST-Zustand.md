@@ -6255,7 +6255,7 @@ services/vectoplan-app/services/workspace_embed_service.py
 services/vectoplan-app/routes/projects_api.py
 services/vectoplan-app/routes/ui/projects.py
 services/vectoplan-app/routes/viewer.py
-services/vectoplan-server/docker-compose.all.yml
+services/vectoplan-server/docker-compose.yml
 ```
 
 ### 49.2 `app.py`
@@ -6583,7 +6583,7 @@ allowed:
 
 ### 49.13 Docker Compose / lokale Auth-URLs
 
-Die App-Umgebung in `services/vectoplan-server/docker-compose.all.yml` enthält bzw. benötigt im aktuellen lokalen Setup:
+Die App-Umgebung in `services/vectoplan-server/docker-compose.yml` enthält bzw. benötigt im aktuellen lokalen Setup:
 
 ```yaml
 VECTOPLAN_AUTH_INTERNAL_URL: "${VECTOPLAN_AUTH_INTERNAL_URL:-http://host.docker.internal:5000}"
@@ -7794,7 +7794,7 @@ Der sichere Standard im Compose-Wartungsprofil ist:
 Die serviceübergreifende Konfiguration wurde in:
 
 ```text
-services/vectoplan-server/docker-compose.all.yml
+services/vectoplan-server/docker-compose.yml
 ```
 
 erweitert und vereinheitlicht.
@@ -8832,7 +8832,7 @@ static/css/project_workspace.css
 ### 59.2 `vectoplan-server`
 
 ```text
-services/vectoplan-server/docker-compose.all.yml
+services/vectoplan-server/docker-compose.yml
 ```
 
 ### 59.3 `vectoplan-chunk`

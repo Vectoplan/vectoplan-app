@@ -525,6 +525,7 @@ _DEFAULT_OPENLAYER_ROUTE = "/map"
 
 _DEFAULT_CHUNK_PUBLIC_URL = "http://localhost:5102"
 _DEFAULT_CHUNK_INTERNAL_URL = "http://vectoplan-chunk:5000"
+_DEFAULT_CORE_INTERNAL_URL = "http://vectoplan-core:5000"
 
 # App-project provisioning policy. This does not change the independent
 # vectoplan-chunk bootstrap/default-project policy. New App projects request
@@ -1356,6 +1357,25 @@ class Config:
     VECTOPLAN_CHUNK_INTERNAL_BASE_URL = VECTOPLAN_CHUNK_INTERNAL_URL
     CHUNK_INTERNAL_URL = VECTOPLAN_CHUNK_INTERNAL_URL
     CHUNK_INTERNAL_BASE_URL = VECTOPLAN_CHUNK_INTERNAL_BASE_URL
+
+    # Server-side App -> Core project provisioning. Core is the translation
+    # boundary between CAD and Chunk and owns a separate database.
+    VECTOPLAN_CORE_INTERNAL_URL = _norm_url(
+        _env_str_first(("VECTOPLAN_CORE_INTERNAL_URL", "CORE_INTERNAL_URL"), _DEFAULT_CORE_INTERNAL_URL),
+        _DEFAULT_CORE_INTERNAL_URL,
+    )
+    VECTOPLAN_APP_CORE_PROVISION_ON_PROJECT_CREATE = _as_bool(
+        _env_first(("VECTOPLAN_APP_CORE_PROVISION_ON_PROJECT_CREATE",), None), True
+    )
+    VECTOPLAN_APP_CORE_PROVISIONING_REQUIRED = _as_bool(
+        _env_first(("VECTOPLAN_APP_CORE_PROVISIONING_REQUIRED",), None), False
+    )
+    VECTOPLAN_APP_CORE_TIMEOUT_SECONDS = _clamp_float(
+        _as_float(_env_first(("VECTOPLAN_APP_CORE_TIMEOUT_SECONDS",), None), 10.0), 0.1, 120.0
+    )
+    VECTOPLAN_APP_CORE_SERVICE_API_KEY = _env_str_first(
+        ("VECTOPLAN_APP_CORE_SERVICE_API_KEY", "VECTOPLAN_CORE_INTERNAL_API_KEY"), ""
+    )
 
     # Server-side app -> chunk provisioning.
     # project_service.py will call services/chunk_client.py after the app Project
