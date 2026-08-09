@@ -2864,6 +2864,8 @@ def _build_paths(project_public_id: str, is_new: bool, show_management_sections:
             "editor3d": f"/ui/project/{_quote_path_value(project_public_id)}/editor3d" if has_project else "",
             "map": f"/ui/project/{_quote_path_value(project_public_id)}/map" if has_project else "",
             "cad2d": f"/ui/project/{_quote_path_value(project_public_id)}/cad2d" if has_project else "",
+            "cadEmbedJsonPath": f"/ui/project/{_quote_path_value(project_public_id)}/cad-embed.json" if has_project else "",
+            "cad_embed_json_path": f"/ui/project/{_quote_path_value(project_public_id)}/cad-embed.json" if has_project else "",
             "lv": f"/ui/project/{_quote_path_value(project_public_id)}/lv" if has_project else "",
         }
     except Exception:

@@ -274,6 +274,7 @@ SECURITY_CONTROL_QUERY_KEYS = frozenset(
         "chunk_universe_id",
         "chunk_world_id",
         "conversation_id",
+        "core_project_id",
         "demo_mode",
         "embed",
         "ephemeral",
@@ -1288,6 +1289,60 @@ def _project_payload_from_object(project: Any = None, project_payload: Optional[
     return result
 
 
+def _core_project_id(project: Any, project_payload: Mapping[str, Any]) -> str:
+    """Resolve the trusted Core reference from App-owned project state."""
+    candidates: list[Mapping[str, Any]] = []
+    try:
+        project_refs = getattr(project, "service_refs", None)
+        if isinstance(project_refs, Mapping):
+            candidates.append(project_refs)
+    except Exception:
+        pass
+    payload = _safe_dict(project_payload)
+    for key in ("service_refs", "serviceRefs"):
+        refs = _safe_dict(payload.get(key))
+        if refs:
+            candidates.append(refs)
+    for refs in candidates:
+        core = _safe_dict(refs.get("core"))
+        value = _safe_str(
+            _first_value(
+                core.get("core_project_id"),
+                core.get("coreProjectId"),
+                core.get("project_id"),
+                core.get("projectId"),
+                default="",
+            ),
+            "",
+            240,
+        )
+        if value:
+            return value
+    metadata_candidates = []
+    try:
+        metadata = getattr(project, "metadata_json", None)
+        if isinstance(metadata, Mapping):
+            metadata_candidates.append(metadata)
+    except Exception:
+        pass
+    for key in ("metadata_json", "metadataJson", "metadata"):
+        metadata = _safe_dict(payload.get(key))
+        if metadata:
+            metadata_candidates.append(metadata)
+    for metadata in metadata_candidates:
+        provisioning = _safe_dict(
+            metadata.get("coreProvisioning") or metadata.get("core_provisioning")
+        )
+        value = _safe_str(
+            provisioning.get("coreProjectId") or provisioning.get("core_project_id"),
+            "",
+            240,
+        )
+        if value:
+            return value
+    return ""
+
+
 def _current_user_payload(current_user: Any = None) -> Dict[str, Any]:
     user = _safe_dict(current_user)
     nested = _safe_dict(user.get("auth"))
@@ -2270,7 +2325,7 @@ def _workspace_gate(
         return False, "project_view_permission_required", 403, "Project view permission is required."
     if access.public_viewer and workspace == WORKSPACE_EDITOR3D and not _public_editor_embed_verified(project_payload):
         return False, "public_editor_embed_not_verified", 403, "Public 3D embed requires a verified read-only context."
-    if workspace != WORKSPACE_EDITOR3D:
+    if workspace not in {WORKSPACE_EDITOR3D, WORKSPACE_CAD2D}:
         return True, "ok", 200, "Workspace is ready."
 
     provisioning = _safe_str(chunk.get("chunk_provisioning_status"), "pending", 80)
@@ -2283,6 +2338,9 @@ def _workspace_gate(
         return False, "chunk_not_ready", 409, "Chunk project/world is not ready."
     if not _safe_str(chunk.get("chunk_project_id"), "", 240) or not _safe_str(chunk.get("chunk_world_id"), "", 240):
         return False, "chunk_references_incomplete", 503, "Chunk project/world references are incomplete."
+
+    if workspace == WORKSPACE_CAD2D:
+        return True, "ok", 200, "Workspace is ready."
 
     sync_status = _safe_str(chunk.get("chunk_access_sync_status"), "pending", 80)
     # When synchronization is enabled and the user has a direct project role,
@@ -2460,9 +2518,31 @@ def build_workspace_embed_result(
             return failure(gate_code, gate_status, gate_message, target=target)
 
         if normalized_workspace == WORKSPACE_CAD2D:
-            # The first CAD integration is intentionally shell-only: no project,
-            # role, context, Chunk or other domain data is sent to vectoplan-cad.
-            params: Dict[str, Any] = {}
+            core_project_id = _core_project_id(project, payload)
+            if not core_project_id:
+                return failure(
+                    "core_project_not_ready",
+                    409,
+                    "The App project has no ready Core project reference.",
+                    target=target,
+                )
+            # CAD receives one stable project reference. Chunk coordinates and
+            # internal service URLs remain owned by Core and never enter the URL.
+            params = _base_embed_params(
+                workspace=normalized_workspace,
+                project=project,
+                project_payload=payload,
+                access=access,
+                chunk=chunk,
+                current_user=user,
+                request_obj=request_obj,
+                include_context=include_context,
+                include_return_url=include_return_url,
+                include_chunk_hints=False,
+                prefer_request_host=prefer_request_host,
+            )
+            params["core_project_id"] = core_project_id
+            params = _clean_query_params(params, allow_security_controls=True)
         elif normalized_workspace == WORKSPACE_LV:
             # The initial LV integration deliberately stays service-owned and
             # database-agnostic. Only the public App project key scopes the shell.

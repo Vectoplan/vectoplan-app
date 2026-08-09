@@ -95,6 +95,7 @@
 {% set _project_name = _project.get('name', _project.get('title', '')) %}
 {% set _project_display_name = _project.get('display_name', _project.get('displayName', _project_name if _project_name else 'Neues Projekt')) %}
 {% set _project_description = _project.get('description', '') %}
+{% set _project_cost_center = _project.get('cost_center', _project.get('costCenter', '')) %}
 
 {% set _address_obj_raw = _project.get('address', {}) %}
 {% set _address_obj = _address_obj_raw if _address_obj_raw is mapping else {} %}
@@ -1053,6 +1054,22 @@
                 data-project-description
                 {% if not _form_can_edit %}disabled{% endif %}
               >{{ _project_description|e }}</textarea>
+            </div>
+
+            <div class="vp-project-field vp-project-field--wide">
+              <label class="vp-project-label" for="projectCostCenter">Kostenstelle</label>
+              <input
+                id="projectCostCenter"
+                class="vp-project-input"
+                name="cost_center"
+                type="text"
+                value="{{ _project_cost_center|e }}"
+                maxlength="80"
+                placeholder="Wird automatisch erzeugt"
+                data-project-cost-center
+                {% if not _form_can_edit %}disabled{% endif %}
+              >
+              <p class="vp-project-help">Wird automatisch erzeugt, kann aber jederzeit geändert werden. Verknüpft Buchhaltungsbelege eindeutig mit Projekt und Bauleiter-Freigabe.</p>
             </div>
           </div>
         </section>

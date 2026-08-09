@@ -84,6 +84,7 @@ try:
     from services.project_service import (
         get_project_result,
         get_project_service_status,
+        ensure_project_core_link_on_access,
         resolve_project,
         serialize_project,
         serialize_project_sidebar_item,
@@ -91,6 +92,7 @@ try:
 except Exception:  # pragma: no cover
     get_project_result = None  # type: ignore
     get_project_service_status = None  # type: ignore
+    ensure_project_core_link_on_access = None  # type: ignore
     resolve_project = None  # type: ignore
     serialize_project = None  # type: ignore
     serialize_project_sidebar_item = None  # type: ignore
@@ -3211,6 +3213,14 @@ def _build_external_workspace_result(context: Mapping[str, Any]) -> Any:
     project_payload = _safe_dict(context.get("project"))
     current_user = _safe_dict(context.get("current_user") or context.get("auth") or context.get("auth_context"))
     project_obj = context.get("_project_obj")
+    if workspace == WORKSPACE_CAD2D and project_obj is not None and callable(ensure_project_core_link_on_access):
+        try:
+            ensure_project_core_link_on_access(
+                project_obj,
+                actor_user_id=get_current_user_id_optional(),
+            )
+        except Exception as exc:
+            _log_exception("CAD Core project backfill failed", exc)
     extra_params = _request_extra_embed_params()
     workspace_access = _safe_dict(context.get("workspace_access"))
     project_payload, workspace_access = _enforce_project_access_contract(
@@ -3273,7 +3283,13 @@ def _external_workspace_status_code(embed_result: Mapping[str, Any]) -> int:
         return 401
     if code in {"project_view_permission_required", "public_editor_embed_not_verified", "workspace_forbidden", "workspace_not_external"}:
         return 403
-    if code in {"project_public_id_missing", "project_not_configured", "chunk_not_ready", "chunk_access_sync_pending"}:
+    if code in {
+        "project_public_id_missing",
+        "project_not_configured",
+        "chunk_not_ready",
+        "chunk_access_sync_pending",
+        "core_project_not_ready",
+    }:
         return 409
     if code in {
         "embed_disabled", "target_url_missing", "workspace_embed_service_unavailable", "chunk_provisioning_repair_required",
@@ -3489,6 +3505,7 @@ def viewer_status() -> Response:
             "project_workspace": "/ui/project/<project_id>/project",
             "workspace": "/ui/project/<project_id>/<workspace>",
             "context": "/ui/project/<project_id>/context.json",
+            "cad_embed": "/ui/project/<project_id>/cad-embed.json",
         },
         "current_user": _current_user_payload(ensure=False),
         "workspaces": sorted(ALLOWED_WORKSPACES),
@@ -3553,6 +3570,39 @@ def project_context_json(project_id: str) -> Response:
         return error
 
     return _json_response(_public_context_payload(context or {}), status=200)
+
+
+@bp.get("/ui/project/<project_id>/cad-embed.json")
+def project_cad_embed_json(project_id: str) -> Response:
+    """Resolve the checked, project-scoped CAD URL without exposing Chunk internals."""
+    context, error = _build_template_context(project_id, workspace=WORKSPACE_CAD2D)
+    if error is not None:
+        return error
+    result = _build_external_workspace_result(context or {})
+    payload = _embed_result_to_dict(result)
+    target_url = _embed_result_url(result)
+    if _embed_result_ok(result) and target_url:
+        if not _is_safe_external_redirect_url(target_url, WORKSPACE_CAD2D):
+            return _json_response(
+                {
+                    "ok": False,
+                    "workspace": WORKSPACE_CAD2D,
+                    "code": "unsafe_external_redirect_target",
+                    "message": "Das externe CAD-Ziel wurde aus Sicherheitsgründen abgewiesen.",
+                },
+                status=502,
+            )
+        payload.update(
+            {
+                "ok": True,
+                "workspace": WORKSPACE_CAD2D,
+                "iframe_url": target_url,
+                "embed_url": target_url,
+                "viewer_url": target_url,
+            }
+        )
+        return _json_response(payload, status=200)
+    return _json_response(payload, status=_external_workspace_status_code(payload))
 
 
 @bp.get("/ui/project/<project_id>/<workspace>/context.json")

@@ -125,6 +125,7 @@
   {% set default_versions_url = '/ui/project/' ~ project_public_id_q ~ '/versions' %}
   {% set default_versions_api_url = '/v1/projects/' ~ project_public_id_q ~ '/versions' %}
   {% set default_cad2d_url = '/ui/project/' ~ project_public_id_q ~ '/cad2d' %}
+  {% set default_cad_embed_url = '/ui/project/' ~ project_public_id_q ~ '/cad-embed.json' %}
   {% set default_admin_url = '/ui/project/' ~ project_public_id_q ~ '/admin' %}
   {% set default_lv_url = '/ui/project/' ~ project_public_id_q ~ '/lv' %}
   {% set default_context_url = '/ui/project/' ~ project_public_id_q ~ '/context.json' %}
@@ -135,6 +136,7 @@
   {% set default_versions_url = '' %}
   {% set default_versions_api_url = '' %}
   {% set default_cad2d_url = '' %}
+  {% set default_cad_embed_url = '' %}
   {% set default_admin_url = '' %}
   {% set default_lv_url = '' %}
   {% set default_context_url = '/ui/project/new/context.json' %}
@@ -145,7 +147,6 @@
 {% set default_selection_url = '' %}
 {% set default_map_json_url = '' %}
 {% set default_plan2d_url = '' %}
-{% set default_cad_embed_url = '' %}
 
 {% set resolved_project_url = workspace_paths_obj.get('projectPagePath', workspace_paths_obj.get('projectUrl', project_paths_obj.get('projectPagePath', project_paths_obj.get('projectUrl', default_project_url)))) %}
 {% set resolved_project_public_url = workspace_paths_obj.get('projectPublicUrl', project_paths_obj.get('projectPublicUrl', '/project=' ~ project_public_id_q if project_public_id else '/project=new')) %}

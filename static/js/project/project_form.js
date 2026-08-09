@@ -501,6 +501,8 @@
         display_name: p.display_name || p.displayName || p.name || "",
         displayName: p.displayName || p.display_name || p.name || "",
         description: p.description || "",
+        cost_center: p.cost_center || p.costCenter || "",
+        costCenter: p.costCenter || p.cost_center || "",
         address_text: p.address_text || p.addressText || address.text || "",
         addressText: p.addressText || p.address_text || address.text || "",
         address: { text: p.address_text || p.addressText || address.text || "" },
@@ -1466,6 +1468,7 @@
 
       name: queryById("projectName"),
       description: queryById("projectDescription"),
+      costCenter: queryById("projectCostCenter"),
       addressText: queryById("projectAddressText"),
       addressMapboxId: queryById("projectAddressMapboxId"),
 
@@ -2221,6 +2224,7 @@
         name: name,
         title: name,
         description: getValue(refs.description),
+        cost_center: getValue(refs.costCenter),
         address_text: addressText,
         address_mapbox_id: getValue(refs.addressMapboxId),
         address: {
@@ -2304,6 +2308,7 @@
       setValue(refs.projectAccessMode, state.accessMode || "");
       setValue(refs.name, p.name || p.display_name || p.displayName || "");
       setValue(refs.description, p.description || "");
+      setValue(refs.costCenter, p.cost_center || p.costCenter || "");
       setValue(refs.addressText, p.address_text || p.addressText || address.text || "");
       setValue(refs.addressMapboxId, "");
       setVisibility(p.visibility || state.config.projectVisibility || "private", { silent: true });
@@ -2984,6 +2989,8 @@
           publicId: state.config.projectPublicId,
           name: state.originalPayload.name,
           description: state.originalPayload.description,
+          cost_center: state.originalPayload.cost_center,
+          costCenter: state.originalPayload.cost_center,
           address_text: state.originalPayload.address_text,
           addressText: state.originalPayload.address_text,
           address: {
@@ -3107,7 +3114,7 @@
       addListener(refs.form, "submit", onSubmit);
       addListener(refs.reset, "click", onResetClick);
 
-      [refs.name, refs.description, refs.addressText].forEach(function wireInput(element) {
+      [refs.name, refs.description, refs.costCenter, refs.addressText].forEach(function wireInput(element) {
         addListener(element, "input", function onInput() {
           if (!canWriteProject()) { return; }
           removeFieldError(element);
@@ -3169,7 +3176,7 @@
       var readonly = !!isReadonly;
       var disabled = readonly || !canWriteProject();
 
-      [refs.name, refs.description, refs.addressText].forEach(function syncControl(control) {
+      [refs.name, refs.description, refs.costCenter, refs.addressText].forEach(function syncControl(control) {
         try {
           if (!control) { return; }
           control.disabled = disabled;
