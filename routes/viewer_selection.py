@@ -80,6 +80,10 @@ _ALLOWED_NORMAL_MODES = {
     "map",
     "2d",
     "lv",
+    "files",
+    "structural_calculation",
+    "energy_calculation",
+    "sound_protection_calculation",
     "admin",
 }
 
@@ -89,6 +93,10 @@ _ALLOWED_WORKSPACE_MODES = {
     "map",
     "2d",
     "lv",
+    "files",
+    "structural_calculation",
+    "energy_calculation",
+    "sound_protection_calculation",
     "admin",
 }
 
@@ -98,6 +106,10 @@ _PUBLIC_WORKSPACE_MODES = {
     "map",
     "2d",
     "lv",
+    "files",
+    "structural_calculation",
+    "energy_calculation",
+    "sound_protection_calculation",
 }
 
 _ADMIN_WORKSPACE_MODES = {
@@ -134,6 +146,18 @@ _MODE_ALIASES = {
     "lv": "lv",
     "boq": "lv",
     "leistungsverzeichnis": "lv",
+    "files": "files",
+    "dateien": "files",
+    "filecloud": "files",
+    "structural_calculation": "structural_calculation",
+    "tragwerksberechnung": "structural_calculation",
+    "statik": "structural_calculation",
+    "energy_calculation": "energy_calculation",
+    "energieberechnung": "energy_calculation",
+    "energie": "energy_calculation",
+    "sound_protection_calculation": "sound_protection_calculation",
+    "schallschutzberechnung": "sound_protection_calculation",
+    "schallschutz": "sound_protection_calculation",
 
     "admin": "admin",
     "settings": "admin",
@@ -173,6 +197,18 @@ _WORKSPACE_ALIASES = {
     "lv": "lv",
     "boq": "lv",
     "leistungsverzeichnis": "lv",
+    "files": "files",
+    "dateien": "files",
+    "filecloud": "files",
+    "structural_calculation": "structural_calculation",
+    "tragwerksberechnung": "structural_calculation",
+    "statik": "structural_calculation",
+    "energy_calculation": "energy_calculation",
+    "energieberechnung": "energy_calculation",
+    "energie": "energy_calculation",
+    "sound_protection_calculation": "sound_protection_calculation",
+    "schallschutzberechnung": "sound_protection_calculation",
+    "schallschutz": "sound_protection_calculation",
 
     "admin": "admin",
     "settings": "admin",
@@ -189,6 +225,10 @@ _WORKSPACE_BY_MODE = {
     "map": "map",
     "2d": "2d",
     "lv": "lv",
+    "files": "files",
+    "structural_calculation": "structural_calculation",
+    "energy_calculation": "energy_calculation",
+    "sound_protection_calculation": "sound_protection_calculation",
     "admin": "admin",
 }
 
@@ -198,6 +238,10 @@ _MODE_BY_WORKSPACE = {
     "map": "map",
     "2d": "2d",
     "lv": "lv",
+    "files": "files",
+    "structural_calculation": "structural_calculation",
+    "energy_calculation": "energy_calculation",
+    "sound_protection_calculation": "sound_protection_calculation",
     "admin": "admin",
 }
 
@@ -207,6 +251,10 @@ _PUBLICATION_WORKSPACE_BY_WORKSPACE_MODE = {
     "map": "map",
     "2d": "cad2d",
     "lv": "lv",
+    "files": "files",
+    "structural_calculation": "structural_calculation",
+    "energy_calculation": "energy_calculation",
+    "sound_protection_calculation": "sound_protection_calculation",
 }
 
 # Backend-/Altviewer-Felder werden bewusst nicht gespeichert.
@@ -271,7 +319,10 @@ _OPTIONAL_NEUTRAL_KEYS = {
     "last_workspace_error_ts",
 }
 
-_MAX_JSON_DEPTH = 8
+# GeoJSON MultiPolygon coordinates require up to ten nested container levels
+# inside ``last_map_selection``.  Keep the guard bounded but deep enough to
+# preserve actual coordinate numbers instead of silently replacing them by null.
+_MAX_JSON_DEPTH = 12
 _MAX_LIST_ITEMS = 500
 _MAX_STRING_LENGTH = 20_000
 

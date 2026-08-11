@@ -350,7 +350,10 @@
 {% set _map_path = _paths.get('map', '/ui/project/' ~ _project_public_id ~ '/map' if _project_public_id and _project_public_id != 'new' else '') %}
 {% set _cad2d_path = _paths.get('cad2d', '/ui/project/' ~ _project_public_id ~ '/cad2d' if _project_public_id and _project_public_id != 'new' else '') %}
 {% set _lv_path = _paths.get('lv', '/ui/project/' ~ _project_public_id ~ '/lv' if _project_public_id and _project_public_id != 'new' else '') %}
-{% set _versions_path = _paths.get('versions', '/ui/project/' ~ _project_public_id ~ '/versions' if _project_public_id and _project_public_id != 'new' else '') %}
+{% set _files_path = _paths.get('files', _paths.get('filesPagePath', '/ui/project/' ~ _project_public_id ~ '/files' if _project_public_id and _project_public_id != 'new' else '')) %}
+{% set _structural_path = _paths.get('structuralCalculation', _paths.get('structural_calculation', _paths.get('structuralCalculationPagePath', '/ui/project/' ~ _project_public_id ~ '/structural-calculation' if _project_public_id and _project_public_id != 'new' else ''))) %}
+{% set _energy_path = _paths.get('energyCalculation', _paths.get('energy_calculation', _paths.get('energyCalculationPagePath', '/ui/project/' ~ _project_public_id ~ '/energy-calculation' if _project_public_id and _project_public_id != 'new' else ''))) %}
+{% set _sound_path = _paths.get('soundProtectionCalculation', _paths.get('sound_protection_calculation', _paths.get('soundProtectionCalculationPagePath', '/ui/project/' ~ _project_public_id ~ '/sound-protection-calculation' if _project_public_id and _project_public_id != 'new' else ''))) %}
 
 {# ------------------------------------------------------------------------- #}
 {# Safe browser payloads                                                      #}
@@ -417,7 +420,10 @@
   'editor3d': true if _published_workspaces_source.get('editor3d', false) in _truthy_values else false,
   'cad2d': true if _published_workspaces_source.get('cad2d', false) in _truthy_values else false,
   'lv': true if _published_workspaces_source.get('lv', false) in _truthy_values else false,
-  'versions': true if _published_workspaces_source.get('versions', false) in _truthy_values else false
+  'files': true if _published_workspaces_source.get('files', false) in _truthy_values else false,
+  'structural_calculation': true if _published_workspaces_source.get('structural_calculation', false) in _truthy_values else false,
+  'energy_calculation': true if _published_workspaces_source.get('energy_calculation', false) in _truthy_values else false,
+  'sound_protection_calculation': true if _published_workspaces_source.get('sound_protection_calculation', false) in _truthy_values else false
 } %}
 
 {% set _browser_publication = {
@@ -894,7 +900,7 @@
     {% endif %}
 
     {% if _viewer_landing %}
-      {% set _has_viewer_workspace_link = (_published_workspaces.get('map') and _map_path) or (_published_workspaces.get('editor3d') and _editor3d_path) or (_published_workspaces.get('cad2d') and _cad2d_path) or (_published_workspaces.get('lv') and _lv_path) or (_published_workspaces.get('versions') and _versions_path) %}
+      {% set _has_viewer_workspace_link = (_published_workspaces.get('map') and _map_path) or (_published_workspaces.get('editor3d') and _editor3d_path) or (_published_workspaces.get('cad2d') and _cad2d_path) or (_published_workspaces.get('lv') and _lv_path) or (_published_workspaces.get('files') and _files_path) or (_published_workspaces.get('structural_calculation') and _structural_path) or (_published_workspaces.get('energy_calculation') and _energy_path) or (_published_workspaces.get('sound_protection_calculation') and _sound_path) %}
       {% set _map_preview_path = _map_path ~ ('&' if '?' in _map_path else '?') ~ 'mode=preview&initial_panel=none' if _map_path else '' %}
       <section class="vp-project-viewer-landing" aria-label="Freigegebene Projektansicht" data-project-published-workspaces>
         {% if _published_workspaces.get('map') and _map_path %}
@@ -952,10 +958,34 @@
               </a>
             {% endif %}
 
-            {% if _published_workspaces.get('versions') and _versions_path %}
-              <a class="vp-project-workspace-link" href="{{ _versions_path|e }}" data-published-workspace="versions">
-                <span class="vp-project-workspace-link__code" aria-hidden="true">V</span>
-                <span><strong>Versionen</strong><small>Ver&ouml;ffentlichte Projektst&auml;nde vergleichen</small></span>
+            {% if _published_workspaces.get('files') and _files_path %}
+              <a class="vp-project-workspace-link" href="{{ _files_path|e }}" data-published-workspace="files">
+                <span class="vp-project-workspace-link__code" aria-hidden="true">DOC</span>
+                <span><strong>Dateien</strong><small>Freigegebene Projektdateien ansehen</small></span>
+                <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
+              </a>
+            {% endif %}
+
+            {% if _published_workspaces.get('structural_calculation') and _structural_path %}
+              <a class="vp-project-workspace-link" href="{{ _structural_path|e }}" data-published-workspace="structural_calculation">
+                <span class="vp-project-workspace-link__code" aria-hidden="true">TW</span>
+                <span><strong>Tragwerksberechnung</strong><small>Freigegebene Berechnungen und Ergebnisse ansehen</small></span>
+                <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
+              </a>
+            {% endif %}
+
+            {% if _published_workspaces.get('energy_calculation') and _energy_path %}
+              <a class="vp-project-workspace-link" href="{{ _energy_path|e }}" data-published-workspace="energy_calculation">
+                <span class="vp-project-workspace-link__code" aria-hidden="true">EN</span>
+                <span><strong>Energieberechnung</strong><small>Freigegebene Berechnungen und Ergebnisse ansehen</small></span>
+                <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
+              </a>
+            {% endif %}
+
+            {% if _published_workspaces.get('sound_protection_calculation') and _sound_path %}
+              <a class="vp-project-workspace-link" href="{{ _sound_path|e }}" data-published-workspace="sound_protection_calculation">
+                <span class="vp-project-workspace-link__code" aria-hidden="true">SC</span>
+                <span><strong>Schallschutzberechnung</strong><small>Freigegebene Berechnungen und Ergebnisse ansehen</small></span>
                 <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
               </a>
             {% endif %}

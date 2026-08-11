@@ -1074,6 +1074,56 @@ body {
   font-size:19px;
 }
 
+.workspace-rail__icon--files::before{
+  content:"";
+  width:17px;
+  height:12px;
+  border:1.7px solid currentColor;
+  border-radius:2px 3px 3px 3px;
+}
+
+.workspace-rail__icon--files::after{
+  content:"";
+  position:absolute;
+  top:2px;
+  left:2px;
+  width:8px;
+  height:4px;
+  border:1.7px solid currentColor;
+  border-bottom:0;
+  border-radius:2px 2px 0 0;
+  background:#fff;
+}
+
+.workspace-rail__icon--calculation{
+  font-size:16px;
+  font-weight:800;
+}
+
+.workspace-rail__icon--sound::before,
+.workspace-rail__icon--sound::after{
+  content:"";
+  position:absolute;
+  left:3px;
+  border:1.7px solid currentColor;
+  border-left:0;
+  border-top-color:transparent;
+  border-bottom-color:transparent;
+  border-radius:0 50% 50% 0;
+}
+
+.workspace-rail__icon--sound::before{
+  top:5px;
+  width:7px;
+  height:10px;
+}
+
+.workspace-rail__icon--sound::after{
+  top:2px;
+  width:13px;
+  height:16px;
+}
+
 .workspace-rail__icon--external{
   font-size:20px;
   font-weight:650;

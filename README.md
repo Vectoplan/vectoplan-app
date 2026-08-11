@@ -4,7 +4,7 @@
 
 `vectoplan-app` ist die zentrale Portal-, Projekt- und Workspace-Anwendung innerhalb des größeren VECTOPLAN-Systems.
 
-Die App ist nicht als isolierte Einzelanwendung zu verstehen, sondern als Einstiegspunkt und Steuerzentrale für mehrere spezialisierte Microservices. Sie bündelt Projektverwaltung, Benutzerkontext, Berechtigungen, Workspace-Navigation, Service-Referenzen und die browserseitige Einbindung externer Arbeitsbereiche wie 3D, Map, 2D/CAD und Leistungsverzeichnis.
+Die App ist nicht als isolierte Einzelanwendung zu verstehen, sondern als Einstiegspunkt und Steuerzentrale für mehrere spezialisierte Microservices. Sie bündelt Projektverwaltung, Benutzerkontext, Berechtigungen, Workspace-Navigation, Service-Referenzen und die browserseitige Einbindung externer Arbeitsbereiche wie 3D, Map, 2D/CAD, Leistungsverzeichnis, Dateien und Berechnungen.
 
 Der wichtigste Einstieg in der lokalen Entwicklung ist:
 
@@ -55,6 +55,9 @@ vectoplan-2d
 vectoplan-lv
   = Leistungsverzeichnis
 
+vectoplan-filecloud
+  = projektgebundene Dateien, Vorschau und Anmerkungen
+
 vectoplan-library
   = Assets, Bauteile, Inventar und Bibliothek
 ```
@@ -90,12 +93,18 @@ Die App kann aktuell:
 * Service-Links auf externe Systeme speichern,
 * Versionseinträge pro Projekt vorbereiten,
 * Audit-Events schreiben,
-* Workspace-Modi wie Projekt, Map, 3D, 2D, LV und Admin steuern,
-* Map/3D/2D/LV erst nach Projekt-Konfiguration freischalten,
+* Workspace-Modi wie Projekt, Map, 3D, 2D, LV, Dateien und Berechnungen steuern,
+* projektgebundene, direkt adressierbare Workspace-Links erzeugen,
+* Map/3D/2D/LV/Dateien/Berechnungen erst nach Projekt-Konfiguration freischalten,
+* die Sichtbarkeit veröffentlichter Workspace-Reiter getrennt verwalten,
 * externe Workspaces im iframe öffnen,
 * Browser-Public-URLs und Docker-Internal-URLs getrennt halten.
 
-Die App kann bewusst noch nicht alles produktiv. Echte Authentifizierung, echte Benutzerverwaltung, produktive Chunk-Erzeugung, vollständige LV-Anbindung und vollständige Bereinigung alter Chat-/Speckle-Reste sind noch offene Schritte.
+Die Benutzeridentität kommt aus `vectoplan-auth`. Projektmitgliedschaften und
+Workspace-Rechte werden in der App aufgelöst und von angebundenen Services wie
+`vectoplan-filecloud` erneut geprüft. Noch offen sind insbesondere die
+vollständigen Fachservice-Implementierungen der drei Berechnungsbereiche und die
+Bereinigung verbliebener historischer Chat-/Speckle-Bezeichnungen.
 
 ---
 
@@ -138,8 +147,10 @@ Map
 3D
 2D
 LV
-Admin
-Versionen
+Dateien
+Tragwerksberechnung
+Energieberechnung
+Schallschutzberechnung
 Theme
 Öffnen
 ```
@@ -163,7 +174,9 @@ Einige Dateien tragen aus historischen Gründen noch `chat` im Namen, obwohl sie
 
 ## Projekt- und Workspace-Logik
 
-Der Workspace startet immer im Modus `Projekt`. Dort wird das Projektformular geladen.
+Ohne Workspace-Suffix startet die Shell im Modus `Projekt`. Ein direkter,
+zulässiger Suffix wie `/map`, `/3d`, `/2d` oder `/files` öffnet bei einem
+konfigurierten Projekt unmittelbar den angeforderten Bereich.
 
 Für ein neues Projekt:
 
@@ -190,11 +203,11 @@ Neues Projekt
   → nur Projektformular aktiv
 
 Gespeichertes, aber nicht konfiguriertes Projekt
-  → Projekt, Admin und Versionen aktiv
-  → Map, 3D, 2D und LV gesperrt
+  → Projektformular aktiv
+  → Map, 3D, 2D, LV, Dateien und Berechnungen gesperrt
 
 Konfiguriertes Projekt
-  → Projekt, Admin, Versionen, Map, 3D, 2D und LV aktiv
+  → Projekt, Map, 3D, 2D, LV, Dateien und Berechnungen aktiv
 ```
 
 Ein Projekt gilt aktuell als konfiguriert, wenn die minimale Projektdefinition vorhanden ist. Dazu gehören insbesondere ein Projektname und eine nutzbare Adresse oder Koordinaten.
@@ -543,7 +556,7 @@ routes/ui/viewer2d.py → 2D/CAD
 
 `static/css/project_workspace.css` steuert das Projektformular.
 
-`static/js/chat/main.js` ist der Workspace-Orchestrator. Der Name ist historisch. Die Datei steuert Workspace-Wechsel, iframe-Ziele, Projekt-Gating, Theme, Versionen und Sidebar-Integration.
+`static/js/chat/main.js` ist der Workspace-Orchestrator. Der Name ist historisch. Die Datei steuert Workspace-Wechsel, iframe-Ziele, Projekt-Gating, direkte Workspace-URLs, Theme und Sidebar-Integration.
 
 `static/js/chat/project_sidebar_data.js`, `project_sidebar_resize.js` und `project_sidebar.js` steuern die Projekt-Sidebar.
 
@@ -728,6 +741,64 @@ Die nächsten sinnvollen Schritte sind:
 1. `app.py` final prüfen.
 2. Blueprint-Registrierung und CSP auf den neuen Projektfluss abstimmen.
 3. Alte Chat-/Speckle-Routen deaktivieren oder entfernen.
-4. Versionierung vollständig auf `ProjectVersion` umstellen.
-5. Service-Links produktiv an Chunk, 2D, LV und Map anbinden.
+4. Die drei Berechnungsrouten an ihre Fachservices anbinden.
+5. Die bestehenden Service-Links und Veröffentlichungspolicies weiter mit
+   Integrationstests absichern.
 6. Historische Dateinamen später umbenennen.
+
+---
+
+## Dateien und Berechnungsbereiche
+
+Die Projekt-Seitenleiste enthält `Dateien`, `Tragwerksberechnung`,
+`Energieberechnung` und `Schallschutzberechnung`. `Versionen` und `Admin` werden
+dort nicht mehr angeboten. Die drei Berechnungsbereiche besitzen eigene
+projektgebundene Routen als Integrationspunkte für die künftigen Fachservices.
+
+`Dateien` leitet auf `vectoplan-filecloud` weiter und übergibt ausschließlich die
+öffentliche Projekt-ID. Cookies werden nicht in URLs kopiert; die Filecloud
+prüft die Sitzung selbst bei `vectoplan-auth` und die Projektberechtigung erneut
+bei dieser App.
+
+Direkte Workspace-Links sind projektgebunden und damit als Browser-Lesezeichen
+nutzbar, zum Beispiel:
+
+```text
+/project=<project_public_id>/files
+/project=<project_public_id>/structural-calculation
+/project=<project_public_id>/energy-calculation
+/project=<project_public_id>/sound-protection-calculation
+```
+
+## Veröffentlichte Reiter
+
+Die Projekteinstellungen verwalten die Veröffentlichung für folgende Schlüssel:
+
+| Schlüssel | Oberfläche |
+|---|---|
+| `project` | Projektinfo |
+| `map` | Map |
+| `editor3d` | 3D-Editor |
+| `cad2d` | 2D/CAD |
+| `lv` | Leistungsverzeichnis |
+| `files` | Dateien |
+| `structural_calculation` | Tragwerksberechnung |
+| `energy_calculation` | Energieberechnung |
+| `sound_protection_calculation` | Schallschutzberechnung |
+
+`Versionen` ist kein veröffentlichbarer Reiter mehr. Administrative Bereiche
+wie Einstellungen, Team, Rechte und Systemreferenzen bleiben grundsätzlich von
+öffentlichen bzw. nicht gelisteten Projektlinks ausgeschlossen. Die Optionen
+„Login erforderlich“ und „Projektberechtigung zusätzlich erforderlich“ werden
+zusätzlich zur Reiterfreigabe ausgewertet. Für `Dateien` gilt darüber hinaus:
+Die Filecloud akzeptiert derzeit ausschließlich authentifizierte
+Projektmitglieder; ein öffentlicher Viewer-Kontext allein genügt nicht.
+
+Relevante Einstellungen:
+
+```text
+VECTOPLAN_FILECLOUD_PUBLIC_URL=http://localhost:5107
+VECTOPLAN_FILECLOUD_INTERNAL_URL=http://vectoplan-filecloud:5000
+VECTOPLAN_FILECLOUD_ROUTE=/files
+VECTOPLAN_FILECLOUD_EMBED_ENABLED=true
+```

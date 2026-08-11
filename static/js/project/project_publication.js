@@ -70,7 +70,10 @@
     "editor3d",
     "cad2d",
     "lv",
-    "versions"
+    "files",
+    "structural_calculation",
+    "energy_calculation",
+    "sound_protection_calculation"
   ];
 
   var DEFAULT_PUBLISHED_WORKSPACES = {
@@ -79,7 +82,10 @@
     editor3d: false,
     cad2d: false,
     lv: false,
-    versions: false
+    files: false,
+    structural_calculation: false,
+    energy_calculation: false,
+    sound_protection_calculation: false
   };
 
   var FORBIDDEN_WORKSPACES = {
@@ -102,7 +108,10 @@
     editor3d: "3D",
     cad2d: "2D",
     lv: "LV",
-    versions: "Versionen"
+    files: "Dateien",
+    structural_calculation: "Tragwerksberechnung",
+    energy_calculation: "Energieberechnung",
+    sound_protection_calculation: "Schallschutzberechnung"
   };
 
   var state = {
@@ -140,7 +149,10 @@
       editor3d: false,
       cad2d: true,
       lv: true,
-      versions: true
+      files: true,
+      structural_calculation: true,
+      energy_calculation: true,
+      sound_protection_calculation: true
     },
     workspaceReasons: {
       editor3d: "chunk_not_ready"
@@ -708,6 +720,22 @@
         leistungsverzeichnis: "lv",
         bill_of_quantities: "lv",
 
+        files: "files",
+        dateien: "files",
+        filecloud: "files",
+
+        structural_calculation: "structural_calculation",
+        tragwerksberechnung: "structural_calculation",
+        statik: "structural_calculation",
+
+        energy_calculation: "energy_calculation",
+        energieberechnung: "energy_calculation",
+        energie: "energy_calculation",
+
+        sound_protection_calculation: "sound_protection_calculation",
+        schallschutzberechnung: "sound_protection_calculation",
+        schallschutz: "sound_protection_calculation",
+
         versions: "versions",
         version: "versions",
         versionen: "versions",
@@ -845,7 +873,10 @@
         editor3d: false,
         cad2d: true,
         lv: true,
-        versions: true
+        files: true,
+        structural_calculation: true,
+        energy_calculation: true,
+        sound_protection_calculation: true
       };
     }
   }
@@ -1103,7 +1134,10 @@
           editor3d: editor3dAvailable,
           cad2d: true,
           lv: true,
-          versions: true
+          files: true,
+          structural_calculation: true,
+          energy_calculation: true,
+          sound_protection_calculation: true
         },
         workspaceReasons: {
           editor3d: editor3dReason
@@ -1126,7 +1160,7 @@
         identityConsistent: false, localLinkState: "unavailable", accessMode: "blocked",
         chunkReady: false, chunkProvisioningStatus: "pending", chunkAccessSyncStatus: "disabled",
         chunkAccessRequired: false, publicEditor3dVerified: false,
-        workspaceAvailability: { project: true, map: true, editor3d: false, cad2d: true, lv: true, versions: true },
+        workspaceAvailability: { project: true, map: true, editor3d: false, cad2d: true, lv: true, files: true, structural_calculation: true, energy_calculation: true, sound_protection_calculation: true },
         workspaceReasons: { editor3d: "context_error" },
         endpoint: "", paths: {},
         parentEvents: { publicationChanged: EVENT_PUBLICATION_CHANGED, error: EVENT_PROJECT_ERROR }

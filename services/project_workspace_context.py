@@ -71,6 +71,10 @@ WORKSPACE_EDITOR3D = "editor3d"
 WORKSPACE_CAD2D = "cad2d"
 WORKSPACE_LV = "lv"
 WORKSPACE_VERSIONS = "versions"
+WORKSPACE_FILES = "files"
+WORKSPACE_STRUCTURAL_CALCULATION = "structural_calculation"
+WORKSPACE_ENERGY_CALCULATION = "energy_calculation"
+WORKSPACE_SOUND_PROTECTION_CALCULATION = "sound_protection_calculation"
 
 DEFAULT_CACHE_TTL_SECONDS = 2.0
 DEFAULT_CACHE_MAX_ITEMS = 512
@@ -118,12 +122,15 @@ PROJECT_CONTEXT_PATH_TEMPLATE = "/ui/project/{project_public_id}/context.json"
 PROJECT_RETURN_PATH_TEMPLATE = "/project={project_public_id}"
 
 PUBLICATION_WORKSPACES = (
-    "project",
-    "map",
-    "editor3d",
-    "cad2d",
-    "lv",
-    "versions",
+    WORKSPACE_PROJECT,
+    WORKSPACE_MAP,
+    WORKSPACE_EDITOR3D,
+    WORKSPACE_CAD2D,
+    WORKSPACE_LV,
+    WORKSPACE_FILES,
+    WORKSPACE_STRUCTURAL_CALCULATION,
+    WORKSPACE_ENERGY_CALCULATION,
+    WORKSPACE_SOUND_PROTECTION_CALCULATION,
 )
 
 NEVER_PUBLIC_WORKSPACES = (
@@ -908,9 +915,47 @@ def normalize_workspace(value: Any, default: str = WORKSPACE_PROJECT) -> str:
             "": WORKSPACE_PROJECT,
             "project": WORKSPACE_PROJECT,
             "projekt": WORKSPACE_PROJECT,
+            "project_info": WORKSPACE_PROJECT,
+            "projectinfo": WORKSPACE_PROJECT,
             "details": WORKSPACE_PROJECT,
             "overview": WORKSPACE_PROJECT,
             "info": WORKSPACE_PROJECT,
+            "map": WORKSPACE_MAP,
+            "maps": WORKSPACE_MAP,
+            "karte": WORKSPACE_MAP,
+            "openlayer": WORKSPACE_MAP,
+            "openlayers": WORKSPACE_MAP,
+            "gis": WORKSPACE_MAP,
+            "3d": WORKSPACE_EDITOR3D,
+            "editor": WORKSPACE_EDITOR3D,
+            "editor3d": WORKSPACE_EDITOR3D,
+            "editor_3d": WORKSPACE_EDITOR3D,
+            "viewer3d": WORKSPACE_EDITOR3D,
+            "world": WORKSPACE_EDITOR3D,
+            "2d": WORKSPACE_CAD2D,
+            "cad": WORKSPACE_CAD2D,
+            "cad2d": WORKSPACE_CAD2D,
+            "cad_2d": WORKSPACE_CAD2D,
+            "plan": WORKSPACE_CAD2D,
+            "lv": WORKSPACE_LV,
+            "leistungsverzeichnis": WORKSPACE_LV,
+            "files": WORKSPACE_FILES,
+            "dateien": WORKSPACE_FILES,
+            "filecloud": WORKSPACE_FILES,
+            "structural_calculation": WORKSPACE_STRUCTURAL_CALCULATION,
+            "structural": WORKSPACE_STRUCTURAL_CALCULATION,
+            "tragwerksberechnung": WORKSPACE_STRUCTURAL_CALCULATION,
+            "statik": WORKSPACE_STRUCTURAL_CALCULATION,
+            "energy_calculation": WORKSPACE_ENERGY_CALCULATION,
+            "energy": WORKSPACE_ENERGY_CALCULATION,
+            "energieberechnung": WORKSPACE_ENERGY_CALCULATION,
+            "energie": WORKSPACE_ENERGY_CALCULATION,
+            "sound_protection_calculation": WORKSPACE_SOUND_PROTECTION_CALCULATION,
+            "sound_protection": WORKSPACE_SOUND_PROTECTION_CALCULATION,
+            "schallschutzberechnung": WORKSPACE_SOUND_PROTECTION_CALCULATION,
+            "schallschutz": WORKSPACE_SOUND_PROTECTION_CALCULATION,
+            "versions": WORKSPACE_VERSIONS,
+            "versionen": WORKSPACE_VERSIONS,
         }
 
         return aliases.get(text, text or default)
@@ -2867,6 +2912,13 @@ def _build_paths(project_public_id: str, is_new: bool, show_management_sections:
             "cadEmbedJsonPath": f"/ui/project/{_quote_path_value(project_public_id)}/cad-embed.json" if has_project else "",
             "cad_embed_json_path": f"/ui/project/{_quote_path_value(project_public_id)}/cad-embed.json" if has_project else "",
             "lv": f"/ui/project/{_quote_path_value(project_public_id)}/lv" if has_project else "",
+            "files": f"/ui/project/{_quote_path_value(project_public_id)}/files" if has_project else "",
+            "structuralCalculation": f"/ui/project/{_quote_path_value(project_public_id)}/structural-calculation" if has_project else "",
+            "structural_calculation": f"/ui/project/{_quote_path_value(project_public_id)}/structural-calculation" if has_project else "",
+            "energyCalculation": f"/ui/project/{_quote_path_value(project_public_id)}/energy-calculation" if has_project else "",
+            "energy_calculation": f"/ui/project/{_quote_path_value(project_public_id)}/energy-calculation" if has_project else "",
+            "soundProtectionCalculation": f"/ui/project/{_quote_path_value(project_public_id)}/sound-protection-calculation" if has_project else "",
+            "sound_protection_calculation": f"/ui/project/{_quote_path_value(project_public_id)}/sound-protection-calculation" if has_project else "",
         }
     except Exception:
         return {
@@ -2909,6 +2961,13 @@ def _build_paths(project_public_id: str, is_new: bool, show_management_sections:
             "map": "",
             "cad2d": "",
             "lv": "",
+            "files": "",
+            "structuralCalculation": "",
+            "structural_calculation": "",
+            "energyCalculation": "",
+            "energy_calculation": "",
+            "soundProtectionCalculation": "",
+            "sound_protection_calculation": "",
         }
 
 
@@ -3728,6 +3787,10 @@ __all__ = [
     "WORKSPACE_CAD2D",
     "WORKSPACE_LV",
     "WORKSPACE_VERSIONS",
+    "WORKSPACE_FILES",
+    "WORKSPACE_STRUCTURAL_CALCULATION",
+    "WORKSPACE_ENERGY_CALCULATION",
+    "WORKSPACE_SOUND_PROTECTION_CALCULATION",
     "ProjectWorkspaceContextResult",
     "build_project_workspace_context",
     "build_project_workspace_context_result",

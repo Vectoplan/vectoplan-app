@@ -9,7 +9,13 @@ from flask import Flask
 
 from routes.viewer import _request_extra_embed_params
 from services import project_publication_service as publication_service
-from services.workspace_embed_service import _clean_extra_query_params, _map_project_view_params
+from services.workspace_embed_service import (
+    WORKSPACE_EDITOR3D,
+    WorkspaceAccessContract,
+    _base_embed_params,
+    _clean_extra_query_params,
+    _map_project_view_params,
+)
 
 
 class WorkspaceMapEmbedTests(unittest.TestCase):
@@ -73,6 +79,36 @@ class WorkspaceMapEmbedTests(unittest.TestCase):
             ),
             {},
         )
+
+    def test_editor_embed_carries_the_same_project_start_view(self) -> None:
+        params = _base_embed_params(
+            workspace=WORKSPACE_EDITOR3D,
+            project=None,
+            project_payload={
+                "public_id": "prj_geo_editor",
+                "latitude": 52.517389,
+                "longitude": 13.395131,
+                "coordinate_srid": "EPSG:4326",
+            },
+            access=WorkspaceAccessContract(
+                role="owner",
+                access_mode="member",
+                can_view=True,
+                can_edit=True,
+                authenticated=True,
+            ),
+            chunk={},
+            current_user={},
+            request_obj=None,
+            include_context=False,
+            include_return_url=False,
+            include_chunk_hints=False,
+            prefer_request_host=False,
+        )
+
+        self.assertEqual(params["lat"], "52.517389")
+        self.assertEqual(params["lon"], "13.395131")
+        self.assertEqual(params["zoom"], "17")
 
 
 class WorkspacePresentationQueryTests(unittest.TestCase):

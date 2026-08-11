@@ -72,6 +72,10 @@
 
 {% set persistent_raw = auth_obj.get('persistent', auth_obj.get('can_persist_projects', auth_obj.get('canPersistProjects', true if is_authenticated and not is_demo_mode else false))) %}
 {% set is_persistent = true if persistent_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set auth_entitlements_raw = auth_obj.get('entitlements', []) %}
+{% set auth_entitlements = auth_entitlements_raw if auth_entitlements_raw is iterable and auth_entitlements_raw is not string else [] %}
+{% set cloud_access_raw = auth_obj.get('can_use_cloud', auth_obj.get('canUseCloud', true if 'cloud_access' in auth_entitlements else false)) %}
+{% set has_cloud_access = true if cloud_access_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 
 {% set public_viewer_raw = access_obj.get('is_public_viewer', access_obj.get('public_viewer', access_obj.get('is_unlisted_viewer', false))) %}
 {% set public_viewer_by_access = true if public_viewer_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
@@ -99,13 +103,17 @@
 {% set editor3d_published_raw = effective_obj.get('editor3d', effective_obj.get('3d', false)) %}
 {% set cad2d_published_raw = effective_obj.get('cad2d', effective_obj.get('2d', false)) %}
 {% set lv_published_raw = effective_obj.get('lv', false) %}
-{% set versions_published_raw = effective_obj.get('versions', false) %}
+{% set structural_calculation_published_raw = effective_obj.get('structural_calculation', false) %}
+{% set energy_calculation_published_raw = effective_obj.get('energy_calculation', false) %}
+{% set sound_protection_calculation_published_raw = effective_obj.get('sound_protection_calculation', false) %}
 
 {% set map_published = true if map_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 {% set editor3d_published = true if editor3d_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 {% set cad2d_published = true if cad2d_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 {% set lv_published = true if lv_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
-{% set versions_published = true if versions_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set structural_calculation_published = true if structural_calculation_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set energy_calculation_published = true if energy_calculation_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
+{% set sound_protection_calculation_published = true if sound_protection_calculation_published_raw in [true, 'true', 'True', 'TRUE', '1', 1, 'yes', 'YES', 'on', 'ON'] else false %}
 
 {% set member_workspace_access = true if can_view_project and not is_public_viewer else false %}
 {% set project_tools_enabled = true if project_exists and project_is_configured else false %}
@@ -114,8 +122,17 @@
 {% set editor3d_workspace_enabled = true if project_tools_enabled and (member_workspace_access or editor3d_published) else false %}
 {% set cad2d_workspace_enabled = true if project_tools_enabled and (member_workspace_access or cad2d_published) else false %}
 {% set lv_workspace_enabled = true if project_tools_enabled and (member_workspace_access or lv_published) else false %}
-{% set versions_workspace_enabled = true if project_tools_enabled and (member_workspace_access or versions_published) else false %}
 {% set admin_workspace_enabled = true if project_exists and can_manage_project and not is_demo_mode else false %}
+{% set member_service_workspace_enabled = true if project_tools_enabled and member_workspace_access and is_authenticated and is_persistent and not public_viewer_by_access and not is_demo_mode else false %}
+{#
+  Filecloud is a project workspace, not a global account drive. Project
+  membership decides whether the tab is reachable; the Filecloud service
+  performs the authoritative project/role check again for every request.
+#}
+{% set files_workspace_enabled = true if member_service_workspace_enabled else false %}
+{% set structural_calculation_workspace_enabled = true if project_tools_enabled and (member_service_workspace_enabled or structural_calculation_published) else false %}
+{% set energy_calculation_workspace_enabled = true if project_tools_enabled and (member_service_workspace_enabled or energy_calculation_published) else false %}
+{% set sound_protection_calculation_workspace_enabled = true if project_tools_enabled and (member_service_workspace_enabled or sound_protection_calculation_published) else false %}
 
 {# Project-first defaults. No visible chat UI remains in this shell. #}
 {% if project_public_id and project_public_id != 'new' and not project_is_new %}
@@ -128,6 +145,10 @@
   {% set default_cad_embed_url = '/ui/project/' ~ project_public_id_q ~ '/cad-embed.json' %}
   {% set default_admin_url = '/ui/project/' ~ project_public_id_q ~ '/admin' %}
   {% set default_lv_url = '/ui/project/' ~ project_public_id_q ~ '/lv' %}
+  {% set default_files_url = '/ui/project/' ~ project_public_id_q ~ '/files' %}
+  {% set default_structural_calculation_url = '/ui/project/' ~ project_public_id_q ~ '/structural-calculation' %}
+  {% set default_energy_calculation_url = '/ui/project/' ~ project_public_id_q ~ '/energy-calculation' %}
+  {% set default_sound_protection_calculation_url = '/ui/project/' ~ project_public_id_q ~ '/sound-protection-calculation' %}
   {% set default_context_url = '/ui/project/' ~ project_public_id_q ~ '/context.json' %}
 {% else %}
   {% set default_project_url = '/ui/project/new/project' %}
@@ -139,6 +160,10 @@
   {% set default_cad_embed_url = '' %}
   {% set default_admin_url = '' %}
   {% set default_lv_url = '' %}
+  {% set default_files_url = '' %}
+  {% set default_structural_calculation_url = '' %}
+  {% set default_energy_calculation_url = '' %}
+  {% set default_sound_protection_calculation_url = '' %}
   {% set default_context_url = '/ui/project/new/context.json' %}
 {% endif %}
 
@@ -163,6 +188,10 @@
 {% set cad_embed_json_path = workspace_paths_obj.get('cadEmbedJsonPath', project_paths_obj.get('cadEmbedJsonPath', default_cad_embed_url)) %}
 {% set admin_page_path = workspace_paths_obj.get('adminPagePath', project_paths_obj.get('adminPagePath', default_admin_url)) %}
 {% set lv_page_path = workspace_paths_obj.get('lvPagePath', project_paths_obj.get('lvPagePath', default_lv_url)) %}
+{% set files_page_path = workspace_paths_obj.get('filesPagePath', project_paths_obj.get('filesPagePath', default_files_url)) %}
+{% set structural_calculation_page_path = workspace_paths_obj.get('structuralCalculationPagePath', project_paths_obj.get('structuralCalculationPagePath', default_structural_calculation_url)) %}
+{% set energy_calculation_page_path = workspace_paths_obj.get('energyCalculationPagePath', project_paths_obj.get('energyCalculationPagePath', default_energy_calculation_url)) %}
+{% set sound_protection_calculation_page_path = workspace_paths_obj.get('soundProtectionCalculationPagePath', project_paths_obj.get('soundProtectionCalculationPagePath', default_sound_protection_calculation_url)) %}
 {% set upload_path = workspace_paths_obj.get('uploadPath', project_paths_obj.get('uploadPath', default_upload_url)) %}
 {% set state_get_path = workspace_paths_obj.get('stateGetPath', project_paths_obj.get('stateGetPath', default_selection_url)) %}
 {% set state_put_path = workspace_paths_obj.get('statePutPath', project_paths_obj.get('statePutPath', default_selection_url)) %}
@@ -179,11 +208,11 @@
   {% set resolved_workspace_mode = '3d' %}
 {% endif %}
 
-{% if resolved_default_mode not in ['project', 'map', '3d', '2d', 'lv', 'versions', 'admin'] %}
+{% if resolved_default_mode not in ['project', 'map', '3d', '2d', 'lv', 'files', 'structural_calculation', 'energy_calculation', 'sound_protection_calculation'] %}
   {% set resolved_default_mode = 'project' %}
 {% endif %}
 
-{% if resolved_workspace_mode not in ['project', 'map', '3d', '2d', 'lv', 'versions', 'admin'] %}
+{% if resolved_workspace_mode not in ['project', 'map', '3d', '2d', 'lv', 'files', 'structural_calculation', 'energy_calculation', 'sound_protection_calculation'] %}
   {% set resolved_workspace_mode = 'project' %}
 {% endif %}
 
@@ -195,10 +224,14 @@
   {% set resolved_workspace_src = cad2d_page_path %}
 {% elif resolved_default_mode == 'lv' and lv_workspace_enabled and lv_page_path %}
   {% set resolved_workspace_src = lv_page_path %}
-{% elif resolved_default_mode == 'versions' and versions_workspace_enabled and versions_page_path %}
-  {% set resolved_workspace_src = versions_page_path %}
-{% elif resolved_default_mode == 'admin' and admin_workspace_enabled and admin_page_path %}
-  {% set resolved_workspace_src = admin_page_path %}
+{% elif resolved_default_mode == 'files' and files_workspace_enabled and files_page_path %}
+  {% set resolved_workspace_src = files_page_path %}
+{% elif resolved_default_mode == 'structural_calculation' and structural_calculation_workspace_enabled and structural_calculation_page_path %}
+  {% set resolved_workspace_src = structural_calculation_page_path %}
+{% elif resolved_default_mode == 'energy_calculation' and energy_calculation_workspace_enabled and energy_calculation_page_path %}
+  {% set resolved_workspace_src = energy_calculation_page_path %}
+{% elif resolved_default_mode == 'sound_protection_calculation' and sound_protection_calculation_workspace_enabled and sound_protection_calculation_page_path %}
+  {% set resolved_workspace_src = sound_protection_calculation_page_path %}
 {% else %}
   {% set resolved_workspace_src = resolved_project_url %}
   {% set resolved_default_mode = 'project' %}
@@ -287,6 +320,10 @@
         var mapPagePath = {{ map_page_path|tojson }};
         var cad2dPagePath = {{ cad2d_page_path|tojson }};
         var lvPagePath = {{ lv_page_path|tojson }};
+        var filesPagePath = {{ files_page_path|tojson }};
+        var structuralCalculationPagePath = {{ structural_calculation_page_path|tojson }};
+        var energyCalculationPagePath = {{ energy_calculation_page_path|tojson }};
+        var soundProtectionCalculationPagePath = {{ sound_protection_calculation_page_path|tojson }};
         var versionsPagePath = {{ versions_page_path|tojson }};
         var adminPagePath = {{ admin_page_path|tojson }};
         var initialWorkspaceUrl = {{ resolved_workspace_src|tojson }};
@@ -350,6 +387,10 @@
 
             adminPagePath: adminPagePath,
             lvPagePath: lvPagePath,
+            filesPagePath: filesPagePath,
+            structuralCalculationPagePath: structuralCalculationPagePath,
+            energyCalculationPagePath: energyCalculationPagePath,
+            soundProtectionCalculationPagePath: soundProtectionCalculationPagePath,
 
             uploadPath: {{ upload_path|tojson }},
             stateGetPath: {{ state_get_path|tojson }},
@@ -524,6 +565,10 @@
 
           adminPagePath: adminPagePath,
           lvPagePath: lvPagePath,
+          filesPagePath: filesPagePath,
+          structuralCalculationPagePath: structuralCalculationPagePath,
+          energyCalculationPagePath: energyCalculationPagePath,
+          soundProtectionCalculationPagePath: soundProtectionCalculationPagePath,
 
           uploadPath: {{ upload_path|tojson }},
 
@@ -591,24 +636,41 @@
               path: lvPagePath,
               title: "LV"
             },
-            versions: {
-              key: "versions",
-              mode: "versions",
-              aliases: ["versions", "versionen", "history"],
-              enabled: {{ versions_workspace_enabled|tojson }},
+            files: {
+              key: "files",
+              mode: "files",
+              aliases: ["files", "dateien", "filecloud"],
+              enabled: {{ files_workspace_enabled|tojson }},
               configuredRequired: true,
-              path: versionsPagePath,
-              apiPath: {{ versions_path|tojson }},
-              title: "Versionen"
+              path: filesPagePath,
+              title: "Dateien"
             },
-            admin: {
-              key: "admin",
-              mode: "admin",
-              aliases: ["admin", "settings", "team", "permissions"],
-              enabled: {{ admin_workspace_enabled|tojson }},
-              configuredRequired: false,
-              path: adminPagePath,
-              title: "Admin"
+            structural_calculation: {
+              key: "structural_calculation",
+              mode: "structural_calculation",
+              aliases: ["structural_calculation", "tragwerksberechnung", "statik"],
+              enabled: {{ structural_calculation_workspace_enabled|tojson }},
+              configuredRequired: true,
+              path: structuralCalculationPagePath,
+              title: "Tragwerksberechnung"
+            },
+            energy_calculation: {
+              key: "energy_calculation",
+              mode: "energy_calculation",
+              aliases: ["energy_calculation", "energieberechnung", "energie"],
+              enabled: {{ energy_calculation_workspace_enabled|tojson }},
+              configuredRequired: true,
+              path: energyCalculationPagePath,
+              title: "Energieberechnung"
+            },
+            sound_protection_calculation: {
+              key: "sound_protection_calculation",
+              mode: "sound_protection_calculation",
+              aliases: ["sound_protection_calculation", "schallschutzberechnung", "schallschutz"],
+              enabled: {{ sound_protection_calculation_workspace_enabled|tojson }},
+              configuredRequired: true,
+              path: soundProtectionCalculationPagePath,
+              title: "Schallschutzberechnung"
             }
           },
 
@@ -699,6 +761,10 @@
         data-map-page-path="{{ map_page_path }}"
         data-cad2d-page-path="{{ cad2d_page_path }}"
         data-lv-page-path="{{ lv_page_path }}"
+        data-files-page-path="{{ files_page_path }}"
+        data-structural-calculation-page-path="{{ structural_calculation_page_path }}"
+        data-energy-calculation-page-path="{{ energy_calculation_page_path }}"
+        data-sound-protection-calculation-page-path="{{ sound_protection_calculation_page_path }}"
         data-versions-page-path="{{ versions_page_path }}"
         data-project-sidebar-enabled="{{ project_sidebar_enabled_raw }}"
         data-project-sidebar-storage-key="{{ project_sidebar_storage_key }}"
@@ -793,60 +859,68 @@
             <span class="workspace-rail__label">LV</span>
           </button>
 
-          <button id="versionsToggleBtn"
+          <button id="modeFilesBtn"
                   class="btn workspace-rail__button"
                   type="button"
-                  aria-label="Versionen"
-                  aria-pressed="{{ 'true' if resolved_default_mode == 'versions' else 'false' }}"
-                  title="Versionen"
-                  data-workspace-mode-button="versions"
-                  data-workspace-key="versions"
-                  data-workspace-path="{{ versions_page_path }}"
-                  data-versions-api-path="{{ versions_path }}"
+                  aria-label="Dateien"
+                  aria-pressed="{{ 'true' if resolved_default_mode == 'files' else 'false' }}"
+                  title="Dateien"
+                  data-workspace-mode-button="files"
+                  data-workspace-key="files"
+                  data-workspace-path="{{ files_page_path }}"
                   data-requires-configured-project="true"
-                  {% if not versions_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
-            <span class="workspace-rail__icon workspace-rail__icon--history" aria-hidden="true"></span>
-            <span class="workspace-rail__label">Versionen</span>
+                  {% if not files_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+            <span class="workspace-rail__icon workspace-rail__icon--files" aria-hidden="true"></span>
+            <span class="workspace-rail__label">Dateien</span>
           </button>
 
-          {% if can_manage_project %}
-            <button id="modeAdminBtn"
-                    class="btn workspace-rail__button"
-                    type="button"
-                    aria-label="Admin"
-                    aria-pressed="{{ 'true' if resolved_default_mode == 'admin' else 'false' }}"
-                    title="Admin"
-                    data-workspace-mode-button="admin"
-                    data-workspace-key="admin"
-                    data-workspace-path="{{ admin_page_path }}"
-                    {% if not admin_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
-              <span class="workspace-rail__icon workspace-rail__icon--settings" aria-hidden="true">⚙</span>
-              <span class="workspace-rail__label">Admin</span>
-            </button>
-          {% endif %}
+          <button id="modeStructuralCalculationBtn"
+                  class="btn workspace-rail__button"
+                  type="button"
+                  aria-label="Tragwerksberechnung"
+                  aria-pressed="{{ 'true' if resolved_default_mode == 'structural_calculation' else 'false' }}"
+                  title="Tragwerksberechnung"
+                  data-workspace-mode-button="structural_calculation"
+                  data-workspace-key="structural_calculation"
+                  data-workspace-path="{{ structural_calculation_page_path }}"
+                  data-requires-configured-project="true"
+                  {% if not structural_calculation_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+            <span class="workspace-rail__icon workspace-rail__icon--calculation" aria-hidden="true">&Sigma;</span>
+            <span class="workspace-rail__label">Tragwerksberechnung</span>
+          </button>
+
+          <button id="modeEnergyCalculationBtn"
+                  class="btn workspace-rail__button"
+                  type="button"
+                  aria-label="Energieberechnung"
+                  aria-pressed="{{ 'true' if resolved_default_mode == 'energy_calculation' else 'false' }}"
+                  title="Energieberechnung"
+                  data-workspace-mode-button="energy_calculation"
+                  data-workspace-key="energy_calculation"
+                  data-workspace-path="{{ energy_calculation_page_path }}"
+                  data-requires-configured-project="true"
+                  {% if not energy_calculation_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+            <span class="workspace-rail__icon workspace-rail__icon--calculation" aria-hidden="true">&#9889;</span>
+            <span class="workspace-rail__label">Energieberechnung</span>
+          </button>
+
+          <button id="modeSoundProtectionCalculationBtn"
+                  class="btn workspace-rail__button"
+                  type="button"
+                  aria-label="Schallschutzberechnung"
+                  aria-pressed="{{ 'true' if resolved_default_mode == 'sound_protection_calculation' else 'false' }}"
+                  title="Schallschutzberechnung"
+                  data-workspace-mode-button="sound_protection_calculation"
+                  data-workspace-key="sound_protection_calculation"
+                  data-workspace-path="{{ sound_protection_calculation_page_path }}"
+                  data-requires-configured-project="true"
+                  {% if not sound_protection_calculation_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+            <span class="workspace-rail__icon workspace-rail__icon--sound" aria-hidden="true"></span>
+            <span class="workspace-rail__label">Schallschutzberechnung</span>
+          </button>
         </div>
 
       </nav>
-      <section id="versionsDropdown"
-               class="versions-dropdown hidden"
-               aria-label="Versionen"
-               aria-hidden="true">
-        <header class="versions-dd-head">
-          <div class="vers-meta">
-            <strong>Versionen</strong> · <span id="versCount">0</span>
-          </div>
-
-          <div class="versions-dd-actions">
-            <button id="versRefreshBtn"
-                    class="btn"
-                    type="button"
-                    title="Liste aktualisieren"
-                    aria-label="Versionen aktualisieren">Aktualisieren</button>
-          </div>
-        </header>
-
-        <ul id="versionsList" class="versions-list"></ul>
-      </section>
 
       <iframe id="viewer-frame"
               class="viewer-iframe is-workspace-active"
