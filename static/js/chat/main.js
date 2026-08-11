@@ -2,10 +2,10 @@
 // Orchestrator for the VECTOPLAN project/workspace shell.
 // Responsibilities:
 // - initialize the project sidebar
-// - switch workspace iframe between Project, Map, Editor, 2D, LV and Admin
+// - switch workspace iframe between Project, Map, Editor, 2D, LV and project services
 // - start project-first, not editor-first
 // - keep Map/3D/2D/LV gated until the project is configured
-// - keep version dropdown usable as a neutral list
+// - connect project-scoped service areas to the workspace iframe
 // - avoid any legacy 3D backend calls
 // - never use Docker-internal URLs as browser iframe targets
 // - no visible chat UI, no composer, no transcript, no chat drawer
@@ -53,8 +53,10 @@ const MODE_TO_BUTTON_ID = {
   "3d": "mode3dBtn",
   "2d": "mode2dBtn",
   lv: "modeLvBtn",
-  versions: "versionsToggleBtn",
-  admin: "modeAdminBtn",
+  files: "modeFilesBtn",
+  structural_calculation: "modeStructuralCalculationBtn",
+  energy_calculation: "modeEnergyCalculationBtn",
+  sound_protection_calculation: "modeSoundProtectionCalculationBtn",
 };
 
 const MODE_TITLE = {
@@ -66,12 +68,16 @@ const MODE_TITLE = {
   "2d": "2D Ansicht",
   cad2d: "2D Ansicht",
   lv: "Leistungsverzeichnis",
-  versions: "Versionen",
-  admin: "Admin",
+  files: "Dateien",
+  structural_calculation: "Tragwerksberechnung",
+  energy_calculation: "Energieberechnung",
+  sound_protection_calculation: "Schallschutzberechnung",
 };
 
-const MODES_REQUIRING_CONFIGURED_PROJECT = new Set(["map", "3d", "2d", "lv"]);
-const MODES_REQUIRING_EXISTING_PROJECT = new Set(["map", "3d", "2d", "lv", "versions", "admin"]);
+const MODES_REQUIRING_CONFIGURED_PROJECT = new Set([
+  "map", "3d", "2d", "lv", "files", "structural_calculation", "energy_calculation", "sound_protection_calculation",
+]);
+const MODES_REQUIRING_EXISTING_PROJECT = new Set(MODES_REQUIRING_CONFIGURED_PROJECT);
 const PROJECT_PUBLIC_ID_RE = /^(?:prj|demo)_[A-Za-z0-9_-]{8,160}$/;
 const PLATFORM_PARENT_ORIGIN_SESSION_KEY = "vectoplan.platform.parentOrigin.v1";
 
@@ -397,6 +403,14 @@ function normalizeMode(mode) {
 
     if (["lv", "boq", "leistungsverzeichnis"].includes(value)) return "lv";
 
+    if (["files", "dateien", "filecloud"].includes(value)) return "files";
+
+    if (["structural_calculation", "tragwerksberechnung", "tragwerk", "statik"].includes(value)) return "structural_calculation";
+
+    if (["energy_calculation", "energieberechnung", "energie"].includes(value)) return "energy_calculation";
+
+    if (["sound_protection_calculation", "schallschutzberechnung", "schallschutz"].includes(value)) return "sound_protection_calculation";
+
     if (["versions", "version", "versionen", "history"].includes(value)) return "versions";
 
     if (["admin", "settings", "team", "permissions", "rechte"].includes(value)) return "admin";
@@ -508,6 +522,10 @@ function routeForProject(pathSuffix = "project") {
     if (suffix === "map") return `/ui/project/${id}/map`;
     if (["cad2d", "cad_2d", "2d"].includes(suffix)) return `/ui/project/${id}/cad2d`;
     if (suffix === "lv") return `/ui/project/${id}/lv`;
+    if (suffix === "files") return `/ui/project/${id}/files`;
+    if (suffix === "structural_calculation") return `/ui/project/${id}/structural-calculation`;
+    if (suffix === "energy_calculation") return `/ui/project/${id}/energy-calculation`;
+    if (suffix === "sound_protection_calculation") return `/ui/project/${id}/sound-protection-calculation`;
     if (suffix === "versions") return `/ui/project/${id}/versions`;
     if (suffix === "admin") return `/ui/project/${id}/admin`;
     if (suffix === "plan2d") return `/ui/project/${id}/plan2d.json`;
@@ -763,6 +781,37 @@ function versionsApiUrl() {
   }
 }
 
+function projectServiceUrl(mode, pathKey, routeSuffix) {
+  try {
+    const fallback = routeForProject(routeSuffix) || projectUrl();
+    const candidate =
+      buttonWorkspacePath(mode) ||
+      pathValue(pathKey) ||
+      cfgValue(pathKey) ||
+      dataValue(pathKey.charAt(0).toLowerCase() + pathKey.slice(1)) ||
+      fallback;
+    return sanitizeWorkspaceUrl(candidate, fallback);
+  } catch (_) {
+    return routeForProject(routeSuffix) || projectUrl();
+  }
+}
+
+function filesUrl() {
+  return projectServiceUrl("files", "filesPagePath", "files");
+}
+
+function structuralCalculationUrl() {
+  return projectServiceUrl("structural_calculation", "structuralCalculationPagePath", "structural_calculation");
+}
+
+function energyCalculationUrl() {
+  return projectServiceUrl("energy_calculation", "energyCalculationPagePath", "energy_calculation");
+}
+
+function soundProtectionCalculationUrl() {
+  return projectServiceUrl("sound_protection_calculation", "soundProtectionCalculationPagePath", "sound_protection_calculation");
+}
+
 async function resolve2dUrl() {
   try {
     const jsonPath =
@@ -964,6 +1013,10 @@ function updateAppConfigProject(project, detail = {}) {
     const mapPath = paths.mapPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/map` : "");
     const cad2dPath = paths.cad2dPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/cad2d` : "");
     const lvPath = paths.lvPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/lv` : "");
+    const filesPath = paths.filesPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/files` : "");
+    const structuralCalculationPath = paths.structuralCalculationPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/structural-calculation` : "");
+    const energyCalculationPath = paths.energyCalculationPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/energy-calculation` : "");
+    const soundProtectionCalculationPath = paths.soundProtectionCalculationPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/sound-protection-calculation` : "");
     const versionsPagePath = paths.versionsPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/versions` : "");
     const versionsPath = paths.versionsPath || (publicId && publicId !== "new" ? `/v1/projects/${encodedPublicId}/versions` : "");
     const adminPath = paths.adminPagePath || (publicId && publicId !== "new" ? `/ui/project/${encodedPublicId}/admin` : "");
@@ -1008,6 +1061,26 @@ function updateAppConfigProject(project, detail = {}) {
       workspacePaths.lvPagePath = lvPath;
     }
 
+    if (filesPath) {
+      window.APP_CONFIG.filesPagePath = filesPath;
+      workspacePaths.filesPagePath = filesPath;
+    }
+
+    if (structuralCalculationPath) {
+      window.APP_CONFIG.structuralCalculationPagePath = structuralCalculationPath;
+      workspacePaths.structuralCalculationPagePath = structuralCalculationPath;
+    }
+
+    if (energyCalculationPath) {
+      window.APP_CONFIG.energyCalculationPagePath = energyCalculationPath;
+      workspacePaths.energyCalculationPagePath = energyCalculationPath;
+    }
+
+    if (soundProtectionCalculationPath) {
+      window.APP_CONFIG.soundProtectionCalculationPagePath = soundProtectionCalculationPath;
+      workspacePaths.soundProtectionCalculationPagePath = soundProtectionCalculationPath;
+    }
+
     if (versionsPagePath) {
       window.APP_CONFIG.versionsPagePath = versionsPagePath;
       workspacePaths.versionsPagePath = versionsPagePath;
@@ -1025,6 +1098,36 @@ function updateAppConfigProject(project, detail = {}) {
 
     const enabled = publicId !== "new" && configured;
     const adminEnabled = publicId !== "new" && canManageProject();
+    const projectAccess = p.access && typeof p.access === "object" ? p.access : {};
+    const projectPermissions = projectAccess.permissions && typeof projectAccess.permissions === "object"
+      ? projectAccess.permissions
+      : {};
+    const currentUser = window.APP_CONFIG.currentUser && typeof window.APP_CONFIG.currentUser === "object"
+      ? window.APP_CONFIG.currentUser
+      : {};
+    const currentUserAuth = currentUser.auth && typeof currentUser.auth === "object" ? currentUser.auth : currentUser;
+    const currentUserAccess = currentUserAuth.access && typeof currentUserAuth.access === "object"
+      ? currentUserAuth.access
+      : {};
+    const entitlements = Array.isArray(currentUserAuth.entitlements)
+      ? currentUserAuth.entitlements
+      : Array.isArray(currentUserAccess.entitlements)
+        ? currentUserAccess.entitlements
+        : [];
+    const authenticated = boolFromValue(window.APP_CONFIG.authenticated, false);
+    const persistentUser = boolFromValue(window.APP_CONFIG.persistent, false);
+    const demoUser = boolFromValue(window.APP_CONFIG.demoMode, false);
+    const projectCanView = boolFromValue(projectAccess.can_view ?? projectAccess.canView ?? projectPermissions.view, false);
+    const publicViewerAccess = boolFromValue(
+      projectAccess.public_viewer ?? projectAccess.publicViewer ?? projectAccess.is_public_viewer,
+      false
+    );
+    const cloudEnabled = boolFromValue(
+      currentUserAuth.can_use_cloud ?? currentUserAuth.canUseCloud ?? currentUserAccess.cloud_access,
+      entitlements.map((value) => String(value)).includes("cloud_access")
+    );
+    const memberServiceEnabled = enabled && authenticated && persistentUser && projectCanView && !publicViewerAccess && !demoUser;
+    const filesEnabled = memberServiceEnabled && cloudEnabled;
 
     ensureWorkspaceTabConfig("project", {
       key: "project",
@@ -1087,6 +1190,42 @@ function updateAppConfigProject(project, detail = {}) {
       configuredRequired: true,
       path: lvPath,
       title: "LV",
+    });
+
+    ensureWorkspaceTabConfig("files", {
+      key: "files",
+      mode: "files",
+      enabled: filesEnabled,
+      configuredRequired: true,
+      path: filesPath,
+      title: "Dateien",
+    });
+
+    ensureWorkspaceTabConfig("structural_calculation", {
+      key: "structural_calculation",
+      mode: "structural_calculation",
+      enabled: memberServiceEnabled,
+      configuredRequired: true,
+      path: structuralCalculationPath,
+      title: "Tragwerksberechnung",
+    });
+
+    ensureWorkspaceTabConfig("energy_calculation", {
+      key: "energy_calculation",
+      mode: "energy_calculation",
+      enabled: memberServiceEnabled,
+      configuredRequired: true,
+      path: energyCalculationPath,
+      title: "Energieberechnung",
+    });
+
+    ensureWorkspaceTabConfig("sound_protection_calculation", {
+      key: "sound_protection_calculation",
+      mode: "sound_protection_calculation",
+      enabled: memberServiceEnabled,
+      configuredRequired: true,
+      path: soundProtectionCalculationPath,
+      title: "Schallschutzberechnung",
     });
 
     ensureWorkspaceTabConfig("versions", {
@@ -1207,8 +1346,42 @@ function relayProjectNavigation(detail = {}, source = "shell") {
       detail.workspace_mode ||
       detail.mode ||
       "";
+    const normalizedWorkspace = requestedWorkspace ? normalizeMode(requestedWorkspace) : "";
+    const suffixByWorkspace = {
+      map: "map",
+      "3d": "3d",
+      "2d": "2d",
+      lv: "lv",
+      files: "files",
+      structural_calculation: "structural-calculation",
+      energy_calculation: "energy-calculation",
+      sound_protection_calculation: "sound-protection-calculation",
+    };
+    let routePrefix = "";
+    try {
+      const currentPath = String(window.location.pathname || "");
+      const markerIndex = currentPath.indexOf("/project=");
+      if (markerIndex >= 0) routePrefix = currentPath.slice(0, markerIndex);
+    } catch (_) {}
+    const shellBasePath = `${routePrefix}/project=${encodeURIComponent(publicId)}`;
+    const shellSuffix = suffixByWorkspace[normalizedWorkspace] || "";
+    const workspacePath = String(
+      detail.workspacePath
+      || detail.workspace_path
+      || (shellSuffix ? `${shellBasePath}/${shellSuffix}` : shellBasePath)
+    ).trim();
 
-    if (!publicId || !targetOrigin) return false;
+    if (!publicId) return false;
+
+    if (!targetOrigin) {
+      try {
+        if (workspacePath && window.parent === window) {
+          window.history.pushState({ projectPublicId: publicId, workspace: normalizedWorkspace }, "", workspacePath);
+          return true;
+        }
+      } catch (_) {}
+      return false;
+    }
 
     window.parent.postMessage(
       {
@@ -1217,7 +1390,8 @@ function relayProjectNavigation(detail = {}, source = "shell") {
         source: "vectoplan-app.shell",
         detail: {
           projectPublicId: publicId,
-          workspace: requestedWorkspace ? normalizeMode(requestedWorkspace) : "",
+          workspace: normalizedWorkspace,
+          workspacePath: workspacePath,
           source: String(source || "shell"),
         },
       },
@@ -1677,7 +1851,7 @@ function workspaceModeDisabledMessage(mode) {
     }
 
     if (MODES_REQUIRING_CONFIGURED_PROJECT.has(normalized) && !projectToolsEnabled()) {
-      return "Projekt zuerst speichern und konfigurieren. Danach sind Map, 3D, 2D und LV verfügbar.";
+      return "Projekt zuerst speichern und konfigurieren. Danach sind die Projektbereiche verfügbar.";
     }
 
     return "Dieser Arbeitsbereich ist aktuell nicht verfügbar.";
@@ -1694,8 +1868,10 @@ function syncWorkspaceButtonPaths() {
       "3d": editorUrl(),
       "2d": twoDPageUrl(),
       lv: lvUrl(),
-      versions: versionsPageUrl(),
-      admin: adminUrl(),
+      files: filesUrl(),
+      structural_calculation: structuralCalculationUrl(),
+      energy_calculation: energyCalculationUrl(),
+      sound_protection_calculation: soundProtectionCalculationUrl(),
     };
 
     for (const [mode, id] of Object.entries(MODE_TO_BUTTON_ID)) {
@@ -1910,6 +2086,34 @@ async function setWorkspaceMode(mode, options = {}) {
         mode: "lv",
         title: "Leistungsverzeichnis",
       });
+    } else if (normalized === "files") {
+      activateWorkspaceFrame(normalized);
+      target = filesUrl();
+      hardSwapIframe(cacheBustLocalUrl(target), {
+        mode: "files",
+        title: "Dateien",
+      });
+    } else if (normalized === "structural_calculation") {
+      activateWorkspaceFrame(normalized);
+      target = structuralCalculationUrl();
+      hardSwapIframe(cacheBustLocalUrl(target), {
+        mode: "structural_calculation",
+        title: "Tragwerksberechnung",
+      });
+    } else if (normalized === "energy_calculation") {
+      activateWorkspaceFrame(normalized);
+      target = energyCalculationUrl();
+      hardSwapIframe(cacheBustLocalUrl(target), {
+        mode: "energy_calculation",
+        title: "Energieberechnung",
+      });
+    } else if (normalized === "sound_protection_calculation") {
+      activateWorkspaceFrame(normalized);
+      target = soundProtectionCalculationUrl();
+      hardSwapIframe(cacheBustLocalUrl(target), {
+        mode: "sound_protection_calculation",
+        title: "Schallschutzberechnung",
+      });
     } else if (normalized === "versions") {
       versionsOpen();
       target = versionsPageUrl() || projectUrl();
@@ -2001,7 +2205,10 @@ function wireWorkspaceToolbar() {
     ["mode3dBtn", "3d"],
     ["mode2dBtn", "2d"],
     ["modeLvBtn", "lv"],
-    ["modeAdminBtn", "admin"],
+    ["modeFilesBtn", "files"],
+    ["modeStructuralCalculationBtn", "structural_calculation"],
+    ["modeEnergyCalculationBtn", "energy_calculation"],
+    ["modeSoundProtectionCalculationBtn", "sound_protection_calculation"],
   ];
 
   for (const [id, mode] of bindings) {
@@ -2629,6 +2836,370 @@ function wire2dEventBridge() {
 }
 
 
+/* Project-scoped parcel selection bridge: Map <-> App state <-> 3D editor. */
+
+function wireParcelSelectionBridge() {
+  try {
+    if (window.__VECTOPLAN_PARCEL_SELECTION_BRIDGE_WIRED__) return;
+    window.__VECTOPLAN_PARCEL_SELECTION_BRIDGE_WIRED__ = true;
+
+    const initialProjectCoordinate = () => {
+      try {
+        const project = currentProject();
+        let longitude = Number(project.longitude ?? project.lng ?? project.lon);
+        let latitude = Number(project.latitude ?? project.lat);
+        if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+          const parsed = new URL(mapUrl(), window.location.href);
+          longitude = Number(parsed.searchParams.get("lon"));
+          latitude = Number(parsed.searchParams.get("lat"));
+        }
+        return Number.isFinite(longitude) && Number.isFinite(latitude)
+          ? { longitude, latitude }
+          : null;
+      } catch (_) {
+        return null;
+      }
+    };
+
+    const emptySelection = () => ({
+      projectPublicId: projectPublicId(),
+      coordinateSpace: "wgs84",
+      coveragePolicy: "cell-center",
+      revision: 0,
+      projectCoordinate: initialProjectCoordinate(),
+      gridRotationDegrees: 0,
+      parcels: [],
+      adjacentParcels: [],
+      parcelGridState: null,
+    });
+
+    let currentSelection = emptySelection();
+    let hydrated = false;
+    let availableParcels = [];
+
+    const normalizeGridRotation = (value) => {
+      let result = Number.isFinite(Number(value)) ? Number(value) : 0;
+      while (result >= 90) result -= 180;
+      while (result < -90) result += 180;
+      return Math.abs(result) < 1e-8 ? 0 : result;
+    };
+
+    const normalizeParcelList = (value, maximum = 64) => (Array.isArray(value) ? value : [])
+      .slice(0, Math.max(1, Math.min(512, Number(maximum) || 64)))
+      .map((entry) => {
+        const item = entry && typeof entry === "object" ? entry : {};
+        const parcelId = String(item.parcelId || item.parcel_id || item.id || "").trim();
+        const geometry = item.geometry && typeof item.geometry === "object" ? item.geometry : {};
+        const geometryType = String(geometry.type || "");
+        if (!parcelId || !["Polygon", "MultiPolygon"].includes(geometryType)) return null;
+        return {
+          parcelId,
+          datasetId: String(item.datasetId || item.dataset_id || "").trim(),
+          geometry,
+          properties: item.properties && typeof item.properties === "object" ? item.properties : {},
+        };
+      })
+      .filter(Boolean);
+
+    const normalizeParcelGridState = (value) => {
+      const state = value && typeof value === "object" ? value : null;
+      if (!state || String(state.schemaVersion || state.schema_version || "") !== "vectoplan-parcel-grid-state.v1") {
+        return null;
+      }
+      const mode = String(state.mode || "boundary") === "setback" ? "setback" : "boundary";
+      const guides = (Array.isArray(state.guides) ? state.guides : []).slice(0, 64).map((value) => {
+        const guide = value && typeof value === "object" ? value : {};
+        const start = guide.startLonLat || guide.start_lon_lat;
+        const end = guide.endLonLat || guide.end_lon_lat;
+        const parcelId = String(guide.parcelId || guide.parcel_id || "").trim();
+        if (!parcelId || !Array.isArray(start) || !Array.isArray(end)) return null;
+        const coordinates = [Number(start[0]), Number(start[1]), Number(end[0]), Number(end[1])];
+        if (!coordinates.every(Number.isFinite)) return null;
+        return {
+          parcelId,
+          startLonLat: coordinates.slice(0, 2),
+          endLonLat: coordinates.slice(2, 4),
+          depthMeters: Math.max(1, Math.min(6, Math.round(Number(guide.depthMeters || guide.depth_meters) || 3))),
+        };
+      }).filter(Boolean);
+      return {
+        schemaVersion: "vectoplan-parcel-grid-state.v1",
+        mode,
+        setbackMeters: Math.max(0, Math.min(20, Number(state.setbackMeters ?? state.setback_meters) || 0)),
+        influenceMeters: Math.max(1, Math.min(6, Math.round(Number(state.influenceMeters ?? state.influence_meters) || 3))),
+        activeParcelId: String(state.activeParcelId || state.active_parcel_id || "").trim() || null,
+        guides,
+      };
+    };
+
+    const polygonCoordinates = (parcel) => {
+      const geometry = parcel?.geometry || {};
+      if (geometry.type === "Polygon") return [geometry.coordinates || []];
+      return geometry.type === "MultiPolygon" && Array.isArray(geometry.coordinates)
+        ? geometry.coordinates
+        : [];
+    };
+
+    const dominantGridRotation = (parcels, latitude = 0) => {
+      const metresPerDegreeLat = 111320;
+      const metresPerDegreeLon = Math.max(1, metresPerDegreeLat * Math.cos(Number(latitude || 0) * Math.PI / 180));
+      let longestSquared = 0;
+      let angle = 0;
+      for (const parcel of parcels || []) {
+        for (const polygon of polygonCoordinates(parcel)) {
+          const ring = Array.isArray(polygon?.[0]) ? polygon[0] : [];
+          for (let index = 1; index < ring.length; index += 1) {
+            const first = ring[index - 1] || [];
+            const second = ring[index] || [];
+            const east = (Number(second[0]) - Number(first[0])) * metresPerDegreeLon;
+            const north = (Number(second[1]) - Number(first[1])) * metresPerDegreeLat;
+            const squared = east * east + north * north;
+            if (!Number.isFinite(squared) || squared <= longestSquared) continue;
+            longestSquared = squared;
+            angle = Math.atan2(north, east) * 180 / Math.PI;
+          }
+        }
+      }
+      return normalizeGridRotation(angle);
+    };
+
+    const parcelBounds = (parcel) => {
+      const coordinates = polygonCoordinates(parcel).flat(2);
+      const points = coordinates.filter((point) => Array.isArray(point)
+        && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1])));
+      if (!points.length) return null;
+      const longitudes = points.map((point) => Number(point[0]));
+      const latitudes = points.map((point) => Number(point[1]));
+      return {
+        minLon: Math.min(...longitudes), maxLon: Math.max(...longitudes),
+        minLat: Math.min(...latitudes), maxLat: Math.max(...latitudes),
+      };
+    };
+
+    const adjacentParcelsFor = (selected, available) => {
+      if (!selected.length || !available.length) return [];
+      const selectedIds = new Set(selected.map((parcel) => parcel.parcelId));
+      const selectedBounds = selected.map(parcelBounds).filter(Boolean);
+      const latitude = currentSelection?.projectCoordinate?.latitude
+        ?? selectedBounds[0]?.minLat
+        ?? 0;
+      const metresPerDegreeLat = 111320;
+      const metresPerDegreeLon = Math.max(1, metresPerDegreeLat * Math.cos(Number(latitude) * Math.PI / 180));
+      return available.filter((parcel) => {
+        if (selectedIds.has(parcel.parcelId)) return false;
+        const bounds = parcelBounds(parcel);
+        if (!bounds) return false;
+        return selectedBounds.some((reference) => {
+          const lonGap = Math.max(0, reference.minLon - bounds.maxLon, bounds.minLon - reference.maxLon);
+          const latGap = Math.max(0, reference.minLat - bounds.maxLat, bounds.minLat - reference.maxLat);
+          return Math.hypot(lonGap * metresPerDegreeLon, latGap * metresPerDegreeLat) <= 2.0;
+        });
+      }).slice(0, 128);
+    };
+
+    const normalizedSelection = (value, maxParcels = 64) => {
+      try {
+        const root = value && typeof value === "object" ? value : {};
+        const source = root.detail || root.selection || root.last_map_selection || root;
+        const activeProjectId = projectPublicId();
+        const incomingProjectId = String(
+          source.projectPublicId || source.project_public_id || activeProjectId || ""
+        ).trim();
+        if (activeProjectId && activeProjectId !== "new" && incomingProjectId && incomingProjectId !== activeProjectId) {
+          return emptySelection();
+        }
+        const parcels = normalizeParcelList(source.parcels || source.features, maxParcels);
+        const adjacentParcels = normalizeParcelList(
+          source.adjacentParcels || source.adjacent_parcels,
+          128,
+        );
+        const coordinateSource = source.projectCoordinate || source.project_coordinate || {};
+        const longitude = Number(coordinateSource.longitude ?? coordinateSource.lon ?? coordinateSource.lng);
+        const latitude = Number(coordinateSource.latitude ?? coordinateSource.lat);
+        const parcelGridState = normalizeParcelGridState(
+          source.parcelGridState
+          || source.parcel_grid_state
+          || currentSelection?.parcelGridState
+        );
+        return {
+          projectPublicId: activeProjectId && activeProjectId !== "new" ? activeProjectId : incomingProjectId,
+          coordinateSpace: "wgs84",
+          coveragePolicy: "cell-center",
+          revision: Number.isFinite(Number(source.revision)) ? Number(source.revision) : 0,
+          projectCoordinate: Number.isFinite(longitude) && Number.isFinite(latitude)
+            ? { longitude, latitude }
+            : (currentSelection?.projectCoordinate || initialProjectCoordinate()),
+          gridRotationDegrees: dominantGridRotation(
+            parcels,
+            Number.isFinite(latitude) ? latitude : (currentSelection?.projectCoordinate?.latitude || 0),
+          ),
+          parcels,
+          adjacentParcels,
+          parcelGridState,
+        };
+      } catch (_) {
+        return emptySelection();
+      }
+    };
+
+    const broadcastSelection = () => {
+      const message = {
+        type: "vectoplan-app:parcel-selection-sync",
+        kind: "vectoplan-app:parcel-selection-sync",
+        source: "vectoplan-app",
+        detail: { ...currentSelection, availableParcels },
+      };
+      for (const frame of [viewerFrame(), editorPreloadFrame()]) {
+        try { frame?.contentWindow?.postMessage(message, "*"); } catch (_) {}
+      }
+      uiState.lastParcelSelection = currentSelection;
+      uiState.lastParcelSelectionTs = Date.now();
+    };
+
+    const persistSelection = async () => {
+      try {
+        const statePath = pathValue("statePutPath") || cfgValue("statePutPath");
+        if (!statePath || statePath === "__DISABLED__") return;
+        await fetch(statePath, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          cache: "no-store",
+          body: JSON.stringify({
+            last_map_selection: currentSelection,
+            last_map_selection_ts: Date.now(),
+            legacy_3d_backend: false,
+          }),
+        }).catch(() => {});
+      } catch (_) {}
+    };
+
+    const persistProjectCoordinate = async (coordinate) => {
+      try {
+        const endpoint = cfgValue("projectApiPath");
+        if (!endpoint || endpoint === "__DISABLED__") return;
+        await fetch(endpoint, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", "Accept": "application/json" },
+          credentials: "same-origin",
+          cache: "no-store",
+          body: JSON.stringify({
+            longitude: coordinate.longitude,
+            latitude: coordinate.latitude,
+          }),
+        });
+      } catch (_) {}
+    };
+
+    safeOn(window, "message", (event) => {
+      try {
+        const data = event?.data;
+        if (!data || typeof data !== "object") return;
+        const type = String(data.type || data.kind || "");
+        const mapFrame = viewerFrame();
+        const editorFrame = editorPreloadFrame();
+        const fromMap = !!mapFrame?.contentWindow && event.source === mapFrame.contentWindow;
+        const fromEditor = !!editorFrame?.contentWindow && event.source === editorFrame.contentWindow;
+        if (!fromMap && !fromEditor) return;
+
+        if (
+          (type === "vectoplan-map:parcel-selection-changed" && fromMap)
+          || (type === "vectoplan-editor:parcel-selection-changed" && fromEditor)
+        ) {
+          const nextSelection = normalizedSelection(data.detail || data);
+          currentSelection = {
+            ...nextSelection,
+            adjacentParcels: adjacentParcelsFor(nextSelection.parcels, availableParcels),
+          };
+          broadcastSelection();
+          void persistSelection();
+          return;
+        }
+
+        if (type === "vectoplan-map:project-coordinate-changed" && fromMap) {
+          const detail = data.detail && typeof data.detail === "object" ? data.detail : data;
+          const longitude = Number(detail.longitude ?? detail.lon ?? detail.lng);
+          const latitude = Number(detail.latitude ?? detail.lat);
+          const incomingProjectId = String(detail.projectPublicId || detail.project_public_id || "").trim();
+          if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return;
+          if (incomingProjectId && incomingProjectId !== projectPublicId()) return;
+          currentSelection = {
+            ...currentSelection,
+            projectCoordinate: { longitude, latitude },
+            revision: Number(currentSelection.revision || 0) + 1,
+          };
+          broadcastSelection();
+          void persistSelection();
+          void persistProjectCoordinate(currentSelection.projectCoordinate);
+          return;
+        }
+
+        if (type === "vectoplan-map:parcel-catalog-changed" && fromMap) {
+          const detail = data.detail && typeof data.detail === "object" ? data.detail : data;
+          const incomingProjectId = String(detail.projectPublicId || detail.project_public_id || "").trim();
+          if (incomingProjectId && incomingProjectId !== projectPublicId()) return;
+          availableParcels = normalizedSelection({
+            ...currentSelection,
+            parcels: detail.availableParcels || detail.available_parcels || [],
+          }, 512).parcels;
+          const coordinate = detail.projectCoordinate || detail.project_coordinate;
+          if (coordinate && typeof coordinate === "object") {
+            const longitude = Number(coordinate.longitude ?? coordinate.lon ?? coordinate.lng);
+            const latitude = Number(coordinate.latitude ?? coordinate.lat);
+            if (Number.isFinite(longitude) && Number.isFinite(latitude)) {
+              currentSelection = { ...currentSelection, projectCoordinate: { longitude, latitude } };
+            }
+          }
+          currentSelection = {
+            ...currentSelection,
+            adjacentParcels: adjacentParcelsFor(currentSelection.parcels, availableParcels),
+            gridRotationDegrees: dominantGridRotation(
+              currentSelection.parcels,
+              currentSelection.projectCoordinate?.latitude || 0,
+            ),
+          };
+          broadcastSelection();
+          void persistSelection();
+          return;
+        }
+
+        if (
+          type === "vectoplan-map:parcel-selection-request"
+          || type === "vectoplan-editor:parcel-selection-request"
+          || type === "vectoplan-cad:parcel-selection-request"
+        ) {
+          if (hydrated) broadcastSelection();
+        }
+      } catch (_) {}
+    });
+
+    void (async () => {
+      try {
+        const statePath = pathValue("stateGetPath") || cfgValue("stateGetPath");
+        if (!statePath || statePath === "__DISABLED__") {
+          hydrated = true;
+          broadcastSelection();
+          return;
+        }
+        const response = await fetch(statePath, {
+          method: "GET",
+          headers: { "Accept": "application/json" },
+          credentials: "same-origin",
+          cache: "no-store",
+        });
+        if (response.ok) {
+          const payload = await response.json();
+          const selectionState = payload?.selection || payload?.viewer_selection || payload || {};
+          currentSelection = normalizedSelection(selectionState.last_map_selection || selectionState);
+        }
+      } catch (_) {}
+      hydrated = true;
+      broadcastSelection();
+    })();
+  } catch (_) {}
+}
+
+
 /* ───────────────────────── Editor message bridge ───────────────────────── */
 
 function wireEditorEventBridge() {
@@ -2880,6 +3451,7 @@ async function boot() {
 
 
   safeCall("wireEditorEventBridge", wireEditorEventBridge);
+  safeCall("wireParcelSelectionBridge", wireParcelSelectionBridge);
   safeCall("prepareEditorPreloadFrame", () => {
     if (!projectToolsEnabled()) return false;
     return prepareEditorPreloadFrame(editorUrl());

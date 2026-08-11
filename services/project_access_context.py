@@ -74,7 +74,10 @@ PUBLIC_WORKSPACES = {
     "editor3d",
     "cad2d",
     "lv",
-    "versions",
+    "files",
+    "structural_calculation",
+    "energy_calculation",
+    "sound_protection_calculation",
 }
 
 NEVER_PUBLIC_WORKSPACES = {
@@ -109,6 +112,18 @@ WORKSPACE_ALIASES = {
     "lv": "lv",
     "boq": "lv",
     "leistungsverzeichnis": "lv",
+    "files": "files",
+    "dateien": "files",
+    "filecloud": "files",
+    "structural_calculation": "structural_calculation",
+    "tragwerksberechnung": "structural_calculation",
+    "statik": "structural_calculation",
+    "energy_calculation": "energy_calculation",
+    "energieberechnung": "energy_calculation",
+    "energie": "energy_calculation",
+    "sound_protection_calculation": "sound_protection_calculation",
+    "schallschutzberechnung": "sound_protection_calculation",
+    "schallschutz": "sound_protection_calculation",
     "versions": "versions",
     "versionen": "versions",
     "history": "versions",
@@ -1489,7 +1504,10 @@ def _publication_from_project_fields(project: Any) -> Dict[str, Any]:
                 "editor3d": False,
                 "cad2d": False,
                 "lv": False,
-                "versions": False,
+                "files": False,
+                "structural_calculation": False,
+                "energy_calculation": False,
+                "sound_protection_calculation": False,
             }
 
         return {

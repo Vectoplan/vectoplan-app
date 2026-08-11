@@ -607,6 +607,7 @@ def _workspace_csp_header_value() -> str:
         editor_public = _config_url("VECTOPLAN_EDITOR_PUBLIC_URL", "http://localhost:5100")
         cad_public = _config_url("VECTOPLAN_CAD_PUBLIC_URL", "http://localhost:5104")
         lv_public = _config_url("VECTOPLAN_LV_PUBLIC_URL", "http://localhost:5105")
+        filecloud_public = _config_url("VECTOPLAN_FILECLOUD_PUBLIC_URL", "http://localhost:5107")
         openlayer_public = _config_url("OPENLAYER_PUBLIC_URL", "http://localhost:5190")
         chunk_public = _config_url("VECTOPLAN_CHUNK_PUBLIC_URL", "http://localhost:5102")
         library_public = _config_url("VECTOPLAN_LIBRARY_PUBLIC_URL", "http://localhost:5101")
@@ -622,6 +623,8 @@ def _workspace_csp_header_value() -> str:
             "http://127.0.0.1:5104",
             lv_public,
             "http://127.0.0.1:5105",
+            filecloud_public,
+            "http://127.0.0.1:5107",
             openlayer_public,
             "http://127.0.0.1:5190",
         ]
@@ -634,6 +637,8 @@ def _workspace_csp_header_value() -> str:
             "http://127.0.0.1:5100",
             cad_public,
             "http://127.0.0.1:5104",
+            filecloud_public,
+            "http://127.0.0.1:5107",
             chunk_public,
             "http://127.0.0.1:5102",
             library_public,
@@ -680,15 +685,18 @@ def _workspace_csp_header_value() -> str:
             "frame-src 'self' http://localhost:5000 http://127.0.0.1:5000 "
             "http://localhost:5104 http://127.0.0.1:5104 "
             "http://localhost:5105 http://127.0.0.1:5105 "
+            "http://localhost:5107 http://127.0.0.1:5107 "
             "http://localhost:5100 http://127.0.0.1:5100 "
             "http://localhost:5190 http://127.0.0.1:5190; "
             "child-src 'self' http://localhost:5000 http://127.0.0.1:5000 "
             "http://localhost:5104 http://127.0.0.1:5104 "
             "http://localhost:5105 http://127.0.0.1:5105 "
+            "http://localhost:5107 http://127.0.0.1:5107 "
             "http://localhost:5100 http://127.0.0.1:5100 "
             "http://localhost:5190 http://127.0.0.1:5190; "
             "connect-src 'self' http://localhost:5000 http://127.0.0.1:5000 "
             "http://localhost:5104 http://127.0.0.1:5104 "
+            "http://localhost:5107 http://127.0.0.1:5107 "
             "http://localhost:5100 http://127.0.0.1:5100 "
             "http://localhost:5102 http://127.0.0.1:5102 "
             "http://localhost:5101 http://127.0.0.1:5101 "
@@ -1366,7 +1374,10 @@ def _new_publication_payload(*, demo: bool = False) -> Dict[str, Any]:
             "editor3d": False,
             "cad2d": False,
             "lv": False,
-            "versions": False,
+            "files": False,
+            "structural_calculation": False,
+            "energy_calculation": False,
+            "sound_protection_calculation": False,
         },
         "publishedWorkspaces": {
             "project": False,
@@ -1374,7 +1385,10 @@ def _new_publication_payload(*, demo: bool = False) -> Dict[str, Any]:
             "editor3d": False,
             "cad2d": False,
             "lv": False,
-            "versions": False,
+            "files": False,
+            "structural_calculation": False,
+            "energy_calculation": False,
+            "sound_protection_calculation": False,
         },
         "effective_published_workspaces": {
             "project": False,
@@ -1382,7 +1396,10 @@ def _new_publication_payload(*, demo: bool = False) -> Dict[str, Any]:
             "editor3d": False,
             "cad2d": False,
             "lv": False,
-            "versions": False,
+            "files": False,
+            "structural_calculation": False,
+            "energy_calculation": False,
+            "sound_protection_calculation": False,
         },
         "effectivePublishedWorkspaces": {
             "project": False,
@@ -1390,7 +1407,10 @@ def _new_publication_payload(*, demo: bool = False) -> Dict[str, Any]:
             "editor3d": False,
             "cad2d": False,
             "lv": False,
-            "versions": False,
+            "files": False,
+            "structural_calculation": False,
+            "energy_calculation": False,
+            "sound_protection_calculation": False,
         },
         "require_auth": not demo,
         "requireAuth": not demo,
@@ -1454,6 +1474,10 @@ def _new_project_payload(current_user: Optional[Mapping[str, Any]] = None) -> Di
             "mapPagePath": "",
             "cad2dPagePath": "",
             "lvPagePath": "",
+            "filesPagePath": "",
+            "structuralCalculationPagePath": "",
+            "energyCalculationPagePath": "",
+            "soundProtectionCalculationPagePath": "",
             "versionsPagePath": "",
             "adminPagePath": "",
             "publicationPath": "",
@@ -1773,6 +1797,10 @@ def _project_paths(public_id: str, *, is_demo: bool = False) -> Dict[str, str]:
             "mapPagePath": "",
             "cad2dPagePath": "",
             "lvPagePath": "",
+            "filesPagePath": "",
+            "structuralCalculationPagePath": "",
+            "energyCalculationPagePath": "",
+            "soundProtectionCalculationPagePath": "",
             "versionsPagePath": "",
             "adminPagePath": "",
             "publicationPath": "",
@@ -1793,6 +1821,10 @@ def _project_paths(public_id: str, *, is_demo: bool = False) -> Dict[str, str]:
         "mapPagePath": f"/ui/project/{public_id_q}/map",
         "cad2dPagePath": f"/ui/project/{public_id_q}/cad2d",
         "lvPagePath": f"/ui/project/{public_id_q}/lv",
+        "filesPagePath": f"/ui/project/{public_id_q}/files",
+        "structuralCalculationPagePath": f"/ui/project/{public_id_q}/structural-calculation",
+        "energyCalculationPagePath": f"/ui/project/{public_id_q}/energy-calculation",
+        "soundProtectionCalculationPagePath": f"/ui/project/{public_id_q}/sound-protection-calculation",
         "versionsPagePath": "" if is_demo else f"/ui/project/{public_id_q}/versions",
         "adminPagePath": "" if is_demo else f"/ui/project/{public_id_q}/admin",
         "publicationPath": "" if is_demo else f"/v1/projects/{public_id_q}/publication",
@@ -1857,6 +1889,10 @@ def _workspace_context_for_project(
             "map_url": existing_paths.get("mapPagePath", ""),
             "cad2d_url": existing_paths.get("cad2dPagePath", ""),
             "lv_url": existing_paths.get("lvPagePath", ""),
+            "files_url": existing_paths.get("filesPagePath", ""),
+            "structural_calculation_url": existing_paths.get("structuralCalculationPagePath", ""),
+            "energy_calculation_url": existing_paths.get("energyCalculationPagePath", ""),
+            "sound_protection_calculation_url": existing_paths.get("soundProtectionCalculationPagePath", ""),
             "versions_url": existing_paths.get("versionsPagePath", ""),
             "admin_url": existing_paths.get("adminPagePath", ""),
             "paths": existing_paths,
@@ -2734,6 +2770,7 @@ def _render_project_shell(
     selected_project: Optional[Any],
     is_new: bool = False,
     status_code: int = 200,
+    initial_workspace: str = "project",
 ) -> Response:
     try:
         current_user = _current_user_payload(ensure=False)
@@ -2784,6 +2821,20 @@ def _render_project_shell(
             current_user=effective_current_user,
         )
 
+        normalized_initial_workspace = _safe_str(initial_workspace, "project", 80).lower()
+        if normalized_initial_workspace not in {
+            "project",
+            "map",
+            "3d",
+            "2d",
+            "lv",
+            "files",
+            "structural_calculation",
+            "energy_calculation",
+            "sound_protection_calculation",
+        }:
+            normalized_initial_workspace = "project"
+
         resp = make_response(
             render_template(
                 "chat_viewer.html",
@@ -2798,8 +2849,8 @@ def _render_project_shell(
                 lv_url=workspace.get("lv_url") or "",
                 versions_url=workspace.get("versions_url") or "",
                 admin_url=workspace.get("admin_url") or "",
-                default_mode="project",
-                workspace_mode="project",
+                default_mode=normalized_initial_workspace,
+                workspace_mode=normalized_initial_workspace,
                 workspace=workspace,
                 workspace_paths=workspace_paths,
                 project=project_payload,
@@ -2908,6 +2959,70 @@ def project_by_equals(project_id: str) -> Response:
 
     except Exception as exc:
         return _exception_response("project_by_equals failed", exc, code="project_route_failed")
+
+
+@bp.get("/project=<project_id>/<workspace>")
+def project_workspace_by_equals(project_id: str, workspace: str) -> Response:
+    """Open the project shell directly on a stable, bookmarkable workspace URL."""
+    aliases = {
+        "project": "project",
+        "map": "map",
+        "3d": "3d",
+        "editor": "3d",
+        "editor3d": "3d",
+        "2d": "2d",
+        "cad": "2d",
+        "cad2d": "2d",
+        "lv": "lv",
+        "files": "files",
+        "dateien": "files",
+        "structural-calculation": "structural_calculation",
+        "structural_calculation": "structural_calculation",
+        "tragwerksberechnung": "structural_calculation",
+        "energy-calculation": "energy_calculation",
+        "energy_calculation": "energy_calculation",
+        "energieberechnung": "energy_calculation",
+        "sound-protection-calculation": "sound_protection_calculation",
+        "sound_protection_calculation": "sound_protection_calculation",
+        "schallschutzberechnung": "sound_protection_calculation",
+    }
+    requested_workspace = _safe_str(workspace, "", 120).lower().replace(" ", "-")
+    initial_workspace = aliases.get(requested_workspace)
+    if not initial_workspace:
+        return _json_error(
+            "workspace not found",
+            404,
+            code="workspace_not_found",
+            extra={"workspace": requested_workspace},
+        )
+
+    try:
+        current_user = _current_user_payload(ensure=False)
+        if _is_access_blocked_context(current_user):
+            return _blocked_response(current_user)
+        if _is_new_project_identifier(project_id):
+            return redirect("/project=new", code=302)
+        project = _load_selected_project(project_id)
+        if project is None:
+            return _json_error(
+                "project not found",
+                404,
+                code="project_not_found",
+                extra={"project_id": project_id},
+            )
+        return _render_project_shell(
+            selected_project=project,
+            is_new=False,
+            initial_workspace=initial_workspace,
+        )
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+    except Exception as exc:
+        return _exception_response(
+            "project_workspace_by_equals failed",
+            exc,
+            code="project_workspace_route_failed",
+        )
 
 
 @bp.get("/project/<project_id>")

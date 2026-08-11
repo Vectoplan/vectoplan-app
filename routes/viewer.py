@@ -31,7 +31,7 @@ from html import escape
 import re
 import uuid
 from typing import Any, Dict, Mapping, Optional, Tuple
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from flask import Blueprint, current_app, g, jsonify, make_response, redirect, render_template, request
 from jinja2 import TemplateNotFound, TemplateSyntaxError
@@ -176,6 +176,18 @@ except Exception:  # pragma: no cover
             "cad": "cad2d",
             "cad2d": "cad2d",
             "lv": "lv",
+            "files": "files",
+            "dateien": "files",
+            "filecloud": "files",
+            "structural_calculation": "structural_calculation",
+            "tragwerksberechnung": "structural_calculation",
+            "statik": "structural_calculation",
+            "energy_calculation": "energy_calculation",
+            "energieberechnung": "energy_calculation",
+            "energie": "energy_calculation",
+            "sound_protection_calculation": "sound_protection_calculation",
+            "schallschutzberechnung": "sound_protection_calculation",
+            "schallschutz": "sound_protection_calculation",
             "versions": "versions",
             "versionen": "versions",
             "admin": "admin",
@@ -277,6 +289,10 @@ WORKSPACE_EDITOR3D = "editor3d"
 WORKSPACE_CAD2D = "cad2d"
 WORKSPACE_LV = "lv"
 WORKSPACE_VERSIONS = "versions"
+WORKSPACE_FILES = "files"
+WORKSPACE_STRUCTURAL_CALCULATION = "structural_calculation"
+WORKSPACE_ENERGY_CALCULATION = "energy_calculation"
+WORKSPACE_SOUND_PROTECTION_CALCULATION = "sound_protection_calculation"
 WORKSPACE_ADMIN = "admin"
 
 ALLOWED_WORKSPACES = {
@@ -286,6 +302,10 @@ ALLOWED_WORKSPACES = {
     WORKSPACE_CAD2D,
     WORKSPACE_LV,
     WORKSPACE_VERSIONS,
+    WORKSPACE_FILES,
+    WORKSPACE_STRUCTURAL_CALCULATION,
+    WORKSPACE_ENERGY_CALCULATION,
+    WORKSPACE_SOUND_PROTECTION_CALCULATION,
     WORKSPACE_ADMIN,
 }
 
@@ -295,7 +315,10 @@ PUBLIC_WORKSPACES = {
     WORKSPACE_EDITOR3D,
     WORKSPACE_CAD2D,
     WORKSPACE_LV,
-    WORKSPACE_VERSIONS,
+    WORKSPACE_FILES,
+    WORKSPACE_STRUCTURAL_CALCULATION,
+    WORKSPACE_ENERGY_CALCULATION,
+    WORKSPACE_SOUND_PROTECTION_CALCULATION,
 }
 
 DEMO_WORKSPACES = {
@@ -304,6 +327,10 @@ DEMO_WORKSPACES = {
     WORKSPACE_EDITOR3D,
     WORKSPACE_CAD2D,
     WORKSPACE_LV,
+    WORKSPACE_FILES,
+    WORKSPACE_STRUCTURAL_CALCULATION,
+    WORKSPACE_ENERGY_CALCULATION,
+    WORKSPACE_SOUND_PROTECTION_CALCULATION,
 }
 
 EXTERNAL_REDIRECT_WORKSPACES = {
@@ -329,6 +356,10 @@ WORKSPACE_LABELS = {
     WORKSPACE_CAD2D: "2D",
     WORKSPACE_LV: "LV",
     WORKSPACE_VERSIONS: "Versionen",
+    WORKSPACE_FILES: "Dateien",
+    WORKSPACE_STRUCTURAL_CALCULATION: "Tragwerksberechnung",
+    WORKSPACE_ENERGY_CALCULATION: "Energieberechnung",
+    WORKSPACE_SOUND_PROTECTION_CALCULATION: "Schallschutzberechnung",
     WORKSPACE_ADMIN: "Admin",
 }
 
@@ -1973,7 +2004,10 @@ def _default_new_project_payload(current_user: Mapping[str, Any]) -> Dict[str, A
                 "editor3d": False,
                 "cad2d": False,
                 "lv": False,
-                "versions": False,
+                "files": False,
+                "structural_calculation": False,
+                "energy_calculation": False,
+                "sound_protection_calculation": False,
             },
             "effective_published_workspaces": {
                 "project": False,
@@ -1981,7 +2015,10 @@ def _default_new_project_payload(current_user: Mapping[str, Any]) -> Dict[str, A
                 "editor3d": False,
                 "cad2d": False,
                 "lv": False,
-                "versions": False,
+                "files": False,
+                "structural_calculation": False,
+                "energy_calculation": False,
+                "sound_protection_calculation": False,
             },
             "require_auth": not demo_mode,
             "require_project_permission": True,
@@ -2364,7 +2401,10 @@ def _demo_publication_payload() -> Dict[str, Any]:
             "editor3d": False,
             "cad2d": False,
             "lv": False,
-            "versions": False,
+            "files": False,
+            "structural_calculation": False,
+            "energy_calculation": False,
+            "sound_protection_calculation": False,
         },
         "effective_published_workspaces": {
             "project": False,
@@ -2372,7 +2412,10 @@ def _demo_publication_payload() -> Dict[str, Any]:
             "editor3d": False,
             "cad2d": False,
             "lv": False,
-            "versions": False,
+            "files": False,
+            "structural_calculation": False,
+            "energy_calculation": False,
+            "sound_protection_calculation": False,
         },
         "require_auth": False,
         "require_project_permission": True,
@@ -3643,6 +3686,82 @@ def project_workspace(project_id: str) -> Response:
     return _render_project_workspace(context or {})
 
 
+def _configured_project_context(
+    project_id: str,
+    workspace: str = WORKSPACE_PROJECT,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Response]]:
+    context, error = _build_template_context(project_id, workspace=workspace)
+    if error is not None:
+        return None, error
+    project_payload = _safe_dict((context or {}).get("project"))
+    if not _is_project_configured(project_payload):
+        return None, _error_response(
+            "Projekt muss zuerst gespeichert und konfiguriert werden.",
+            409,
+            code="project_not_configured",
+        )
+    return _safe_dict(context), None
+
+
+@bp.get("/ui/project/<project_id>/files")
+def project_files_workspace(project_id: str) -> Response:
+    """Open the project-scoped Filecloud after the normal App access check."""
+    context, error = _configured_project_context(project_id, WORKSPACE_FILES)
+    if error is not None:
+        return error
+    if not _config_bool("VECTOPLAN_FILECLOUD_EMBED_ENABLED", True):
+        return _error_response("Filecloud ist aktuell deaktiviert.", 503, code="filecloud_disabled")
+
+    project_payload = _safe_dict((context or {}).get("project"))
+    public_id = _safe_str(
+        project_payload.get("public_id") or project_payload.get("publicId"),
+        project_id,
+        160,
+    )
+    base_url = _safe_str(
+        _config_value("VECTOPLAN_FILECLOUD_PUBLIC_URL", "http://localhost:5107"),
+        "http://localhost:5107",
+        4000,
+    ).rstrip("/")
+    route = _safe_str(_config_value("VECTOPLAN_FILECLOUD_ROUTE", "/files"), "/files", 500)
+    if not route.startswith("/"):
+        route = "/" + route
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        return _error_response(
+            "Die öffentliche Filecloud-URL ist ungültig.",
+            503,
+            code="filecloud_public_url_invalid",
+        )
+    target = f"{base_url}{route}?{urlencode({'project_id': public_id})}"
+    return _redirect_response(target, status=302, workspace="files")
+
+
+def _render_calculation_workspace(project_id: str, workspace: str, label: str) -> Response:
+    context, error = _configured_project_context(project_id, workspace)
+    if error is not None:
+        return error
+    payload = _safe_dict(context)
+    payload["workspace"] = workspace
+    payload["workspace_label"] = label
+    return _render_generic_workspace(payload)
+
+
+@bp.get("/ui/project/<project_id>/structural-calculation")
+def project_structural_calculation_workspace(project_id: str) -> Response:
+    return _render_calculation_workspace(project_id, "structural_calculation", "Tragwerksberechnung")
+
+
+@bp.get("/ui/project/<project_id>/energy-calculation")
+def project_energy_calculation_workspace(project_id: str) -> Response:
+    return _render_calculation_workspace(project_id, "energy_calculation", "Energieberechnung")
+
+
+@bp.get("/ui/project/<project_id>/sound-protection-calculation")
+def project_sound_protection_calculation_workspace(project_id: str) -> Response:
+    return _render_calculation_workspace(project_id, "sound_protection_calculation", "Schallschutzberechnung")
+
+
 @bp.get("/ui/project/<project_id>/<workspace>")
 def project_named_workspace(project_id: str, workspace: str) -> Response:
     normalized_workspace = _normalize_workspace(workspace)
@@ -3669,6 +3788,10 @@ __all__ = [
     "project_workspace_context_json",
     "project_new_workspace",
     "project_workspace",
+    "project_files_workspace",
+    "project_structural_calculation_workspace",
+    "project_energy_calculation_workspace",
+    "project_sound_protection_calculation_workspace",
     "project_named_workspace",
     "VIEWER_CONTRACT_VERSION",
 ]

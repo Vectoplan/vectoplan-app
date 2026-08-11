@@ -29,7 +29,7 @@ Begriffe:
     unlisted = nicht gelistet, aber über Link/Embed öffentlich erreichbar, wenn Reiter veröffentlicht sind
     public   = öffentlich sichtbar, wenn Reiter veröffentlicht sind
 - published_workspaces:
-    Projektinfo, Map, 3D, 2D, LV, Versionen
+    Projektinfo, Map, 3D, 2D, LV, Dateien, Tragwerk, Energie, Schallschutz
 - nie öffentlich:
     Admin, Team, Systemreferenzen, Berechtigungsverwaltung
 """
@@ -161,6 +161,10 @@ WORKSPACE_EDITOR3D = "editor3d"
 WORKSPACE_CAD2D = "cad2d"
 WORKSPACE_LV = "lv"
 WORKSPACE_VERSIONS = "versions"
+WORKSPACE_FILES = "files"
+WORKSPACE_STRUCTURAL_CALCULATION = "structural_calculation"
+WORKSPACE_ENERGY_CALCULATION = "energy_calculation"
+WORKSPACE_SOUND_PROTECTION_CALCULATION = "sound_protection_calculation"
 
 WORKSPACE_ADMIN = "admin"
 WORKSPACE_TEAM = "team"
@@ -174,7 +178,10 @@ PUBLICATION_WORKSPACES: Tuple[str, ...] = (
     WORKSPACE_EDITOR3D,
     WORKSPACE_CAD2D,
     WORKSPACE_LV,
-    WORKSPACE_VERSIONS,
+    WORKSPACE_FILES,
+    WORKSPACE_STRUCTURAL_CALCULATION,
+    WORKSPACE_ENERGY_CALCULATION,
+    WORKSPACE_SOUND_PROTECTION_CALCULATION,
 )
 
 DEMO_PUBLICATION_WORKSPACES: Tuple[str, ...] = (
@@ -183,6 +190,10 @@ DEMO_PUBLICATION_WORKSPACES: Tuple[str, ...] = (
     WORKSPACE_EDITOR3D,
     WORKSPACE_CAD2D,
     WORKSPACE_LV,
+    WORKSPACE_FILES,
+    WORKSPACE_STRUCTURAL_CALCULATION,
+    WORKSPACE_ENERGY_CALCULATION,
+    WORKSPACE_SOUND_PROTECTION_CALCULATION,
 )
 
 NEVER_PUBLIC_WORKSPACES = {
@@ -224,6 +235,21 @@ WORKSPACE_ALIASES = {
     "boq": WORKSPACE_LV,
     "leistungsverzeichnis": WORKSPACE_LV,
     "bill_of_quantities": WORKSPACE_LV,
+    "files": WORKSPACE_FILES,
+    "dateien": WORKSPACE_FILES,
+    "filecloud": WORKSPACE_FILES,
+    "structural_calculation": WORKSPACE_STRUCTURAL_CALCULATION,
+    "structural": WORKSPACE_STRUCTURAL_CALCULATION,
+    "tragwerksberechnung": WORKSPACE_STRUCTURAL_CALCULATION,
+    "statik": WORKSPACE_STRUCTURAL_CALCULATION,
+    "energy_calculation": WORKSPACE_ENERGY_CALCULATION,
+    "energy": WORKSPACE_ENERGY_CALCULATION,
+    "energieberechnung": WORKSPACE_ENERGY_CALCULATION,
+    "energie": WORKSPACE_ENERGY_CALCULATION,
+    "sound_protection_calculation": WORKSPACE_SOUND_PROTECTION_CALCULATION,
+    "sound_protection": WORKSPACE_SOUND_PROTECTION_CALCULATION,
+    "schallschutzberechnung": WORKSPACE_SOUND_PROTECTION_CALCULATION,
+    "schallschutz": WORKSPACE_SOUND_PROTECTION_CALCULATION,
     "versions": WORKSPACE_VERSIONS,
     "versionen": WORKSPACE_VERSIONS,
     "history": WORKSPACE_VERSIONS,
@@ -247,6 +273,10 @@ WORKSPACE_LABELS = {
     WORKSPACE_EDITOR3D: "3D",
     WORKSPACE_CAD2D: "2D",
     WORKSPACE_LV: "LV",
+    WORKSPACE_FILES: "Dateien",
+    WORKSPACE_STRUCTURAL_CALCULATION: "Tragwerksberechnung",
+    WORKSPACE_ENERGY_CALCULATION: "Energieberechnung",
+    WORKSPACE_SOUND_PROTECTION_CALCULATION: "Schallschutzberechnung",
     WORKSPACE_VERSIONS: "Versionen",
     WORKSPACE_ADMIN: "Admin",
     WORKSPACE_TEAM: "Team",
@@ -270,7 +300,10 @@ DEFAULT_DESIRED_WORKSPACES = {
     WORKSPACE_EDITOR3D: False,
     WORKSPACE_CAD2D: False,
     WORKSPACE_LV: False,
-    WORKSPACE_VERSIONS: False,
+    WORKSPACE_FILES: False,
+    WORKSPACE_STRUCTURAL_CALCULATION: False,
+    WORKSPACE_ENERGY_CALCULATION: False,
+    WORKSPACE_SOUND_PROTECTION_CALCULATION: False,
 }
 
 PUBLICATION_METADATA_KEY = "publication"

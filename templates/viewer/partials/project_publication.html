@@ -270,21 +270,27 @@
 {% set _pub_editor_selected = true if _pub_editor_requested and _pub_editor_available else false %}
 {% set _pub_cad2d_selected = true if _pub_published.get('cad2d', _pub_published.get('2d', false)) in _pub_truthy else false %}
 {% set _pub_lv_selected = true if _pub_published.get('lv', false) in _pub_truthy else false %}
-{% set _pub_versions_selected = true if _pub_published.get('versions', false) in _pub_truthy else false %}
+{% set _pub_files_selected = true if _pub_published.get('files', false) in _pub_truthy else false %}
+{% set _pub_structural_selected = true if _pub_published.get('structural_calculation', false) in _pub_truthy else false %}
+{% set _pub_energy_selected = true if _pub_published.get('energy_calculation', false) in _pub_truthy else false %}
+{% set _pub_sound_selected = true if _pub_published.get('sound_protection_calculation', false) in _pub_truthy else false %}
 
 {% set _pub_effective_project = true if _pub_visibility != 'private' and _pub_effective.get('project', _pub_project_selected) in _pub_truthy else false %}
 {% set _pub_effective_map = true if _pub_visibility != 'private' and _pub_effective.get('map', _pub_map_selected) in _pub_truthy else false %}
 {% set _pub_effective_editor = true if _pub_visibility != 'private' and _pub_editor_available and _pub_effective.get('editor3d', _pub_effective.get('3d', _pub_editor_selected)) in _pub_truthy else false %}
 {% set _pub_effective_cad2d = true if _pub_visibility != 'private' and _pub_effective.get('cad2d', _pub_effective.get('2d', _pub_cad2d_selected)) in _pub_truthy else false %}
 {% set _pub_effective_lv = true if _pub_visibility != 'private' and _pub_effective.get('lv', _pub_lv_selected) in _pub_truthy else false %}
-{% set _pub_effective_versions = true if _pub_visibility != 'private' and _pub_effective.get('versions', _pub_versions_selected) in _pub_truthy else false %}
+{% set _pub_effective_files = true if _pub_visibility != 'private' and _pub_effective.get('files', _pub_files_selected) in _pub_truthy else false %}
+{% set _pub_effective_structural = true if _pub_visibility != 'private' and _pub_effective.get('structural_calculation', _pub_structural_selected) in _pub_truthy else false %}
+{% set _pub_effective_energy = true if _pub_visibility != 'private' and _pub_effective.get('energy_calculation', _pub_energy_selected) in _pub_truthy else false %}
+{% set _pub_effective_sound = true if _pub_visibility != 'private' and _pub_effective.get('sound_protection_calculation', _pub_sound_selected) in _pub_truthy else false %}
 
 {% set _pub_require_auth_raw = _pub_publication.get('require_auth', _pub_publication.get('requireAuth', true if _pub_visibility == 'private' else false)) %}
 {% set _pub_require_permission_raw = _pub_publication.get('require_project_permission', _pub_publication.get('requireProjectPermission', true if _pub_visibility == 'private' else false)) %}
 {% set _pub_require_auth = true if _pub_visibility == 'private' or _pub_require_auth_raw in _pub_truthy else false %}
 {% set _pub_require_permission = true if _pub_visibility == 'private' or _pub_require_permission_raw in _pub_truthy else false %}
 
-{% set _pub_has_effective = true if _pub_effective_project or _pub_effective_map or _pub_effective_editor or _pub_effective_cad2d or _pub_effective_lv or _pub_effective_versions else false %}
+{% set _pub_has_effective = true if _pub_effective_project or _pub_effective_map or _pub_effective_editor or _pub_effective_cad2d or _pub_effective_lv or _pub_effective_files or _pub_effective_structural or _pub_effective_energy or _pub_effective_sound else false %}
 
 {% set _pub_items = [
   {'key': 'project', 'title': 'Projektinfo', 'text': 'Basisdaten, Beschreibung und freigegebene Projektinformationen.', 'selected': _pub_project_selected, 'effective': _pub_effective_project, 'available': true, 'reason': 'ready'},
@@ -292,7 +298,10 @@
   {'key': 'editor3d', 'title': '3D', 'text': 'Öffentlicher 3D-Zugriff ist ausschließlich schreibgeschützt möglich.', 'selected': _pub_editor_selected, 'effective': _pub_effective_editor, 'available': _pub_editor_available, 'reason': _pub_editor_unavailable_reason},
   {'key': 'cad2d', 'title': '2D', 'text': '2D-/CAD-Ansicht und freigegebene Planinformationen.', 'selected': _pub_cad2d_selected, 'effective': _pub_effective_cad2d, 'available': true, 'reason': 'ready'},
   {'key': 'lv', 'title': 'LV', 'text': 'Freigegebene Leistungsverzeichnis- oder Auswertungsansicht.', 'selected': _pub_lv_selected, 'effective': _pub_effective_lv, 'available': true, 'reason': 'ready'},
-  {'key': 'versions', 'title': 'Versionen', 'text': 'Freigegebene Projektstände und sichtbare Versionsinformationen.', 'selected': _pub_versions_selected, 'effective': _pub_effective_versions, 'available': true, 'reason': 'ready'}
+  {'key': 'files', 'title': 'Dateien', 'text': 'Freigegebene Projektdateien in schreibgeschützter Ansicht.', 'selected': _pub_files_selected, 'effective': _pub_effective_files, 'available': true, 'reason': 'ready'},
+  {'key': 'structural_calculation', 'title': 'Tragwerksberechnung', 'text': 'Freigegebene Tragwerksberechnungen und Ergebnisse.', 'selected': _pub_structural_selected, 'effective': _pub_effective_structural, 'available': true, 'reason': 'ready'},
+  {'key': 'energy_calculation', 'title': 'Energieberechnung', 'text': 'Freigegebene Energieberechnungen und Ergebnisse.', 'selected': _pub_energy_selected, 'effective': _pub_effective_energy, 'available': true, 'reason': 'ready'},
+  {'key': 'sound_protection_calculation', 'title': 'Schallschutzberechnung', 'text': 'Freigegebene Schallschutzberechnungen und Ergebnisse.', 'selected': _pub_sound_selected, 'effective': _pub_effective_sound, 'available': true, 'reason': 'ready'}
 ] %}
 
 {# ------------------------------------------------------------------------- #}
@@ -478,7 +487,10 @@
         'editor3d': _pub_editor_selected,
         'cad2d': _pub_cad2d_selected,
         'lv': _pub_lv_selected,
-        'versions': _pub_versions_selected
+        'files': _pub_files_selected,
+        'structural_calculation': _pub_structural_selected,
+        'energy_calculation': _pub_energy_selected,
+        'sound_protection_calculation': _pub_sound_selected
       },
       'effective_published_workspaces': {
         'project': _pub_effective_project,
@@ -486,7 +498,10 @@
         'editor3d': _pub_effective_editor,
         'cad2d': _pub_effective_cad2d,
         'lv': _pub_effective_lv,
-        'versions': _pub_effective_versions
+        'files': _pub_effective_files,
+        'structural_calculation': _pub_effective_structural,
+        'energy_calculation': _pub_effective_energy,
+        'sound_protection_calculation': _pub_effective_sound
       },
       'require_auth': _pub_require_auth,
       'require_project_permission': _pub_require_permission

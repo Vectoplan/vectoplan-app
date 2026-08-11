@@ -2411,7 +2411,10 @@ def _base_embed_params(
     if include_return_url and project_public_id:
         params["return_url"] = _absolute_app_url(_return_path(project_public_id), request_obj, prefer_request_host)
 
-    if workspace == WORKSPACE_MAP:
+    # The Editor's internal project map is the same geospatial workspace as
+    # the standalone Map tab.  Carry the WGS84 start view into both embeds so
+    # the Editor never falls back to OpenLayer's generic default coordinate.
+    if workspace in {WORKSPACE_MAP, WORKSPACE_EDITOR3D}:
         params.update(_map_project_view_params(project, project_payload))
 
     app_public_url = _app_public_base_url(request_obj, prefer_request_host)

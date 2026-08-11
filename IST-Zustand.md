@@ -2,10 +2,33 @@
 
 # IST-Zustand – `vectoplan-app`
 
-Stand: 2026-07-19 (fortgeschrieben; Basisstand 2026-07-05)
-Status: Projektgeführte Portal-App mit zentraler vectoplan-auth-Anbindung, automatischer App→Chunk-Provisionierung, kanonischer App→Chunk-Access-Projektion, serviceauthentifizierter interner Kommunikation, Earth-Standardwelt mit kontrolliertem Flat-Fallback, strikt read-only Viewer-Rolle, getrenntem Init-/Runtime-Vertrag und erfolgreich repariertem `vectoplan-chunk`-Bootstrap-/Startup-Pfad
+Stand: 2026-08-10 (fortgeschrieben; Basisstand 2026-07-05)
+Status: Projektgeführte Portal-App mit zentraler vectoplan-auth-Anbindung, automatischer App→Chunk-Provisionierung, kanonischer App→Chunk-Access-Projektion, serviceauthentifizierter interner Kommunikation, projektgebundenen Dateien und Berechnungsreitern, synchronisiertem Map-/Editor-Grundstückskontext, Earth-Standardwelt mit kontrolliertem Flat-Fallback, strikt read-only Viewer-Rolle und getrenntem Init-/Runtime-Vertrag
 
 > Ursprünglich in drei Teile gegliedert; diese Datei enthält weiterhin alle bisherigen Teile und ist bis Abschnitt 62 fortgeschrieben.
+
+## Aktualisierung 2026-08-10
+
+- Die Seitenleiste verwendet `Dateien`, `Tragwerksberechnung`,
+  `Energieberechnung` und `Schallschutzberechnung`; die früheren sichtbaren
+  Reiter `Admin` und `Versionen` wurden entfernt.
+- Alle vier neuen Bereiche besitzen projektgebundene, direkt adressierbare
+  Workspace-Suffixe. `Dateien` öffnet `vectoplan-filecloud` nur mit der
+  öffentlichen Projekt-ID; Authentität und Projektzugriff werden dort erneut
+  fail-closed geprüft.
+- Veröffentlichbare Reiter sind `project`, `map`, `editor3d`, `cad2d`, `lv`,
+  `files`, `structural_calculation`, `energy_calculation` und
+  `sound_protection_calculation`. Administrative Reiter stehen nie öffentlich
+  zur Verfügung.
+- Filecloud-Viewer dürfen Dateien und Inhalte lesen, aber keine Ordner oder
+  Dateien anlegen, ändern, verschieben, kopieren, löschen oder annotieren.
+- Map und 3D-Editor verwenden denselben projektbezogenen Grundstückskontext;
+  die technische Raster-/WorldEdit-Dokumentation liegt unter
+  `../vectoplan-editor/docs/PARCEL_GRID_AND_WORLDEDIT.md`.
+
+Ältere Abschnitte in diesem fortgeschriebenen Dokument beschreiben teilweise
+historische Zwischenstände. Bei Widersprüchen gilt diese Aktualisierung zusammen
+mit dem aktuellen Code und den Service-READMEs.
 
 ---
 
