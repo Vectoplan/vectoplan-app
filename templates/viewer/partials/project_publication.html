@@ -345,11 +345,11 @@
 >
   <header class="vp-project-card__header">
     <div>
-      <h2 id="projectPublicationTitle" class="vp-project-card__title">Veröffentlichte Reiter</h2>
-      <p class="vp-project-card__text">Veröffentlichungseinstellungen sind nur für berechtigte Projektverwalter sichtbar.</p>
+      <h2 id="projectPublicationTitle" class="vp-project-card__title" data-i18n="vectoplan.server.app.viewer.partials.project_publication.h2.ver_ffentlichte_reiter.0943bf11">Veröffentlichte Reiter</h2>
+      <p class="vp-project-card__text" data-i18n="vectoplan.server.app.viewer.partials.project_publication.p.ver_ffentlichungseinstellungen_sind_nu.91a84a67">Veröffentlichungseinstellungen sind nur für berechtigte Projektverwalter sichtbar.</p>
     </div>
     <div class="vp-project-card__meta">
-      <span class="vp-project-chip vp-project-chip--muted">Geschützt</span>
+      <span class="vp-project-chip vp-project-chip--muted" data-i18n="vectoplan.server.app.viewer.partials.project_publication.span.gesch_tzt.220c00a8">Geschützt</span>
     </div>
   </header>
   <div class="vp-project-inline-note vp-project-inline-note--locked" role="status">
@@ -388,8 +388,8 @@
 >
   <header class="vp-project-card__header">
     <div>
-      <h2 id="projectPublicationTitle" class="vp-project-card__title">Veröffentlichte Reiter</h2>
-      <p class="vp-project-card__text">
+      <h2 id="projectPublicationTitle" class="vp-project-card__title" data-i18n="vectoplan.server.app.viewer.partials.project_publication.h2.ver_ffentlichte_reiter.31c1fea3">Veröffentlichte Reiter</h2>
+      <p class="vp-project-card__text" data-i18n="vectoplan.server.app.viewer.partials.project_publication.p.lege_fest_welche_workspace_reiter_ber_.2e160711">
         Lege fest, welche Workspace-Reiter über öffentliche oder nicht gelistete Projektlinks sichtbar sein dürfen.
       </p>
     </div>
@@ -429,17 +429,17 @@
           <span class="vp-project-toggle-card__title">{{ item.title }}</span>
           <span class="vp-project-toggle-card__text">{{ item.text }}</span>
           <span class="vp-project-toggle-card__meta">
-            {% if not item.available %}
+            {% if not item.available %}<span data-i18n="vectoplan.server.app.viewer.partials.project_publication.span.nicht_verf_gbar.7f991d42">
               Nicht verfügbar
-            {% elif item.effective %}
+            </span>{% elif item.effective %}<span data-i18n="vectoplan.server.app.viewer.partials.project_publication.span.effektiv_ver_ffentlicht.001900b9">
               Effektiv veröffentlicht
-            {% elif item.selected and _pub_visibility == 'private' %}
+            </span>{% elif item.selected and _pub_visibility == 'private' %}<span data-i18n="vectoplan.server.app.viewer.partials.project_publication.span.ausgew_hlt_aber_privat.dada0807">
               Ausgewählt, aber privat
-            {% elif item.selected %}
+            </span>{% elif item.selected %}<span data-i18n="vectoplan.server.app.viewer.partials.project_publication.span.ausgew_hlt.b67d3410">
               Ausgewählt
-            {% else %}
+            </span>{% else %}<span data-i18n="vectoplan.server.app.viewer.partials.project_publication.span.nicht_ver_ffentlicht.7f2efc1d">
               Nicht veröffentlicht
-            {% endif %}
+            </span>{% endif %}
           </span>
         </span>
       </label>
@@ -456,7 +456,7 @@
         {% if _pub_require_auth %}checked{% endif %}
         {% if not _pub_can_write or _pub_visibility == 'private' %}disabled{% endif %}
       >
-      <span>Login für veröffentlichte Reiter erforderlich</span>
+      <span data-i18n="vectoplan.server.app.viewer.partials.project_publication.span.login_f_r_ver_ffentlichte_reiter_erfor.7002e427">Login für veröffentlichte Reiter erforderlich</span>
     </label>
 
     <label class="vp-project-checkline">
@@ -468,11 +468,11 @@
         {% if _pub_require_permission %}checked{% endif %}
         {% if not _pub_can_write or _pub_visibility == 'private' %}disabled{% endif %}
       >
-      <span>Projektberechtigung zusätzlich erforderlich</span>
+      <span data-i18n="vectoplan.server.app.viewer.partials.project_publication.span.projektberechtigung_zus_tzlich_erforde.3e5a1524">Projektberechtigung zusätzlich erforderlich</span>
     </label>
 
     {% if _pub_visibility == 'private' %}
-      <p class="vp-project-help">Bei privaten Projekten bleiben Login und Projektberechtigung zwingend aktiv.</p>
+      <p class="vp-project-help" data-i18n="vectoplan.server.app.viewer.partials.project_publication.p.bei_privaten_projekten_bleiben_login_u.29e62256">Bei privaten Projekten bleiben Login und Projektberechtigung zwingend aktiv.</p>
     {% endif %}
   </div>
 
@@ -544,7 +544,7 @@
   </script>
 
   <noscript>
-    <p class="vp-project-help">JavaScript ist erforderlich, um Veröffentlichungseinstellungen zu speichern.</p>
+    <p class="vp-project-help" data-i18n="vectoplan.server.app.viewer.partials.project_publication.p.javascript_ist_erforderlich_um_ver_ffe.028cd997">JavaScript ist erforderlich, um Veröffentlichungseinstellungen zu speichern.</p>
   </noscript>
 </section>
 {% endif %}

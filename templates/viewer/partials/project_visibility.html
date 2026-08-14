@@ -260,8 +260,8 @@
 >
   <header class="vp-project-card__header">
     <div>
-      <h2 id="projectVisibilityTitle" class="vp-project-card__title">Sichtbarkeit</h2>
-      <p class="vp-project-card__text">
+      <h2 id="projectVisibilityTitle" class="vp-project-card__title" data-i18n="vectoplan.server.app.viewer.partials.project_visibility.h2.sichtbarkeit.d91e1b99">Sichtbarkeit</h2>
+      <p class="vp-project-card__text" data-i18n="vectoplan.server.app.viewer.partials.project_visibility.p.lege_fest_ob_das_projekt_privat_bleibt.b715f7f9">
         Lege fest, ob das Projekt privat bleibt, nur per Link erreichbar ist oder öffentlich sichtbar sein darf.
       </p>
     </div>
@@ -320,7 +320,7 @@
 
 
   <span class="vp-project-sr-only" data-project-visibility-current-label aria-live="polite">
-    {% if _visibility == 'public' %}Öffentlich{% elif _visibility == 'unlisted' %}Nicht gelistet{% else %}Privat{% endif %}
+    {% if _visibility == 'public' %}<span data-i18n="vectoplan.server.app.viewer.partials.project_visibility.span.ffentlich.956fe777">Öffentlich</span>{% elif _visibility == 'unlisted' %}<span data-i18n="vectoplan.server.app.viewer.partials.project_visibility.span.nicht_gelistet.537703d0">Nicht gelistet</span>{% else %}<span data-i18n="vectoplan.server.app.viewer.partials.project_visibility.span.privat.93b44242">Privat</span>{% endif %}
   </span>
 
   <script type="application/json" data-project-visibility-initial-json>
@@ -422,16 +422,16 @@
 
   <noscript>
     <div class="vp-project-field">
-      <label class="vp-project-label" for="projectVisibilityFallback">Sichtbarkeit</label>
+      <label class="vp-project-label" for="projectVisibilityFallback" data-i18n="vectoplan.server.app.viewer.partials.project_visibility.label.sichtbarkeit.5c460f76">Sichtbarkeit</label>
       <select
         id="projectVisibilityFallback"
         class="vp-project-select"
         name="visibility"
         {% if not _visibility_can_write %}disabled{% endif %}
       >
-        <option value="private" {% if _visibility == 'private' %}selected{% endif %}>Privat</option>
-        <option value="unlisted" {% if _visibility == 'unlisted' %}selected{% endif %}>Nicht gelistet</option>
-        <option value="public" {% if _visibility == 'public' %}selected{% endif %}>Öffentlich</option>
+        <option value="private" {% if _visibility == 'private' %}selected{% endif %} data-i18n="vectoplan.server.app.viewer.partials.project_visibility.option.privat.3c8c8c02">Privat</option>
+        <option value="unlisted" {% if _visibility == 'unlisted' %}selected{% endif %} data-i18n="vectoplan.server.app.viewer.partials.project_visibility.option.nicht_gelistet.1793f5e8">Nicht gelistet</option>
+        <option value="public" {% if _visibility == 'public' %}selected{% endif %} data-i18n="vectoplan.server.app.viewer.partials.project_visibility.option.ffentlich.db9d21ec">Öffentlich</option>
       </select>
     </div>
   </noscript>

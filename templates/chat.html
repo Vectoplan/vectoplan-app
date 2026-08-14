@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Chat Test</title>
+  <title data-i18n="vectoplan.server.app.chat.title.chat_test.6df6ce29">Chat Test</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}">
   <script>
   window.APP_CONFIG = {
@@ -24,11 +24,11 @@
 
       <form id="composer" class="composer" autocomplete="off">
         <div class="bar">
-          <button type="button" id="attachBtn" class="icon" title="Datei anhängen">📎</button>
-          <textarea id="message" placeholder="Nachricht eingeben…"></textarea>
-          <button id="sendBtn" type="submit" class="send" title="Senden">➤</button>
+          <button type="button" id="attachBtn" class="icon" title="Datei anhängen" data-i18n-title="server.app.chat.button_title.datei_anh_ngen.ca26c97d">📎</button>
+          <textarea id="message" placeholder="Nachricht eingeben…" data-i18n-placeholder="server.app.chat.textarea_placeholder.nachricht_eingeben.e3869e88"></textarea>
+          <button id="sendBtn" type="submit" class="send" title="Senden" data-i18n-title="server.app.chat.button_title.senden.0a7778f9">➤</button>
         </div>
-        <div class="hint">Vectoplan kann Fehler machen. Überprüfe wichtige Informationen.</div>
+        <div class="hint" data-i18n="vectoplan.server.app.chat.div.vectoplan_kann_fehler_machen_berpr_fe_.c08b7eac">Vectoplan kann Fehler machen. Überprüfe wichtige Informationen.</div>
         <input id="fileInput" type="file" multiple class="hidden"
                accept="image/*,video/*,.pdf,.csv,.txt,.ifc,.stl,.obj,.gltf,.glb">
       </form>

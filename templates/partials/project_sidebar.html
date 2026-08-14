@@ -142,7 +142,7 @@
     --vp-project-sidebar-max-width: {{ _max_width }}px;
     --vp-project-sidebar-collapsed-width: {{ _collapsed_width }}px;
   "
->
+ data-i18n-aria-label="server.app.partials.project_sidebar.aside_aria-label.projekt_navigation.47f9db68">
   <script>
     (function restoreProjectSidebarBeforePaint(sidebar) {
       try {
@@ -178,7 +178,7 @@
     data-project-sidebar-panel
   >
     <header class="vp-project-sidebar__header" data-project-sidebar-header>
-      <span class="vp-project-sidebar__heading" data-project-sidebar-expanded-only>
+      <span class="vp-project-sidebar__heading" data-project-sidebar-expanded-only data-i18n="vectoplan.server.app.partials.project_sidebar.span.projekte.e3fba0c2">
         Projekte
       </span>
 
@@ -206,7 +206,7 @@
       class="vp-project-sidebar__actions"
       data-project-sidebar-expanded-only
       aria-label="Projektaktionen"
-    >
+     data-i18n-aria-label="server.app.partials.project_sidebar.section_aria-label.projektaktionen.97cf0889">
       <a
         class="vp-project-sidebar__create"
         href="{{ _create_project_url|e }}"
@@ -214,9 +214,9 @@
         data-project-sidebar-create-url="{{ _create_project_url|e }}"
         title="Neues Projekt erstellen"
         aria-label="Neues Projekt erstellen"
-      >
+       data-i18n-aria-label="server.app.partials.project_sidebar.a_aria-label.neues_projekt_erstellen.b979f5dc" data-i18n-title="server.app.partials.project_sidebar.a_title.neues_projekt_erstellen.c023a979">
         <span class="vp-project-sidebar__create-icon" aria-hidden="true">+</span>
-        <span class="vp-project-sidebar__create-text">Neues Projekt</span>
+        <span class="vp-project-sidebar__create-text" data-i18n="vectoplan.server.app.partials.project_sidebar.span.neues_projekt.fe9981a3">Neues Projekt</span>
       </a>
 
     </section>
@@ -234,10 +234,10 @@
       role="alert"
       hidden
     >
-      <span class="vp-project-sidebar__error-title">
+      <span class="vp-project-sidebar__error-title" data-i18n="vectoplan.server.app.partials.project_sidebar.span.projektliste_konnte_nicht_geladen_werd.54644f7a">
         Projektliste konnte nicht geladen werden.
       </span>
-      <span class="vp-project-sidebar__error-message" data-project-sidebar-error-message>
+      <span class="vp-project-sidebar__error-message" data-project-sidebar-error-message data-i18n="vectoplan.server.app.partials.project_sidebar.span.die_navigation_bleibt_mit_dem_aktuelle.0bd958b1">
         Die Navigation bleibt mit dem aktuellen Projekt nutzbar.
       </span>
     </div>
@@ -246,7 +246,7 @@
       class="vp-project-sidebar__nav"
       data-project-sidebar-nav
       aria-label="Projekte"
-    >
+     data-i18n-aria-label="server.app.partials.project_sidebar.nav_aria-label.projekte.00bf9b1d">
       <div
         class="vp-project-sidebar__list"
         role="list"
@@ -407,10 +407,10 @@
         data-project-sidebar-empty
         {% if _has_project_items or _current_project_id or _current_chat_id %}hidden{% endif %}
       >
-        <span class="vp-project-sidebar__empty-title">
+        <span class="vp-project-sidebar__empty-title" data-i18n="vectoplan.server.app.partials.project_sidebar.span.noch_keine_projekte_sichtbar.7f7c7ed0">
           Noch keine Projekte sichtbar.
         </span>
-        <span class="vp-project-sidebar__empty-text">
+        <span class="vp-project-sidebar__empty-text" data-i18n="vectoplan.server.app.partials.project_sidebar.span.erstelle_ein_projekt_um_map_3d_2d_und_.2061cb30">
           Erstelle ein Projekt, um Map, 3D, 2D und LV zu aktivieren.
         </span>
       </div>
@@ -420,10 +420,10 @@
         data-project-sidebar-no-results
         hidden
       >
-        <span class="vp-project-sidebar__no-results-title">
+        <span class="vp-project-sidebar__no-results-title" data-i18n="vectoplan.server.app.partials.project_sidebar.span.keine_treffer.d8c17c46">
           Keine Treffer.
         </span>
-        <span class="vp-project-sidebar__no-results-text">
+        <span class="vp-project-sidebar__no-results-text" data-i18n="vectoplan.server.app.partials.project_sidebar.span.suche_anpassen_oder_projektliste_aktua.42c671f1">
           Suche anpassen oder Projektliste aktualisieren.
         </span>
       </div>
@@ -433,10 +433,10 @@
       class="vp-project-sidebar__footer"
       data-project-sidebar-footer
     >
-      <nav class="vp-project-sidebar__legal" aria-label="Rechtliche Informationen">
-        <a href="/imprint" target="_top" data-platform-path="/imprint">Impressum</a>
+      <nav class="vp-project-sidebar__legal" aria-label="Rechtliche Informationen" data-i18n-aria-label="server.app.partials.project_sidebar.nav_aria-label.rechtliche_informationen.5d1d0c51">
+        <a href="/imprint" target="_top" data-platform-path="/imprint" data-i18n="vectoplan.server.app.partials.project_sidebar.a.impressum.dcb1dd3a">Impressum</a>
         <span aria-hidden="true">·</span>
-        <a href="/privacy" target="_top" data-platform-path="/privacy">Datenschutz</a>
+        <a href="/privacy" target="_top" data-platform-path="/privacy" data-i18n="vectoplan.server.app.partials.project_sidebar.a.datenschutz.dd6eb97d">Datenschutz</a>
       </nav>
     </footer>
   </div>
@@ -448,7 +448,7 @@
     aria-orientation="vertical"
     aria-label="Projektleiste vergrößern oder verkleinern"
     tabindex="0"
-  ></div>
+   data-i18n-aria-label="server.app.partials.project_sidebar.div_aria-label.projektleiste_vergr_ern_oder_verkleine.cc40a0fe"></div>
 
   <template
     id="vp-project-sidebar-item-template"
@@ -473,7 +473,7 @@
         class="vp-project-sidebar__item-avatar"
         aria-hidden="true"
         data-project-sidebar-item-initial
-      >
+       data-i18n="vectoplan.server.app.partials.project_sidebar.span.p.f2da317c">
         P
       </span>
 
@@ -481,13 +481,13 @@
         <span
           class="vp-project-sidebar__item-title"
           data-project-sidebar-item-title
-        >
+         data-i18n="vectoplan.server.app.partials.project_sidebar.span.projekt.793cb9c2">
           Projekt
         </span>
         <span
           class="vp-project-sidebar__item-subtitle"
           data-project-sidebar-item-subtitle
-        >
+         data-i18n="vectoplan.server.app.partials.project_sidebar.span.workspace.5e8ff28b">
           Workspace
         </span>
       </span>

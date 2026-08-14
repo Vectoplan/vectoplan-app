@@ -766,7 +766,7 @@
 </head>
 
 <body{% if _viewer_landing %} class="vp-project-page--viewer-landing"{% endif %}>
-  <noscript>JavaScript ist erforderlich, um Projekte zu speichern.</noscript>
+  <noscript data-i18n="vectoplan.server.app.viewer.project.noscript.javascript_ist_erforderlich_um_projekt.5b6b60eb">JavaScript ist erforderlich, um Projekte zu speichern.</noscript>
 
   <main
     class="vp-project-workspace{% if _read_only %} vp-project-workspace--readonly{% endif %}{% if _public_viewer %} vp-project-workspace--public{% endif %}{% if _demo_mode %} vp-project-workspace--demo{% endif %}{% if _auth_unavailable or _user_blocked or _access_blocked or _identity_blocked %} vp-project-workspace--blocked{% endif %}{% if _viewer_landing %} vp-project-workspace--viewer-landing{% endif %}"
@@ -800,100 +800,100 @@
     <section class="vp-project-hero" aria-labelledby="projectWorkspaceTitle">
       <div class="vp-project-hero__content">
         <div class="vp-project-hero__eyebrow">
-          {% if _auth_unavailable %}
+          {% if _auth_unavailable %}<span data-i18n="vectoplan.server.app.viewer.project.span.auth_service_nicht_erreichbar.5aee6560">
             Auth-Service nicht erreichbar
-          {% elif _user_blocked or _access_blocked or _identity_blocked %}
+          </span>{% elif _user_blocked or _access_blocked or _identity_blocked %}<span data-i18n="vectoplan.server.app.viewer.project.span.zugriff_gesperrt.b4d567ee">
             Zugriff gesperrt
-          {% elif _public_viewer %}
+          </span>{% elif _public_viewer %}<span data-i18n="vectoplan.server.app.viewer.project.span.ffentliche_ansicht.8b96110f">
             Öffentliche Ansicht
-          {% elif _demo_mode %}
+          </span>{% elif _demo_mode %}<span data-i18n="vectoplan.server.app.viewer.project.span.tempor_re_demo_projektverwaltung.af303874">
             Temporäre Demo-Projektverwaltung
-          {% else %}
-            Projekt{% if _project_role %} · {{ _project_role|capitalize }}{% endif %}
+          </span>{% else %}<span data-i18n="vectoplan.server.app.viewer.project.span.projekt.c12b0515">
+            Projekt</span>{% if _project_role %} · {{ _project_role|capitalize }}{% endif %}
           {% endif %}
         </div>
 
         <h1 id="projectWorkspaceTitle" class="vp-project-hero__title">
-          {% if _is_new %}
+          {% if _is_new %}<span data-i18n="vectoplan.server.app.viewer.project.span.neues_projekt_anlegen.29dac097">
             Neues Projekt anlegen
-          {% else %}
+          </span>{% else %}
             {{ _project_display_name|e }}
           {% endif %}
         </h1>
 
         <p class="vp-project-hero__text">
-          {% if _auth_unavailable %}
+          {% if _auth_unavailable %}<span data-i18n="vectoplan.server.app.viewer.project.span.der_auth_service_ist_aktuell_nicht_err.cc255a5f">
             Der Auth-Service ist aktuell nicht erreichbar. Projektaktionen bleiben deaktiviert.
-          {% elif _identity_blocked %}
+          </span>{% elif _identity_blocked %}<span data-i18n="vectoplan.server.app.viewer.project.span.die_lokale_benutzerverkn_pfung_stimmt_.4c77482c">
             Die lokale Benutzerverknüpfung stimmt nicht mit der kanonischen Auth-Identität überein. Projektaktionen bleiben deaktiviert.
-          {% elif _user_blocked %}
+          </span>{% elif _user_blocked %}<span data-i18n="vectoplan.server.app.viewer.project.span.dein_benutzer_oder_accountstatus_verhi.08fbc77e">
             Dein Benutzer- oder Accountstatus verhindert den Zugriff auf Projektaktionen.
-          {% elif _access_blocked %}
+          </span>{% elif _access_blocked %}<span data-i18n="vectoplan.server.app.viewer.project.span.der_zugriff_auf_diesen_projekt_workspa.d947038e">
             Der Zugriff auf diesen Projekt-Workspace ist aktuell blockiert.
-          {% elif _public_viewer %}
+          </span>{% elif _public_viewer %}<span data-i18n="vectoplan.server.app.viewer.project.span.dieses_projekt_wurde_ffentlich_freigeg.901ac86f">
             Dieses Projekt wurde öffentlich freigegeben. Die Ansicht ist schreibgeschützt.
-          {% elif _demo_mode %}
+          </span>{% elif _demo_mode %}<span data-i18n="vectoplan.server.app.viewer.project.span.du_arbeitest_tempor_r_im_demo_modus_nd.fbef52d0">
             Du arbeitest temporär im Demo-Modus. Änderungen werden nicht dauerhaft gespeichert.
-          {% else %}
+          </span>{% else %}<span data-i18n="vectoplan.server.app.viewer.project.span.verwalte_basisdaten_sichtbarkeit_ver_f.d1d09b20">
             Verwalte Basisdaten, Sichtbarkeit, Veröffentlichung und Teamrechte dieses Projekts.
-          {% endif %}
+          </span>{% endif %}
         </p>
       </div>
 
       <div class="vp-project-hero__status">
         {% if _auth_unavailable %}
-          <span class="vp-project-status vp-project-status--error">Auth 503</span>
+          <span class="vp-project-status vp-project-status--error" data-i18n="vectoplan.server.app.viewer.project.span.auth_503.0da54fb2">Auth 503</span>
         {% elif _user_blocked or _access_blocked or _identity_blocked %}
-          <span class="vp-project-status vp-project-status--error">Gesperrt</span>
+          <span class="vp-project-status vp-project-status--error" data-i18n="vectoplan.server.app.viewer.project.span.gesperrt.3fbf236d">Gesperrt</span>
         {% elif _public_viewer or _project_role == 'viewer' %}
-          <span class="vp-project-status vp-project-status--readonly">Read-only</span>
+          <span class="vp-project-status vp-project-status--readonly" data-i18n="vectoplan.server.app.viewer.project.span.read_only.8cea45eb">Read-only</span>
         {% elif _demo_mode %}
-          <span class="vp-project-status vp-project-status--demo">Demo</span>
+          <span class="vp-project-status vp-project-status--demo" data-i18n="vectoplan.server.app.viewer.project.span.demo.514456ce">Demo</span>
         {% elif _is_configured %}
-          <span class="vp-project-status vp-project-status--configured">Konfiguriert</span>
+          <span class="vp-project-status vp-project-status--configured" data-i18n="vectoplan.server.app.viewer.project.span.konfiguriert.66bcb004">Konfiguriert</span>
         {% else %}
-          <span class="vp-project-status vp-project-status--draft">Entwurf</span>
+          <span class="vp-project-status vp-project-status--draft" data-i18n="vectoplan.server.app.viewer.project.span.entwurf.b41ed1a8">Entwurf</span>
         {% endif %}
       </div>
     </section>
 
     {% if _auth_unavailable %}
       <section class="vp-project-alert vp-project-alert--error" role="alert" aria-live="assertive" data-project-auth-unavailable-alert>
-        <strong>Auth-Service nicht erreichbar:</strong>
+        <strong data-i18n="vectoplan.server.app.viewer.project.strong.auth_service_nicht_erreichbar.68f6228d">Auth-Service nicht erreichbar:</strong><span data-i18n="vectoplan.server.app.viewer.project.span.die_projekt_shell_wurde_geladen_aber_p.f10c7a30">
         Die Projekt-Shell wurde geladen, aber persistente Projektaktionen sind fail-closed deaktiviert.
-      </section>
+      </span></section>
     {% elif _identity_blocked %}
       <section class="vp-project-alert vp-project-alert--error" role="alert" aria-live="assertive" data-project-identity-alert>
-        <strong>Identitätskonflikt:</strong>
+        <strong data-i18n="vectoplan.server.app.viewer.project.strong.identit_tskonflikt.7ee1705a">Identitätskonflikt:</strong><span data-i18n="vectoplan.server.app.viewer.project.span.die_lokale_appuser_verkn_pfung_stimmt_.fe344e32">
         Die lokale AppUser-Verknüpfung stimmt nicht mit der aktuellen Auth-Identität überein. Bitte die Benutzerverknüpfung reparieren.
-      </section>
+      </span></section>
     {% elif _user_blocked %}
       <section class="vp-project-alert vp-project-alert--error" role="alert" aria-live="assertive" data-project-user-blocked-alert>
-        <strong>Zugriff gesperrt:</strong>
+        <strong data-i18n="vectoplan.server.app.viewer.project.strong.zugriff_gesperrt.d0d9fafb">Zugriff gesperrt:</strong><span data-i18n="vectoplan.server.app.viewer.project.span.dein_benutzer_oder_accountstatus_verhi.60bf6654">
         Dein Benutzer- oder Accountstatus verhindert Projektaktionen.
-      </section>
+      </span></section>
     {% elif _access_blocked %}
       <section class="vp-project-alert vp-project-alert--error" role="alert" aria-live="assertive" data-project-access-blocked-alert>
-        <strong>Workspace blockiert:</strong>
+        <strong data-i18n="vectoplan.server.app.viewer.project.strong.workspace_blockiert.9556fd9e">Workspace blockiert:</strong><span data-i18n="vectoplan.server.app.viewer.project.span.der_zugriff_auf_diesen_projekt_workspa.595cd7db">
         Der Zugriff auf diesen Projekt-Workspace ist aktuell nicht erlaubt.
-      </section>
+      </span></section>
     {% elif _public_viewer %}
       <section class="vp-project-alert vp-project-alert--info" role="status" aria-live="polite" data-project-public-alert>
-        <strong>Öffentliche Projektansicht:</strong>
+        <strong data-i18n="vectoplan.server.app.viewer.project.strong.ffentliche_projektansicht.a61537bc">Öffentliche Projektansicht:</strong><span data-i18n="vectoplan.server.app.viewer.project.span.bearbeitung_commands_materialisierung_.6598688b">
         Bearbeitung, Commands, Materialisierung, Team, Einladungen, Veröffentlichung und Adminbereiche sind nicht öffentlich verfügbar.
-      </section>
+      </span></section>
     {% elif _project_role == 'viewer' %}
       <section class="vp-project-alert vp-project-alert--info" role="status" aria-live="polite" data-project-viewer-alert>
-        <strong>Leserolle:</strong>
+        <strong data-i18n="vectoplan.server.app.viewer.project.strong.leserolle.ac45cd5a">Leserolle:</strong><span data-i18n="vectoplan.server.app.viewer.project.span.du_kannst_projektinformationen_und_fre.f18e25db">
         Du kannst Projektinformationen und freigegebene Workspaces ansehen, aber keine Änderungen oder 3D-Commands ausführen.
-      </section>
+      </span></section>
     {% elif _demo_mode %}
       <section class="vp-project-alert vp-project-alert--demo" role="status" aria-live="polite" data-project-demo-alert>
-        <strong>Demo-Modus:</strong>
+        <strong data-i18n="vectoplan.server.app.viewer.project.strong.demo_modus.324e1242">Demo-Modus:</strong><span data-i18n="vectoplan.server.app.viewer.project.span.nderungen_gelten_nur_tempor_r_und_werd.7ea7d25d">
         Änderungen gelten nur temporär und werden nach Ablauf der Demo-Sitzung verworfen.
-      </section>
+      </span></section>
     {% elif not _persistent %}
-      <section class="vp-project-alert vp-project-alert--warning" role="status" aria-live="polite" data-project-auth-alert>
+      <section class="vp-project-alert vp-project-alert--warning" role="status" aria-live="polite" data-project-auth-alert data-i18n="vectoplan.server.app.viewer.project.section.dein_login_besitzt_noch_keine_g_ltige_.56fda28b">
         Dein Login besitzt noch keine gültige lokale AppUser-Verknüpfung. Persistente Projektaktionen sind deaktiviert.
       </section>
     {% endif %}
@@ -902,7 +902,7 @@
     {% if _viewer_landing %}
       {% set _has_viewer_workspace_link = (_published_workspaces.get('map') and _map_path) or (_published_workspaces.get('editor3d') and _editor3d_path) or (_published_workspaces.get('cad2d') and _cad2d_path) or (_published_workspaces.get('lv') and _lv_path) or (_published_workspaces.get('files') and _files_path) or (_published_workspaces.get('structural_calculation') and _structural_path) or (_published_workspaces.get('energy_calculation') and _energy_path) or (_published_workspaces.get('sound_protection_calculation') and _sound_path) %}
       {% set _map_preview_path = _map_path ~ ('&' if '?' in _map_path else '?') ~ 'mode=preview&initial_panel=none' if _map_path else '' %}
-      <section class="vp-project-viewer-landing" aria-label="Freigegebene Projektansicht" data-project-published-workspaces>
+      <section class="vp-project-viewer-landing" aria-label="Freigegebene Projektansicht" data-project-published-workspaces data-i18n-aria-label="server.app.viewer.project.section_aria-label.freigegebene_projektansicht.e4c402e5">
         {% if _published_workspaces.get('map') and _map_path %}
           <iframe
             class="vp-project-map-preview__frame"
@@ -913,85 +913,85 @@
             scrolling="no"
           ></iframe>
         {% else %}
-          <div class="vp-project-viewer-landing__map-empty">
-            F&uuml;r dieses Projekt wurde noch keine Kartenansicht ver&ouml;ffentlicht.
-          </div>
+          <div class="vp-project-viewer-landing__map-empty"><span data-i18n="vectoplan.server.app.viewer.project.span.f.888a3670">
+            F</span>&uuml;<span data-i18n="vectoplan.server.app.viewer.project.span.r_dieses_projekt_wurde_noch_keine_kart.4f936082">r dieses Projekt wurde noch keine Kartenansicht ver</span>&ouml;<span data-i18n="vectoplan.server.app.viewer.project.span.ffentlicht.cf7a9a95">ffentlicht.
+          </span></div>
         {% endif %}
 
         {% if _has_viewer_workspace_link %}
 
-          <nav class="vp-project-workspace-links" aria-label="Ver&ouml;ffentlichte Arbeitsbereiche">
+          <nav class="vp-project-workspace-links" aria-label="Ver&ouml;ffentlichte Arbeitsbereiche" data-i18n-aria-label="server.app.viewer.project.nav_aria-label.ver_ffentlichte_arbeitsbereiche.bb48ab54">
             {% if _published_workspaces.get('map') and _map_path %}
               <a class="vp-project-workspace-link" href="{{ _map_path|e }}" data-published-workspace="map">
-                <span class="vp-project-workspace-link__code" aria-hidden="true">MAP</span>
-                <span><strong>Kartenansicht</strong><small>Geodaten und Projektlage ansehen</small></span>
+                <span class="vp-project-workspace-link__code" aria-hidden="true" data-i18n="vectoplan.server.app.viewer.project.span.map.96e9a6b4">MAP</span>
+                <span><strong data-i18n="vectoplan.server.app.viewer.project.strong.kartenansicht.979a1518">Kartenansicht</strong><small data-i18n="vectoplan.server.app.viewer.project.small.geodaten_und_projektlage_ansehen.5eee0844">Geodaten und Projektlage ansehen</small></span>
                 <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
               </a>
             {% endif %}
 
             {% if _published_workspaces.get('editor3d') and _editor3d_path and _chunk_editor_ready %}
               <a class="vp-project-workspace-link" href="{{ _editor3d_path|e }}" data-published-workspace="editor3d">
-                <span class="vp-project-workspace-link__code" aria-hidden="true">3D</span>
-                <span><strong>3D-Modell</strong><small>Ver&ouml;ffentlichtes Modell schreibgesch&uuml;tzt &ouml;ffnen</small></span>
+                <span class="vp-project-workspace-link__code" aria-hidden="true" data-i18n="vectoplan.server.app.viewer.project.span.3d.98e3b15f">3D</span>
+                <span><strong data-i18n="vectoplan.server.app.viewer.project.strong.3d_modell.785330d7">3D-Modell</strong><small><span data-i18n="vectoplan.server.app.viewer.project.span.ver.dbc266fe">Ver</span>&ouml;<span data-i18n="vectoplan.server.app.viewer.project.span.ffentlichtes_modell_schreibgesch.575cd895">ffentlichtes Modell schreibgesch</span>&uuml;<span data-i18n="vectoplan.server.app.viewer.project.span.tzt.512c1294">tzt </span>&ouml;<span data-i18n="vectoplan.server.app.viewer.project.span.ffnen.2ab5519e">ffnen</span></small></span>
                 <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
               </a>
             {% elif _published_workspaces.get('editor3d') and _editor3d_path %}
               <span class="vp-project-workspace-link is-disabled" aria-disabled="true">
-                <span class="vp-project-workspace-link__code" aria-hidden="true">3D</span>
-                <span><strong>3D-Modell</strong><small>Die Projektwelt wird noch vorbereitet</small></span>
+                <span class="vp-project-workspace-link__code" aria-hidden="true" data-i18n="vectoplan.server.app.viewer.project.span.3d.b941d94e">3D</span>
+                <span><strong data-i18n="vectoplan.server.app.viewer.project.strong.3d_modell.4d7c4998">3D-Modell</strong><small data-i18n="vectoplan.server.app.viewer.project.small.die_projektwelt_wird_noch_vorbereitet.50824207">Die Projektwelt wird noch vorbereitet</small></span>
               </span>
             {% endif %}
 
             {% if _published_workspaces.get('cad2d') and _cad2d_path %}
               <a class="vp-project-workspace-link" href="{{ _cad2d_path|e }}" data-published-workspace="cad2d">
-                <span class="vp-project-workspace-link__code" aria-hidden="true">2D</span>
-                <span><strong>2D-CAD</strong><small>Ver&ouml;ffentlichte Planansicht &ouml;ffnen</small></span>
+                <span class="vp-project-workspace-link__code" aria-hidden="true" data-i18n="vectoplan.server.app.viewer.project.span.2d.e84ce0cf">2D</span>
+                <span><strong data-i18n="vectoplan.server.app.viewer.project.strong.2d_cad.cec1238b">2D-CAD</strong><small><span data-i18n="vectoplan.server.app.viewer.project.span.ver.0ef92737">Ver</span>&ouml;<span data-i18n="vectoplan.server.app.viewer.project.span.ffentlichte_planansicht.875b9b68">ffentlichte Planansicht </span>&ouml;<span data-i18n="vectoplan.server.app.viewer.project.span.ffnen.905f24cb">ffnen</span></small></span>
                 <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
               </a>
             {% endif %}
 
             {% if _published_workspaces.get('lv') and _lv_path %}
               <a class="vp-project-workspace-link" href="{{ _lv_path|e }}" data-published-workspace="lv">
-                <span class="vp-project-workspace-link__code" aria-hidden="true">LV</span>
-                <span><strong>Leistungsverzeichnis</strong><small>Freigegebene Positionen ansehen</small></span>
+                <span class="vp-project-workspace-link__code" aria-hidden="true" data-i18n="vectoplan.server.app.viewer.project.span.lv.a646de7b">LV</span>
+                <span><strong data-i18n="vectoplan.server.app.viewer.project.strong.leistungsverzeichnis.8306c730">Leistungsverzeichnis</strong><small data-i18n="vectoplan.server.app.viewer.project.small.freigegebene_positionen_ansehen.95515cb2">Freigegebene Positionen ansehen</small></span>
                 <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
               </a>
             {% endif %}
 
             {% if _published_workspaces.get('files') and _files_path %}
               <a class="vp-project-workspace-link" href="{{ _files_path|e }}" data-published-workspace="files">
-                <span class="vp-project-workspace-link__code" aria-hidden="true">DOC</span>
-                <span><strong>Dateien</strong><small>Freigegebene Projektdateien ansehen</small></span>
+                <span class="vp-project-workspace-link__code" aria-hidden="true" data-i18n="vectoplan.server.app.viewer.project.span.doc.43b8dd31">DOC</span>
+                <span><strong data-i18n="vectoplan.server.app.viewer.project.strong.dateien.9dc57c16">Dateien</strong><small data-i18n="vectoplan.server.app.viewer.project.small.freigegebene_projektdateien_ansehen.e2e27fc7">Freigegebene Projektdateien ansehen</small></span>
                 <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
               </a>
             {% endif %}
 
             {% if _published_workspaces.get('structural_calculation') and _structural_path %}
               <a class="vp-project-workspace-link" href="{{ _structural_path|e }}" data-published-workspace="structural_calculation">
-                <span class="vp-project-workspace-link__code" aria-hidden="true">TW</span>
-                <span><strong>Tragwerksberechnung</strong><small>Freigegebene Berechnungen und Ergebnisse ansehen</small></span>
+                <span class="vp-project-workspace-link__code" aria-hidden="true" data-i18n="vectoplan.server.app.viewer.project.span.tw.ffd4bcf8">TW</span>
+                <span><strong data-i18n="vectoplan.server.app.viewer.project.strong.tragwerksberechnung.9e242154">Tragwerksberechnung</strong><small data-i18n="vectoplan.server.app.viewer.project.small.freigegebene_berechnungen_und_ergebnis.e5e06a1d">Freigegebene Berechnungen und Ergebnisse ansehen</small></span>
                 <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
               </a>
             {% endif %}
 
             {% if _published_workspaces.get('energy_calculation') and _energy_path %}
               <a class="vp-project-workspace-link" href="{{ _energy_path|e }}" data-published-workspace="energy_calculation">
-                <span class="vp-project-workspace-link__code" aria-hidden="true">EN</span>
-                <span><strong>Energieberechnung</strong><small>Freigegebene Berechnungen und Ergebnisse ansehen</small></span>
+                <span class="vp-project-workspace-link__code" aria-hidden="true" data-i18n="vectoplan.server.app.viewer.project.span.en.c77c8d30">EN</span>
+                <span><strong data-i18n="vectoplan.server.app.viewer.project.strong.energieberechnung.a358353b">Energieberechnung</strong><small data-i18n="vectoplan.server.app.viewer.project.small.freigegebene_berechnungen_und_ergebnis.bcbdd871">Freigegebene Berechnungen und Ergebnisse ansehen</small></span>
                 <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
               </a>
             {% endif %}
 
             {% if _published_workspaces.get('sound_protection_calculation') and _sound_path %}
               <a class="vp-project-workspace-link" href="{{ _sound_path|e }}" data-published-workspace="sound_protection_calculation">
-                <span class="vp-project-workspace-link__code" aria-hidden="true">SC</span>
-                <span><strong>Schallschutzberechnung</strong><small>Freigegebene Berechnungen und Ergebnisse ansehen</small></span>
+                <span class="vp-project-workspace-link__code" aria-hidden="true" data-i18n="vectoplan.server.app.viewer.project.span.sc.c8d25b20">SC</span>
+                <span><strong data-i18n="vectoplan.server.app.viewer.project.strong.schallschutzberechnung.a56118c1">Schallschutzberechnung</strong><small data-i18n="vectoplan.server.app.viewer.project.small.freigegebene_berechnungen_und_ergebnis.2ee7b5a8">Freigegebene Berechnungen und Ergebnisse ansehen</small></span>
                 <span class="vp-project-workspace-link__arrow" aria-hidden="true">&rarr;</span>
               </a>
             {% endif %}
           </nav>
         {% else %}
-          <p class="vp-project-empty-state">F&uuml;r dieses Projekt wurden noch keine zus&auml;tzlichen Arbeitsbereiche ver&ouml;ffentlicht.</p>
+          <p class="vp-project-empty-state"><span data-i18n="vectoplan.server.app.viewer.project.span.f.8e04e241">F</span>&uuml;<span data-i18n="vectoplan.server.app.viewer.project.span.r_dieses_projekt_wurden_noch_keine_zus.35923d47">r dieses Projekt wurden noch keine zus</span>&auml;<span data-i18n="vectoplan.server.app.viewer.project.span.tzlichen_arbeitsbereiche_ver.76957c8f">tzlichen Arbeitsbereiche ver</span>&ouml;<span data-i18n="vectoplan.server.app.viewer.project.span.ffentlicht.d952bd06">ffentlicht.</span></p>
         {% endif %}
       </section>
     {% endif %}
@@ -1010,8 +1010,8 @@
       <section class="vp-project-card vp-project-card--locked" aria-labelledby="projectLockedTitle">
         <header class="vp-project-card__header">
           <div>
-            <h2 id="projectLockedTitle" class="vp-project-card__title">Zugriff nicht erlaubt</h2>
-            <p class="vp-project-card__text">
+            <h2 id="projectLockedTitle" class="vp-project-card__title" data-i18n="vectoplan.server.app.viewer.project.h2.zugriff_nicht_erlaubt.720e0136">Zugriff nicht erlaubt</h2>
+            <p class="vp-project-card__text" data-i18n="vectoplan.server.app.viewer.project.p.du_hast_keine_berechtigung_dieses_proj.247e40c7">
               Du hast keine Berechtigung, dieses Projekt zu sehen. Wende dich an einen Projekt-Admin oder öffne einen freigegebenen Projektlink.
             </p>
           </div>
@@ -1044,20 +1044,20 @@
         <section class="vp-project-card" aria-labelledby="projectBasicsTitle">
           <header class="vp-project-card__header">
             <div>
-              <h2 id="projectBasicsTitle" class="vp-project-card__title">Basisdaten</h2>
+              <h2 id="projectBasicsTitle" class="vp-project-card__title" data-i18n="vectoplan.server.app.viewer.project.h2.basisdaten.e34a7b8c">Basisdaten</h2>
               <p class="vp-project-card__text">
-                {% if _public_viewer %}
+                {% if _public_viewer %}<span data-i18n="vectoplan.server.app.viewer.project.span.diese_angaben_beschreiben_das_ffentlic.325ed7e9">
                   Diese Angaben beschreiben das öffentlich freigegebene Projekt.
-                {% else %}
+                </span>{% else %}<span data-i18n="vectoplan.server.app.viewer.project.span.diese_angaben_erscheinen_in_der_projek.50fd88a0">
                   Diese Angaben erscheinen in der Projektliste und bilden den Startpunkt für alle weiteren Arbeitsbereiche.
-                {% endif %}
+                </span>{% endif %}
               </p>
             </div>
           </header>
 
           <div class="vp-project-grid vp-project-grid--two">
             <div class="vp-project-field vp-project-field--wide">
-              <label class="vp-project-label" for="projectName">Projektname <span aria-hidden="true">*</span></label>
+              <label class="vp-project-label" for="projectName" data-i18n="vectoplan.server.app.viewer.project.label.projektname.7f844adb">Projektname <span aria-hidden="true">*</span></label>
               <input
                 id="projectName"
                 class="vp-project-input"
@@ -1069,11 +1069,11 @@
                 required
                 data-project-name
                 {% if not _form_can_edit %}disabled{% endif %}
-              >
+               data-i18n-placeholder="server.app.viewer.project.input_placeholder.z_b_wohnhaus_musterstra_e.35f8d72b">
             </div>
 
             <div class="vp-project-field vp-project-field--wide">
-              <label class="vp-project-label" for="projectDescription">Beschreibung</label>
+              <label class="vp-project-label" for="projectDescription" data-i18n="vectoplan.server.app.viewer.project.label.beschreibung.1a6e92fd">Beschreibung</label>
               <textarea
                 id="projectDescription"
                 class="vp-project-textarea"
@@ -1083,11 +1083,11 @@
                 placeholder="Kurze Beschreibung, Nutzung, Ziel oder Besonderheiten des Projekts"
                 data-project-description
                 {% if not _form_can_edit %}disabled{% endif %}
-              >{{ _project_description|e }}</textarea>
+               data-i18n-placeholder="server.app.viewer.project.textarea_placeholder.kurze_beschreibung_nutzung_ziel_oder_b.50ff4ff3">{{ _project_description|e }}</textarea>
             </div>
 
             <div class="vp-project-field vp-project-field--wide">
-              <label class="vp-project-label" for="projectCostCenter">Kostenstelle</label>
+              <label class="vp-project-label" for="projectCostCenter" data-i18n="vectoplan.server.app.viewer.project.label.kostenstelle.6e729454">Kostenstelle</label>
               <input
                 id="projectCostCenter"
                 class="vp-project-input"
@@ -1098,8 +1098,8 @@
                 placeholder="Wird automatisch erzeugt"
                 data-project-cost-center
                 {% if not _form_can_edit %}disabled{% endif %}
-              >
-              <p class="vp-project-help">Wird automatisch erzeugt, kann aber jederzeit geändert werden. Verknüpft Buchhaltungsbelege eindeutig mit Projekt und Bauleiter-Freigabe.</p>
+               data-i18n-placeholder="server.app.viewer.project.input_placeholder.wird_automatisch_erzeugt.774e0055">
+              <p class="vp-project-help" data-i18n="vectoplan.server.app.viewer.project.p.wird_automatisch_erzeugt_kann_aber_jed.49477d50">Wird automatisch erzeugt, kann aber jederzeit geändert werden. Verknüpft Buchhaltungsbelege eindeutig mit Projekt und Bauleiter-Freigabe.</p>
             </div>
           </div>
         </section>
@@ -1114,8 +1114,8 @@
           <section class="vp-project-card vp-project-card--locked" aria-labelledby="projectSettingsLockedTitle">
             <header class="vp-project-card__header">
               <div>
-                <h2 id="projectSettingsLockedTitle" class="vp-project-card__title">Einstellungen geschützt</h2>
-                <p class="vp-project-card__text">
+                <h2 id="projectSettingsLockedTitle" class="vp-project-card__title" data-i18n="vectoplan.server.app.viewer.project.h2.einstellungen_gesch_tzt.94fa61d6">Einstellungen geschützt</h2>
+                <p class="vp-project-card__text" data-i18n="vectoplan.server.app.viewer.project.p.team_rechte_ver_ffentlichung_und_syste.b8ad480a">
                   Team, Rechte, Veröffentlichung und Systembereiche sind nur für Owner und Admins sichtbar.
                 </p>
               </div>
@@ -1125,30 +1125,30 @@
 
         {% if _is_new and _form_can_edit %}
           <div class="vp-project-form__create">
-            <button type="submit" class="vp-project-btn vp-project-btn--primary" data-project-submit>Projekt erstellen</button>
+            <button type="submit" class="vp-project-btn vp-project-btn--primary" data-project-submit data-i18n="vectoplan.server.app.viewer.project.button.projekt_erstellen.bdc28b28">Projekt erstellen</button>
           </div>
         {% elif not _form_can_edit %}
           <footer class="vp-project-form__footer">
             <p class="vp-project-readonly">
-              {% if _auth_unavailable %}
+              {% if _auth_unavailable %}<span data-i18n="vectoplan.server.app.viewer.project.span.speichern_ist_deaktiviert_weil_der_aut.638f9f4c">
                 Speichern ist deaktiviert, weil der Auth-Service nicht erreichbar ist.
-              {% elif _identity_blocked %}
+              </span>{% elif _identity_blocked %}<span data-i18n="vectoplan.server.app.viewer.project.span.speichern_ist_wegen_eines_identit_tsko.bee4746d">
                 Speichern ist wegen eines Identitätskonflikts deaktiviert.
-              {% elif _user_blocked %}
+              </span>{% elif _user_blocked %}<span data-i18n="vectoplan.server.app.viewer.project.span.speichern_ist_deaktiviert_weil_dein_be.45883d47">
                 Speichern ist deaktiviert, weil dein Benutzer- oder Accountstatus gesperrt ist.
-              {% elif _access_blocked %}
+              </span>{% elif _access_blocked %}<span data-i18n="vectoplan.server.app.viewer.project.span.speichern_ist_deaktiviert_weil_der_zug.0caec191">
                 Speichern ist deaktiviert, weil der Zugriff blockiert ist.
-              {% elif _public_viewer %}
+              </span>{% elif _public_viewer %}<span data-i18n="vectoplan.server.app.viewer.project.span.ffentliche_ansicht_dieses_projekt_ist_.e5c7b71f">
                 Öffentliche Ansicht: Dieses Projekt ist schreibgeschützt.
-              {% elif _project_role == 'viewer' %}
+              </span>{% elif _project_role == 'viewer' %}<span data-i18n="vectoplan.server.app.viewer.project.span.du_besitzt_f_r_dieses_projekt_die_lese.fa232be8">
                 Du besitzt für dieses Projekt die Leserolle.
-              {% elif _read_only %}
+              </span>{% elif _read_only %}<span data-i18n="vectoplan.server.app.viewer.project.span.dieses_projekt_ist_schreibgesch_tzt.68b36d17">
                 Dieses Projekt ist schreibgeschützt.
-              {% elif not _persistent %}
+              </span>{% elif not _persistent %}<span data-i18n="vectoplan.server.app.viewer.project.span.dein_account_ist_noch_nicht_g_ltig_lok.b09d167b">
                 Dein Account ist noch nicht gültig lokal verknüpft. Speichern ist deaktiviert.
-              {% elif not _can_edit %}
+              </span>{% elif not _can_edit %}<span data-i18n="vectoplan.server.app.viewer.project.span.du_hast_f_r_dieses_projekt_keine_bearb.858d95b1">
                 Du hast für dieses Projekt keine Bearbeitungsberechtigung.
-              {% endif %}
+              </span>{% endif %}
             </p>
           </footer>
         {% endif %}      </form>
