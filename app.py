@@ -997,6 +997,8 @@ def create_app() -> Flask:
         except Exception:
             return jsonify({"ok": False, "error": "internal error", "code": "internal_error"}), 500
 
+    from vectoplan_i18n import init_app as init_i18n
+    init_i18n(app)
     return app
 
 

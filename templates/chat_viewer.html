@@ -731,7 +731,7 @@
 </head>
 
 <body>
-  <noscript>JavaScript ist erforderlich.</noscript>
+  <noscript data-i18n="vectoplan.server.app.chat_viewer.noscript.javascript_ist_erforderlich.a5660981">JavaScript ist erforderlich.</noscript>
 
   <main class="app-wrap vp-project-shell vp-chat-viewer-with-project-sidebar{% if notice_stream_enabled %} vp-project-shell--has-notice{% endif %}"
         role="main"
@@ -783,9 +783,9 @@
 
     {% include "partials/project_sidebar.html" ignore missing %}
 
-    <aside class="viewer-panel" id="viewer-panel" aria-label="Arbeitsbereich">
-      <nav class="workspace-rail" aria-label="Projektfunktionen">
-        <div role="group" aria-label="Arbeitsbereich wechseln" class="mode-group">
+    <aside class="viewer-panel" id="viewer-panel" aria-label="Arbeitsbereich" data-i18n-aria-label="server.app.chat_viewer.aside_aria-label.arbeitsbereich.4474eacf">
+      <nav class="workspace-rail" aria-label="Projektfunktionen" data-i18n-aria-label="server.app.chat_viewer.nav_aria-label.projektfunktionen.ad58b5c8">
+        <div role="group" aria-label="Arbeitsbereich wechseln" class="mode-group" data-i18n-aria-label="server.app.chat_viewer.div_aria-label.arbeitsbereich_wechseln.e0c6513d">
           <button id="modeProjectBtn"
                   class="btn workspace-rail__button"
                   type="button"
@@ -794,9 +794,9 @@
                   title="Einstellungen"
                   data-workspace-mode-button="project"
                   data-workspace-key="project"
-                  data-workspace-path="{{ resolved_project_url }}">
+                  data-workspace-path="{{ resolved_project_url }}" data-i18n-aria-label="server.app.chat_viewer.button_aria-label.einstellungen.5df89fdb" data-i18n-title="server.app.chat_viewer.button_title.einstellungen.4e2437db">
             <span class="workspace-rail__icon workspace-rail__icon--settings" aria-hidden="true">&#9881;</span>
-            <span class="workspace-rail__label">Einstellungen</span>
+            <span class="workspace-rail__label" data-i18n="vectoplan.server.app.chat_viewer.span.einstellungen.131acfd0">Einstellungen</span>
           </button>
 
           <button id="modeMapBtn"
@@ -809,9 +809,9 @@
                   data-workspace-key="map"
                   data-workspace-path="{{ map_page_path }}"
                   data-requires-configured-project="true"
-                  {% if not map_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+                  {% if not map_workspace_enabled %}disabled aria-disabled="true"{% endif %} data-i18n-aria-label="server.app.chat_viewer.button_aria-label.map.521c0827" data-i18n-title="server.app.chat_viewer.button_title.map.779490ae">
             <span class="workspace-rail__icon workspace-rail__icon--map" aria-hidden="true"></span>
-            <span class="workspace-rail__label">Map</span>
+            <span class="workspace-rail__label" data-i18n="vectoplan.server.app.chat_viewer.span.map.fbad673a">Map</span>
           </button>
 
           <button id="mode3dBtn"
@@ -824,9 +824,9 @@
                   data-workspace-key="editor3d"
                   data-workspace-path="{{ initial_editor_path }}"
                   data-requires-configured-project="true"
-                  {% if not editor3d_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
-            <span class="workspace-rail__icon workspace-rail__icon--text" aria-hidden="true">3D</span>
-            <span class="workspace-rail__label">3D</span>
+                  {% if not editor3d_workspace_enabled %}disabled aria-disabled="true"{% endif %} data-i18n-aria-label="server.app.chat_viewer.button_aria-label.3d.6ddb29e0" data-i18n-title="server.app.chat_viewer.button_title.3d.c43d7542">
+            <span class="workspace-rail__icon workspace-rail__icon--text" aria-hidden="true" data-i18n="vectoplan.server.app.chat_viewer.span.3d.ba8a9c4a">3D</span>
+            <span class="workspace-rail__label" data-i18n="vectoplan.server.app.chat_viewer.span.3d.23660e41">3D</span>
           </button>
 
           <button id="mode2dBtn"
@@ -839,9 +839,9 @@
                   data-workspace-key="cad2d"
                   data-workspace-path="{{ cad2d_page_path }}"
                   data-requires-configured-project="true"
-                  {% if not cad2d_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
-            <span class="workspace-rail__icon workspace-rail__icon--text" aria-hidden="true">2D</span>
-            <span class="workspace-rail__label">2D</span>
+                  {% if not cad2d_workspace_enabled %}disabled aria-disabled="true"{% endif %} data-i18n-aria-label="server.app.chat_viewer.button_aria-label.2d.1d579d71" data-i18n-title="server.app.chat_viewer.button_title.2d.7e7f2b43">
+            <span class="workspace-rail__icon workspace-rail__icon--text" aria-hidden="true" data-i18n="vectoplan.server.app.chat_viewer.span.2d.facabb20">2D</span>
+            <span class="workspace-rail__label" data-i18n="vectoplan.server.app.chat_viewer.span.2d.3c53e5f0">2D</span>
           </button>
 
           <button id="modeLvBtn"
@@ -854,9 +854,9 @@
                   data-workspace-key="lv"
                   data-workspace-path="{{ lv_page_path }}"
                   data-requires-configured-project="true"
-                  {% if not lv_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+                  {% if not lv_workspace_enabled %}disabled aria-disabled="true"{% endif %} data-i18n-aria-label="server.app.chat_viewer.button_aria-label.leistungsverzeichnis.d90ef589" data-i18n-title="server.app.chat_viewer.button_title.leistungsverzeichnis.687140c5">
             <span class="workspace-rail__icon workspace-rail__icon--list" aria-hidden="true"></span>
-            <span class="workspace-rail__label">LV</span>
+            <span class="workspace-rail__label" data-i18n="vectoplan.server.app.chat_viewer.span.lv.ae7ccbf1">LV</span>
           </button>
 
           <button id="modeFilesBtn"
@@ -869,9 +869,9 @@
                   data-workspace-key="files"
                   data-workspace-path="{{ files_page_path }}"
                   data-requires-configured-project="true"
-                  {% if not files_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+                  {% if not files_workspace_enabled %}disabled aria-disabled="true"{% endif %} data-i18n-aria-label="server.app.chat_viewer.button_aria-label.dateien.7e0f6563" data-i18n-title="server.app.chat_viewer.button_title.dateien.cd8221e7">
             <span class="workspace-rail__icon workspace-rail__icon--files" aria-hidden="true"></span>
-            <span class="workspace-rail__label">Dateien</span>
+            <span class="workspace-rail__label" data-i18n="vectoplan.server.app.chat_viewer.span.dateien.660ec149">Dateien</span>
           </button>
 
           <button id="modeStructuralCalculationBtn"
@@ -884,9 +884,9 @@
                   data-workspace-key="structural_calculation"
                   data-workspace-path="{{ structural_calculation_page_path }}"
                   data-requires-configured-project="true"
-                  {% if not structural_calculation_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+                  {% if not structural_calculation_workspace_enabled %}disabled aria-disabled="true"{% endif %} data-i18n-aria-label="server.app.chat_viewer.button_aria-label.tragwerksberechnung.9cf9a5af" data-i18n-title="server.app.chat_viewer.button_title.tragwerksberechnung.cc237646">
             <span class="workspace-rail__icon workspace-rail__icon--calculation" aria-hidden="true">&Sigma;</span>
-            <span class="workspace-rail__label">Tragwerksberechnung</span>
+            <span class="workspace-rail__label" data-i18n="vectoplan.server.app.chat_viewer.span.tragwerksberechnung.3c29d960">Tragwerksberechnung</span>
           </button>
 
           <button id="modeEnergyCalculationBtn"
@@ -899,9 +899,9 @@
                   data-workspace-key="energy_calculation"
                   data-workspace-path="{{ energy_calculation_page_path }}"
                   data-requires-configured-project="true"
-                  {% if not energy_calculation_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+                  {% if not energy_calculation_workspace_enabled %}disabled aria-disabled="true"{% endif %} data-i18n-aria-label="server.app.chat_viewer.button_aria-label.energieberechnung.6d3cc87b" data-i18n-title="server.app.chat_viewer.button_title.energieberechnung.6884afa3">
             <span class="workspace-rail__icon workspace-rail__icon--calculation" aria-hidden="true">&#9889;</span>
-            <span class="workspace-rail__label">Energieberechnung</span>
+            <span class="workspace-rail__label" data-i18n="vectoplan.server.app.chat_viewer.span.energieberechnung.a3f5da07">Energieberechnung</span>
           </button>
 
           <button id="modeSoundProtectionCalculationBtn"
@@ -914,9 +914,9 @@
                   data-workspace-key="sound_protection_calculation"
                   data-workspace-path="{{ sound_protection_calculation_page_path }}"
                   data-requires-configured-project="true"
-                  {% if not sound_protection_calculation_workspace_enabled %}disabled aria-disabled="true"{% endif %}>
+                  {% if not sound_protection_calculation_workspace_enabled %}disabled aria-disabled="true"{% endif %} data-i18n-aria-label="server.app.chat_viewer.button_aria-label.schallschutzberechnung.1901320f" data-i18n-title="server.app.chat_viewer.button_title.schallschutzberechnung.2790cce6">
             <span class="workspace-rail__icon workspace-rail__icon--sound" aria-hidden="true"></span>
-            <span class="workspace-rail__label">Schallschutzberechnung</span>
+            <span class="workspace-rail__label" data-i18n="vectoplan.server.app.chat_viewer.span.schallschutzberechnung.74b414ab">Schallschutzberechnung</span>
           </button>
         </div>
 

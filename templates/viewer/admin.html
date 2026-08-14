@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="referrer" content="no-referrer">
   <meta name="color-scheme" content="light">
-  <title>Admin</title>
+  <title data-i18n="vectoplan.server.app.viewer.admin.title.admin.4f49242f">Admin</title>
 
   <!-- DEV/robust: Browser-Caches für dieses Dokument best-effort reduzieren -->
   <meta http-equiv="Cache-Control" content="no-store, max-age=0, must-revalidate">
@@ -272,23 +272,23 @@
 </head>
 
 <body>
-  <noscript>JavaScript ist erforderlich.</noscript>
+  <noscript data-i18n="vectoplan.server.app.viewer.admin.noscript.javascript_ist_erforderlich.2340cf0a">JavaScript ist erforderlich.</noscript>
 
   <div id="root"
        class="admin-root"
        role="application"
        aria-label="Admin"
-       data-chat-id="{{ chat_id }}">
+       data-chat-id="{{ chat_id }}" data-i18n-aria-label="server.app.viewer.admin.div_aria-label.admin.cc6d7d40">
 
     <!-- Zeile 1: exakt 8 Buttons (Tabs), keine Abstände -->
-    <nav class="admin-tabs" role="tablist" aria-label="Admin Navigation">
+    <nav class="admin-tabs" role="tablist" aria-label="Admin Navigation" data-i18n-aria-label="server.app.viewer.admin.nav_aria-label.admin_navigation.5e967d58">
       <button class="admin-tab" type="button"
               id="tab-dashboard"
               role="tab"
               aria-selected="true"
               aria-controls="panel-dashboard"
               tabindex="0"
-              data-tab="dashboard">Dashboard</button>
+              data-tab="dashboard" data-i18n="vectoplan.server.app.viewer.admin.button.dashboard.9c1e5df4">Dashboard</button>
 
       <button class="admin-tab" type="button"
               id="tab-webscraping"
@@ -296,7 +296,7 @@
               aria-selected="false"
               aria-controls="panel-webscraping"
               tabindex="-1"
-              data-tab="webscraping">Webscraping</button>
+              data-tab="webscraping" data-i18n="vectoplan.server.app.viewer.admin.button.webscraping.0bfc6e1d">Webscraping</button>
 
       <button class="admin-tab" type="button"
               id="tab-datamining"
@@ -304,7 +304,7 @@
               aria-selected="false"
               aria-controls="panel-datamining"
               tabindex="-1"
-              data-tab="datamining">DataMining</button>
+              data-tab="datamining" data-i18n="vectoplan.server.app.viewer.admin.button.datamining.67b3d7d3">DataMining</button>
 
       <button class="admin-tab" type="button"
               id="tab-data-analyse"
@@ -312,7 +312,7 @@
               aria-selected="false"
               aria-controls="panel-data-analyse"
               tabindex="-1"
-              data-tab="data-analyse">Data-Analyse</button>
+              data-tab="data-analyse" data-i18n="vectoplan.server.app.viewer.admin.button.data_analyse.5bd40799">Data-Analyse</button>
 
       <button class="admin-tab" type="button"
               id="tab-database"
@@ -320,7 +320,7 @@
               aria-selected="false"
               aria-controls="panel-database"
               tabindex="-1"
-              data-tab="database">Database</button>
+              data-tab="database" data-i18n="vectoplan.server.app.viewer.admin.button.database.900d60bb">Database</button>
 
       <button class="admin-tab" type="button"
               id="tab-sales"
@@ -328,7 +328,7 @@
               aria-selected="false"
               aria-controls="panel-sales"
               tabindex="-1"
-              data-tab="sales">Sales</button>
+              data-tab="sales" data-i18n="vectoplan.server.app.viewer.admin.button.sales.8f0c1a1c">Sales</button>
 
       <button class="admin-tab" type="button"
               id="tab-wiki"
@@ -336,7 +336,7 @@
               aria-selected="false"
               aria-controls="panel-wiki"
               tabindex="-1"
-              data-tab="wiki">Wiki</button>
+              data-tab="wiki" data-i18n="vectoplan.server.app.viewer.admin.button.wiki.168db90d">Wiki</button>
 
       <button class="admin-tab" type="button"
               id="tab-user"
@@ -344,18 +344,18 @@
               aria-selected="false"
               aria-controls="panel-user"
               tabindex="-1"
-              data-tab="user">User</button>
+              data-tab="user" data-i18n="vectoplan.server.app.viewer.admin.button.user.3452e863">User</button>
     </nav>
 
     <!-- Zeile 2: Restfläche 100% (Panels) -->
-    <main class="admin-panels" id="panels" aria-label="Admin Inhalt">
+    <main class="admin-panels" id="panels" aria-label="Admin Inhalt" data-i18n-aria-label="server.app.viewer.admin.main_aria-label.admin_inhalt.caebbc92">
       <section class="admin-panel"
                id="panel-dashboard"
                role="tabpanel"
                aria-labelledby="tab-dashboard"
                data-panel="dashboard">
-        <h1 style="margin:0 0 8px 0; font-size:16px;">Dashboard</h1>
-        <p style="margin:0; color:var(--muted);">
+        <h1 style="margin:0 0 8px 0; font-size:16px;" data-i18n="vectoplan.server.app.viewer.admin.h1.dashboard.19e7a142">Dashboard</h1>
+        <p style="margin:0; color:var(--muted);" data-i18n="vectoplan.server.app.viewer.admin.p.platzhalter_hier_kommt_sp_ter_der_dash.adb7e622">
           Platzhalter. Hier kommt später der Dashboard-Inhalt rein.
         </p>
       </section>
@@ -366,8 +366,8 @@
                aria-labelledby="tab-webscraping"
                data-panel="webscraping"
                hidden>
-        <h1 style="margin:0 0 8px 0; font-size:16px;">AI-Training</h1>
-        <p style="margin:0; color:var(--muted);">
+        <h1 style="margin:0 0 8px 0; font-size:16px;" data-i18n="vectoplan.server.app.viewer.admin.h1.ai_training.99cb5822">AI-Training</h1>
+        <p style="margin:0; color:var(--muted);" data-i18n="vectoplan.server.app.viewer.admin.p.platzhalter_hier_kommt_sp_ter_der_webs.1bfb8860">
           Platzhalter. Hier kommt später der Webscraping-Inhalt rein.
         </p>
       </section>
@@ -428,8 +428,8 @@
                aria-labelledby="tab-database"
                data-panel="database"
                hidden>
-        <h1 style="margin:0 0 8px 0; font-size:16px;">Database</h1>
-        <p style="margin:0; color:var(--muted);">
+        <h1 style="margin:0 0 8px 0; font-size:16px;" data-i18n="vectoplan.server.app.viewer.admin.h1.database.1c880e8d">Database</h1>
+        <p style="margin:0; color:var(--muted);" data-i18n="vectoplan.server.app.viewer.admin.p.platzhalter_hier_kommt_sp_ter_der_data.265b86d1">
           Platzhalter. Hier kommt später der Database-Inhalt rein.
         </p>
       </section>
@@ -440,8 +440,8 @@
                aria-labelledby="tab-sales"
                data-panel="sales"
                hidden>
-        <h1 style="margin:0 0 8px 0; font-size:16px;">Sales</h1>
-        <p style="margin:0; color:var(--muted);">
+        <h1 style="margin:0 0 8px 0; font-size:16px;" data-i18n="vectoplan.server.app.viewer.admin.h1.sales.7cbf6a29">Sales</h1>
+        <p style="margin:0; color:var(--muted);" data-i18n="vectoplan.server.app.viewer.admin.p.platzhalter_hier_kommt_sp_ter_der_sale.f5ac1b0a">
           Platzhalter. Hier kommt später der Sales-Inhalt rein.
         </p>
       </section>
@@ -452,8 +452,8 @@
                aria-labelledby="tab-wiki"
                data-panel="wiki"
                hidden>
-        <h1 style="margin:0 0 8px 0; font-size:16px;">Wiki</h1>
-        <p style="margin:0; color:var(--muted);">
+        <h1 style="margin:0 0 8px 0; font-size:16px;" data-i18n="vectoplan.server.app.viewer.admin.h1.wiki.44704f3f">Wiki</h1>
+        <p style="margin:0; color:var(--muted);" data-i18n="vectoplan.server.app.viewer.admin.p.platzhalter_hier_kommt_sp_ter_der_wiki.9edd18c7">
           Platzhalter. Hier kommt später der Wiki-Inhalt rein.
         </p>
       </section>
@@ -464,8 +464,8 @@
                aria-labelledby="tab-user"
                data-panel="user"
                hidden>
-        <h1 style="margin:0 0 8px 0; font-size:16px;">User</h1>
-        <p style="margin:0; color:var(--muted);">
+        <h1 style="margin:0 0 8px 0; font-size:16px;" data-i18n="vectoplan.server.app.viewer.admin.h1.user.230bbb37">User</h1>
+        <p style="margin:0; color:var(--muted);" data-i18n="vectoplan.server.app.viewer.admin.p.platzhalter_hier_kommt_sp_ter_der_user.f895861c">
           Platzhalter. Hier kommt später der User-Inhalt rein.
         </p>
       </section>

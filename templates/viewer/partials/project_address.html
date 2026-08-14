@@ -243,11 +243,11 @@
 >
   <header class="vp-project-card__header">
     <div>
-      <h2 id="projectAddressTitle" class="vp-project-card__title">
+      <h2 id="projectAddressTitle" class="vp-project-card__title" data-i18n="vectoplan.server.app.viewer.partials.project_address.h2.adresse_und_standort.0f61067d">
         Adresse und Standort
       </h2>
 
-      <p class="vp-project-card__text">
+      <p class="vp-project-card__text" data-i18n="vectoplan.server.app.viewer.partials.project_address.p.gib_eine_vollst_ndige_adresse_oder_ein.b40bd443">
         Gib eine vollständige Adresse oder eine eindeutige Standortbeschreibung ein. Koordinaten werden nicht manuell gepflegt.
       </p>
     </div>
@@ -258,23 +258,23 @@
         data-project-address-geocode-status
         data-project-address-georeference-status
       >
-        {% if _address_auth_unavailable %}
+        {% if _address_auth_unavailable %}<span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.auth_nicht_erreichbar.b8471948">
           Auth nicht erreichbar
-        {% elif _address_user_blocked or _address_access_blocked %}
+        </span>{% elif _address_user_blocked or _address_access_blocked %}<span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.zugriff_gesperrt.1f625d8f">
           Zugriff gesperrt
-        {% elif _address_identity_blocked %}
+        </span>{% elif _address_identity_blocked %}<span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.identit_t_pr_fen.b9b88773">
           Identität prüfen
-        {% elif _address_georef_status == 'available' %}
+        </span>{% elif _address_georef_status == 'available' %}<span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.standortreferenz_bereit.9d90e825">
           Standortreferenz bereit
-        {% elif _address_georef_status == 'pending' %}
+        </span>{% elif _address_georef_status == 'pending' %}<span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.standort_wird_gepr_ft.455251dd">
           Standort wird geprüft
-        {% elif _address_georef_status == 'repair_required' %}
+        </span>{% elif _address_georef_status == 'repair_required' %}<span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.standort_pr_fen.180a62c2">
           Standort prüfen
-        {% elif _address_text %}
+        </span>{% elif _address_text %}<span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.adresse_erfasst.156752a6">
           Adresse erfasst
-        {% else %}
+        </span>{% else %}<span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.keine_adresse.073f8f5c">
           Keine Adresse
-        {% endif %}
+        </span>{% endif %}
       </span>
     </div>
   </header>
@@ -289,37 +289,37 @@
   {% endif %}
 
   {% if _address_fallback_used %}
-    <div class="vp-project-inline-note vp-project-inline-note--warning" data-project-address-world-fallback-note>
+    <div class="vp-project-inline-note vp-project-inline-note--warning" data-project-address-world-fallback-note data-i18n="vectoplan.server.app.viewer.partials.project_address.div.f_r_dieses_projekt_wurde_kontrolliert_.dc468907">
       Für dieses Projekt wurde kontrolliert von Earth auf Flat zurückgefallen. Die gespeicherte Adresse bleibt erhalten.
     </div>
   {% elif _address_georef_status == 'repair_required' %}
-    <div class="vp-project-inline-note vp-project-inline-note--warning" data-project-address-georeference-repair-note>
+    <div class="vp-project-inline-note vp-project-inline-note--warning" data-project-address-georeference-repair-note data-i18n="vectoplan.server.app.viewer.partials.project_address.div.die_standortreferenz_konnte_nicht_sich.7dffc9f8">
       Die Standortreferenz konnte nicht sicher aufgebaut werden. Prüfe die Adresse und speichere das Projekt erneut.
     </div>
   {% elif _address_georef_status == 'pending' %}
-    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-address-georeference-pending-note>
+    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-address-georeference-pending-note data-i18n="vectoplan.server.app.viewer.partials.project_address.div.die_serverseitige_standortreferenz_wir.d91d1d72">
       Die serverseitige Standortreferenz wird vorbereitet. Das App-Projekt bleibt dabei bereits gespeichert.
     </div>
   {% elif _address_world_requested == 'earth' and _address_text and _address_georef_status != 'available' %}
-    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-address-earth-note>
+    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-address-earth-note data-i18n="vectoplan.server.app.viewer.partials.project_address.div.f_r_die_earth_welt_wird_die_standortre.693ab806">
       Für die Earth-Welt wird die Standortreferenz serverseitig aus dieser Adresse abgeleitet.
     </div>
   {% endif %}
 
   {% if _address_demo_mode %}
     <div class="vp-project-inline-note vp-project-inline-note--demo" data-project-address-demo-note>
-      <strong>Demo-Modus:</strong>
+      <strong data-i18n="vectoplan.server.app.viewer.partials.project_address.strong.demo_modus.f234a165">Demo-Modus:</strong><span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.nderungen_an_der_adresse_gelten_nur_f_.de5088f3">
       Änderungen an der Adresse gelten nur für den temporären Demo-Kontext.
-    </div>
+    </span></div>
   {% elif _address_public_viewer %}
-    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-address-public-note>
+    <div class="vp-project-inline-note vp-project-inline-note--info" data-project-address-public-note data-i18n="vectoplan.server.app.viewer.partials.project_address.div.ffentliche_ansicht_die_freigegebene_st.f6baff72">
       Öffentliche Ansicht: Die freigegebene Standortbeschreibung ist sichtbar, aber nicht bearbeitbar.
     </div>
   {% endif %}
 
   <div class="vp-project-grid">
     <div class="vp-project-field vp-project-field--wide">
-      <label class="vp-project-label" for="projectAddressText">
+      <label class="vp-project-label" for="projectAddressText" data-i18n="vectoplan.server.app.viewer.partials.project_address.label.adresse.3e6ed0b8">
         Adresse <span aria-hidden="true">*</span>
       </label>
 
@@ -347,7 +347,7 @@
           {% if _address_read_only or not _address_can_write %}aria-readonly="true"{% endif %}
           {% if _address_disabled_reason %}title="{{ _address_disabled_reason|e }}"{% endif %}
           value="{{ _address_text|e }}"
-        >
+         data-i18n-placeholder="server.app.viewer.partials.project_address.input_placeholder.z_b_musterstra_e_1_12345_berlin_deutsc.ac42d934">
         <input
           id="projectAddressMapboxId"
           type="hidden"
@@ -366,16 +366,16 @@
       </div>
 
       <div class="vp-project-field__meta">
-        <p id="projectAddressHelp" class="vp-project-help">
-          W&auml;hle eine Mapbox-Adresse aus. Beim Speichern pr&uuml;ft der Server die Adresse erneut und speichert die ermittelten Projektkoordinaten.
-        </p>
+        <p id="projectAddressHelp" class="vp-project-help"><span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.w.41c4b056">
+          W</span>&auml;<span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.hle_eine_mapbox_adresse_aus_beim_speic.ae188a77">hle eine Mapbox-Adresse aus. Beim Speichern pr</span>&uuml;<span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.ft_der_server_die_adresse_erneut_und_s.ad5c398d">ft der Server die Adresse erneut und speichert die ermittelten Projektkoordinaten.
+        </span></p>
 
         <p
           id="projectAddressGeocoderStatus"
           class="vp-project-geocoder__status"
           data-project-geocoder-status
           aria-live="polite"
-        >{% if _address_can_write %}Adresssuche bereit &middot; Powered by Mapbox{% endif %}</p>
+        >{% if _address_can_write %}<span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.adresssuche_bereit.8df1be15">Adresssuche bereit </span>&middot;<span data-i18n="vectoplan.server.app.viewer.partials.project_address.span.powered_by_mapbox.ad77dc49"> Powered by Mapbox</span>{% endif %}</p>
 
         <p
           id="projectAddressCounter"
@@ -399,7 +399,7 @@
   </script>
 
   <noscript>
-    <p class="vp-project-help">
+    <p class="vp-project-help" data-i18n="vectoplan.server.app.viewer.partials.project_address.p.javascript_ist_erforderlich_um_nderung.a32c8b4e">
       JavaScript ist erforderlich, um Änderungen über den Projekt-Workspace zu speichern.
     </p>
   </noscript>

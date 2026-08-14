@@ -273,8 +273,8 @@
 >
   <header class="vp-project-card__header">
     <div>
-      <h2 id="projectTeamTitle" class="vp-project-card__title">Team und Rechte</h2>
-      <p class="vp-project-card__text">Füge Personen per E-Mail hinzu und verwalte ihre Projektrolle.</p>
+      <h2 id="projectTeamTitle" class="vp-project-card__title" data-i18n="vectoplan.server.app.viewer.partials.project_team.h2.team_und_rechte.94c95933">Team und Rechte</h2>
+      <p class="vp-project-card__text" data-i18n="vectoplan.server.app.viewer.partials.project_team.p.f_ge_personen_per_e_mail_hinzu_und_ver.1c284665">Füge Personen per E-Mail hinzu und verwalte ihre Projektrolle.</p>
     </div>
   </header>
 
@@ -289,11 +289,11 @@
 
   {% if _team_can_read %}
     <section class="vp-project-team-invite" aria-labelledby="projectTeamInviteTitle" data-project-team-invite>
-      <h3 id="projectTeamInviteTitle" class="vp-project-subtitle">Person hinzufügen</h3>
+      <h3 id="projectTeamInviteTitle" class="vp-project-subtitle" data-i18n="vectoplan.server.app.viewer.partials.project_team.h3.person_hinzuf_gen.ca453982">Person hinzufügen</h3>
 
       <div class="vp-project-team-invite__grid">
         <div class="vp-project-field">
-          <label class="vp-project-label" for="projectInviteEmail">E-Mail-Adresse</label>
+          <label class="vp-project-label" for="projectInviteEmail" data-i18n="vectoplan.server.app.viewer.partials.project_team.label.e_mail_adresse.9b03df09">E-Mail-Adresse</label>
           <input
             id="projectInviteEmail"
             class="vp-project-input"
@@ -306,12 +306,12 @@
             data-project-team-invite-email
             {% if not _team_form_enabled %}disabled{% endif %}
             {% if _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
-          >
-          <p class="vp-project-help">Registrierte Accounts erhalten sofort Zugriff. Andere Adressen werden vorgemerkt; der E-Mail-Versand folgt später.</p>
+           data-i18n-placeholder="server.app.viewer.partials.project_team.input_placeholder.name_example_com.5d674534">
+          <p class="vp-project-help" data-i18n="vectoplan.server.app.viewer.partials.project_team.p.registrierte_accounts_erhalten_sofort_.90147822">Registrierte Accounts erhalten sofort Zugriff. Andere Adressen werden vorgemerkt; der E-Mail-Versand folgt später.</p>
         </div>
 
         <div class="vp-project-field">
-          <label class="vp-project-label" for="projectInviteRole">Rolle</label>
+          <label class="vp-project-label" for="projectInviteRole" data-i18n="vectoplan.server.app.viewer.partials.project_team.label.rolle.941a9db7">Rolle</label>
           <select
             id="projectInviteRole"
             class="vp-project-select"
@@ -320,9 +320,9 @@
             {% if not _team_form_enabled %}disabled{% endif %}
             {% if _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
           >
-            <option value="viewer" selected>Viewer</option>
-            <option value="editor">Editor</option>
-            <option value="admin">Admin</option>
+            <option value="viewer" selected data-i18n="vectoplan.server.app.viewer.partials.project_team.option.viewer.ac63a8e6">Viewer</option>
+            <option value="editor" data-i18n="vectoplan.server.app.viewer.partials.project_team.option.editor.1d4991ec">Editor</option>
+            <option value="admin" data-i18n="vectoplan.server.app.viewer.partials.project_team.option.admin.40e3c0e1">Admin</option>
           </select>
         </div>
 
@@ -333,7 +333,7 @@
             data-project-team-invite-submit
             {% if not _team_form_enabled %}disabled{% endif %}
             {% if _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
-          >Zugriff geben</button>
+           data-i18n="vectoplan.server.app.viewer.partials.project_team.button.zugriff_geben.4a200992">Zugriff geben</button>
         </div>
       </div>
 
@@ -343,8 +343,8 @@
     <section class="vp-project-team-members" aria-labelledby="projectMembersTitle" data-project-team-members-section>
       <div class="vp-project-section-header">
         <div>
-          <h3 id="projectMembersTitle" class="vp-project-subtitle">Mitglieder</h3>
-          <p class="vp-project-help">Rollen werden beim Ändern automatisch gespeichert.</p>
+          <h3 id="projectMembersTitle" class="vp-project-subtitle" data-i18n="vectoplan.server.app.viewer.partials.project_team.h3.mitglieder.af584166">Mitglieder</h3>
+          <p class="vp-project-help" data-i18n="vectoplan.server.app.viewer.partials.project_team.p.rollen_werden_beim_ndern_automatisch_g.7dc1f249">Rollen werden beim Ändern automatisch gespeichert.</p>
         </div>
       </div>
 
@@ -387,9 +387,9 @@
 
               <div class="vp-project-team-row__role">
                 {% if _member_owner %}
-                  <span class="vp-project-role-chip">Owner</span>
+                  <span class="vp-project-role-chip" data-i18n="vectoplan.server.app.viewer.partials.project_team.span.owner.0a2a866b">Owner</span>
                 {% else %}
-                  <label class="vp-project-sr-only" for="projectMemberRole{{ loop.index }}">Rolle für {{ _member_name }}</label>
+                  <label class="vp-project-sr-only" for="projectMemberRole{{ loop.index }}"><span data-i18n="vectoplan.server.app.viewer.partials.project_team.span.rolle_f_r.080f9024">Rolle für </span>{{ _member_name }}</label>
                   <select
                     id="projectMemberRole{{ loop.index }}"
                     class="vp-project-select vp-project-select--compact"
@@ -398,9 +398,9 @@
                     data-current-role="{{ _member_role|e }}"
                     {% if not _team_form_enabled or not _member_user_id %}disabled{% endif %}
                   >
-                    <option value="viewer" {% if _member_role == 'viewer' %}selected{% endif %}>Viewer</option>
-                    <option value="editor" {% if _member_role == 'editor' %}selected{% endif %}>Editor</option>
-                    <option value="admin" {% if _member_role == 'admin' %}selected{% endif %}>Admin</option>
+                    <option value="viewer" {% if _member_role == 'viewer' %}selected{% endif %} data-i18n="vectoplan.server.app.viewer.partials.project_team.option.viewer.52f39e3d">Viewer</option>
+                    <option value="editor" {% if _member_role == 'editor' %}selected{% endif %} data-i18n="vectoplan.server.app.viewer.partials.project_team.option.editor.87f3c972">Editor</option>
+                    <option value="admin" {% if _member_role == 'admin' %}selected{% endif %} data-i18n="vectoplan.server.app.viewer.partials.project_team.option.admin.ef7083a7">Admin</option>
                   </select>
                 {% endif %}
               </div>
@@ -415,13 +415,13 @@
                     data-current-role="{{ _member_role|e }}"
                     {% if not _team_form_enabled or not _member_user_id %}disabled{% endif %}
                     {% if not _member_user_id %}title="Lokale AppUser-ID fehlt."{% elif _team_disabled_reason %}title="{{ _team_disabled_reason|e }}"{% endif %}
-                  >Entfernen</button>
+                   data-i18n="vectoplan.server.app.viewer.partials.project_team.button.entfernen.951c0621">Entfernen</button>
                 {% endif %}
               </div>
             </article>
           {% endfor %}
         {% else %}
-          <div class="vp-project-empty" data-project-team-members-empty><p>Noch keine Mitglieder vorhanden.</p></div>
+          <div class="vp-project-empty" data-project-team-members-empty><p data-i18n="vectoplan.server.app.viewer.partials.project_team.p.noch_keine_mitglieder_vorhanden.8a9b57c9">Noch keine Mitglieder vorhanden.</p></div>
         {% endif %}
       </div>
     </section>
@@ -429,8 +429,8 @@
     <section class="vp-project-team-invitations" aria-labelledby="projectInvitationsTitle" data-project-team-invitations-section{% if _team_invitations|length == 0 %} hidden{% endif %}>
       <div class="vp-project-section-header">
         <div>
-          <h3 id="projectInvitationsTitle" class="vp-project-subtitle">Vorgemerkte Einladungen</h3>
-          <p class="vp-project-help">Der automatische E-Mail-Versand wird später ergänzt.</p>
+          <h3 id="projectInvitationsTitle" class="vp-project-subtitle" data-i18n="vectoplan.server.app.viewer.partials.project_team.h3.vorgemerkte_einladungen.7d288f6a">Vorgemerkte Einladungen</h3>
+          <p class="vp-project-help" data-i18n="vectoplan.server.app.viewer.partials.project_team.p.der_automatische_e_mail_versand_wird_s.e16aeed6">Der automatische E-Mail-Versand wird später ergänzt.</p>
         </div>
       </div>
 
@@ -452,12 +452,12 @@
               <div class="vp-project-avatar vp-project-avatar--pending" aria-hidden="true">@</div>
               <div>
                 <h4 class="vp-project-team-row__name">{{ _inv_email if _inv_email else 'Vorgemerkte Adresse' }}</h4>
-                <p class="vp-project-team-row__meta">E-Mail-Versand folgt</p>
+                <p class="vp-project-team-row__meta" data-i18n="vectoplan.server.app.viewer.partials.project_team.p.e_mail_versand_folgt.8ab8f316">E-Mail-Versand folgt</p>
               </div>
             </div>
-            <div class="vp-project-team-row__role"><span class="vp-project-role-chip">{% if _inv_role == 'admin' %}Admin{% elif _inv_role == 'editor' %}Editor{% else %}Viewer{% endif %}</span></div>
+            <div class="vp-project-team-row__role"><span class="vp-project-role-chip">{% if _inv_role == 'admin' %}<span data-i18n="vectoplan.server.app.viewer.partials.project_team.span.admin.2d2478b8">Admin</span>{% elif _inv_role == 'editor' %}<span data-i18n="vectoplan.server.app.viewer.partials.project_team.span.editor.9d5b0758">Editor</span>{% else %}<span data-i18n="vectoplan.server.app.viewer.partials.project_team.span.viewer.e7b9741d">Viewer</span>{% endif %}</span></div>
             <div class="vp-project-team-row__actions">
-              <button type="button" class="vp-project-btn vp-project-btn--danger" data-project-team-invitation-revoke data-invitation-id="{{ _inv_id|e }}" data-status="{{ _inv_status|e }}" {% if not _team_form_enabled or not _inv_id or _inv_terminal %}disabled{% endif %}>Widerrufen</button>
+              <button type="button" class="vp-project-btn vp-project-btn--danger" data-project-team-invitation-revoke data-invitation-id="{{ _inv_id|e }}" data-status="{{ _inv_status|e }}" {% if not _team_form_enabled or not _inv_id or _inv_terminal %}disabled{% endif %} data-i18n="vectoplan.server.app.viewer.partials.project_team.button.widerrufen.32aef89f">Widerrufen</button>
             </div>
           </article>
         {% endfor %}
@@ -532,7 +532,7 @@
   </script>
 
   <noscript>
-    <p class="vp-project-help">
+    <p class="vp-project-help" data-i18n="vectoplan.server.app.viewer.partials.project_team.p.javascript_ist_erforderlich_um_einladu.93a4b57d">
       JavaScript ist erforderlich, um Einladungen, Rollenänderungen und Mitgliederentfernung zu verwalten.
     </p>
   </noscript>
