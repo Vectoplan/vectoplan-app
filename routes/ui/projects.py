@@ -601,6 +601,13 @@ def _ui_projects_before_request() -> None:
 # Response / security helpers
 # ─────────────────────────────────────────────────────────────
 
+def _desktop_embed_requested() -> bool:
+    return (
+        request.args.get("allow_embed") == "1"
+        and _safe_str(request.args.get("client_source"), "", 40).lower() == "desktop"
+    )
+
+
 def _workspace_csp_header_value() -> str:
     try:
         auth_public = _config_url("VECTOPLAN_AUTH_PUBLIC_URL", "http://localhost:5000")
@@ -652,7 +659,16 @@ def _workspace_csp_header_value() -> str:
             app_public,
             "http://localhost:5103",
             "http://127.0.0.1:5103",
+            "http://localhost:5200",
+            "http://127.0.0.1:5200",
+            "file:",
         ]
+
+        # PyWebView serves the desktop shell on a random loopback port.  Only
+        # the explicit desktop embed flow receives this wildcard-port source;
+        # normal browser requests keep the tighter fixed-origin allow-list.
+        if _desktop_embed_requested():
+            parents.extend(("http://127.0.0.1:*", "http://localhost:*"))
 
         frame_src: List[str] = []
         connect_src: List[str] = []
@@ -681,6 +697,9 @@ def _workspace_csp_header_value() -> str:
         )
 
     except Exception:
+        desktop_parent = (
+            " http://127.0.0.1:* http://localhost:*" if _desktop_embed_requested() else ""
+        )
         return (
             "frame-src 'self' http://localhost:5000 http://127.0.0.1:5000 "
             "http://localhost:5104 http://127.0.0.1:5104 "
@@ -701,7 +720,9 @@ def _workspace_csp_header_value() -> str:
             "http://localhost:5102 http://127.0.0.1:5102 "
             "http://localhost:5101 http://127.0.0.1:5101 "
             "http://localhost:5190 http://127.0.0.1:5190; "
-            "frame-ancestors 'self' http://localhost:5103 http://127.0.0.1:5103"
+            "frame-ancestors 'self' http://localhost:5103 http://127.0.0.1:5103 "
+            "http://localhost:5200 http://127.0.0.1:5200 file:"
+            f"{desktop_parent}"
         )
 
 
@@ -747,11 +768,18 @@ def _finalize_html_response(
     try:
         if workspace_shell:
             resp.headers["Content-Security-Policy"] = _workspace_csp_header_value()
-            resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+            if request.args.get("allow_embed") == "1":
+                resp.headers.pop("X-Frame-Options", None)
+            else:
+                resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         elif allow_embed:
-            resp.headers["Content-Security-Policy"] = (
-                "frame-ancestors 'self' http://localhost:5103 http://127.0.0.1:5103"
+            parents = (
+                "frame-ancestors 'self' http://localhost:5103 http://127.0.0.1:5103 "
+                "http://localhost:5200 http://127.0.0.1:5200 file:"
             )
+            if _desktop_embed_requested():
+                parents += " http://127.0.0.1:* http://localhost:*"
+            resp.headers["Content-Security-Policy"] = parents
             try:
                 resp.headers.pop("X-Frame-Options", None)
             except Exception:
@@ -2952,7 +2980,11 @@ def project_by_equals(project_id: str) -> Response:
                 extra={"project_id": project_id},
             )
 
-        return _render_project_shell(selected_project=project, is_new=False)
+        return _render_project_shell(
+            selected_project=project,
+            is_new=False,
+            initial_workspace="2d",
+        )
 
     except PermissionDenied as exc:
         return _permission_error_response(exc)

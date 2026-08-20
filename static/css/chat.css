@@ -764,28 +764,32 @@ a:hover{
 
 @media (max-width: 520px){
   :root{
-    --app-pad:10px;
-    --app-gap:10px;
+    --app-pad:0px;
+    --app-gap:0px;
   }
 
   body > main.app-wrap.vp-chat-viewer-with-project-sidebar,
   body > main.app-wrap.vp-project-shell{
-    padding:10px;
+    padding:0;
   }
 
   body > main.app-wrap.vp-chat-viewer-with-project-sidebar > .vp-shell-notice-row,
   body > main.app-wrap.vp-project-shell > .vp-shell-notice-row{
-    margin-bottom:10px;
+    margin-bottom:0;
   }
 
   .viewer-panel{
-    height:calc(var(--app-h) - 20px);
-    border-radius:10px;
+    height:var(--app-h);
+    border-right:0;
+    border-bottom:0;
+    border-left:0;
+    border-radius:0;
   }
 
   body > main.app-wrap.vp-chat-viewer-with-project-sidebar.vp-project-shell--has-notice > .viewer-panel,
   body > main.app-wrap.vp-project-shell.vp-project-shell--has-notice > .viewer-panel{
-    height:calc(var(--app-h) - 20px - var(--vp-notice-stream-height, 42px) - 10px);
+    height:calc(var(--app-h) - var(--vp-notice-stream-height, 40px) - 2px);
+    min-height:0;
   }
 
   .viewer-toolbar{
@@ -847,7 +851,7 @@ body {
   top:12px;
   left:12px;
   z-index:210;
-  width:52px;
+  width:56px;
   display:flex;
   flex-direction:column;
   align-items:stretch;
@@ -874,13 +878,13 @@ body {
 .workspace-rail__button,
 .workspace-rail .btn.btn-link{
   position:relative;
-  width:40px;
-  min-width:40px;
-  height:40px;
-  min-height:40px;
+  width:44px;
+  min-width:44px;
+  height:44px;
+  min-height:44px;
   display:inline-grid;
   place-items:center;
-  flex:0 0 40px;
+  flex:0 0 44px;
   padding:0;
   border-color:transparent;
   border-radius:8px;
@@ -1165,32 +1169,141 @@ body {
 }
 
 @media (max-width: 520px){
+  .viewer-panel{
+    padding-bottom:calc(60px + env(safe-area-inset-bottom, 0px));
+  }
+
   .workspace-rail{
-    top:8px;
-    left:8px;
-    width:48px;
-    max-height:calc(100% - 16px);
-    padding:5px;
-    overflow-y:auto;
+    top:auto;
+    right:6px;
+    bottom:max(6px, env(safe-area-inset-bottom, 0px));
+    left:64px;
+    width:auto;
+    height:52px;
+    max-height:none;
+    display:block;
+    padding:3px;
+    overflow-x:auto;
+    overflow-y:hidden;
+    border-radius:13px;
+    overscroll-behavior-x:contain;
+    scroll-snap-type:x proximity;
     scrollbar-width:none;
+    touch-action:pan-x;
+    -webkit-overflow-scrolling:touch;
   }
 
   .workspace-rail::-webkit-scrollbar{
     display:none;
   }
 
+  .workspace-rail .mode-group{
+    width:max-content;
+    min-width:100%;
+    height:44px;
+    flex-direction:row;
+    align-items:center;
+    gap:3px;
+  }
+
   .workspace-rail__button,
   .workspace-rail .btn.btn-link{
-    width:36px;
-    min-width:36px;
-    height:36px;
-    min-height:36px;
-    flex-basis:36px;
+    width:44px;
+    min-width:44px;
+    height:44px;
+    min-height:44px;
+    flex-basis:44px;
+    scroll-snap-align:center;
+  }
+
+  .workspace-rail .workspace-rail__button[aria-pressed="true"]{
+    order:-1;
+    box-shadow:inset 0 -3px 0 #155eef;
+  }
+
+  .vp-icon-tooltip{
+    display:none !important;
   }
 
   .viewer-panel > .versions-dropdown{
-    left:64px;
+    right:8px;
+    bottom:calc(68px + env(safe-area-inset-bottom, 0px));
+    left:8px;
     top:8px;
-    width:calc(100% - 72px);
+    width:auto;
+    max-height:none;
+  }
+
+  .viewer-panel > .overlay{
+    inset:8px 8px calc(68px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* Short landscape phones need the same bottom navigation even above 520px. */
+@media (max-width: 900px) and (max-height: 520px){
+  .app-wrap,
+  body > main.app-wrap.vp-chat-viewer-with-project-sidebar,
+  body > main.app-wrap.vp-project-shell{
+    padding:0;
+  }
+
+  body > main.app-wrap.vp-chat-viewer-with-project-sidebar > .vp-shell-notice-row,
+  body > main.app-wrap.vp-project-shell > .vp-shell-notice-row{
+    margin-bottom:0;
+  }
+
+  .viewer-panel{
+    height:var(--app-h);
+    padding-bottom:calc(56px + env(safe-area-inset-bottom, 0px));
+    border-right:0;
+    border-bottom:0;
+    border-left:0;
+    border-radius:0;
+  }
+
+  body > main.app-wrap.vp-chat-viewer-with-project-sidebar.vp-project-shell--has-notice > .viewer-panel,
+  body > main.app-wrap.vp-project-shell.vp-project-shell--has-notice > .viewer-panel{
+    height:calc(var(--app-h) - var(--vp-notice-stream-height, 40px) - 2px);
+    min-height:0;
+  }
+
+  .workspace-rail{
+    top:auto;
+    right:8px;
+    bottom:max(4px, env(safe-area-inset-bottom, 0px));
+    left:64px;
+    width:auto;
+    height:48px;
+    max-height:none;
+    display:block;
+    padding:2px;
+    overflow-x:auto;
+    overflow-y:hidden;
+    scrollbar-width:none;
+    touch-action:pan-x;
+    -webkit-overflow-scrolling:touch;
+  }
+
+  .workspace-rail .mode-group{
+    width:max-content;
+    min-width:100%;
+    height:44px;
+    flex-direction:row;
+    flex-wrap:nowrap;
+    align-items:center;
+  }
+
+  .workspace-rail__button,
+  .workspace-rail .btn.btn-link{
+    width:44px;
+    min-width:44px;
+    height:44px;
+    min-height:44px;
+    flex-basis:44px;
+  }
+
+  .workspace-rail .workspace-rail__button[aria-pressed="true"]{
+    order:-1;
+    box-shadow:inset 0 -3px 0 #155eef;
   }
 }

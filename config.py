@@ -495,7 +495,7 @@ def _dedupe_texts(values: Iterable[str]) -> List[str]:
 
 _DEFAULT_APP_PUBLIC_URL = "http://localhost:5103"
 
-_DEFAULT_AUTH_PUBLIC_URL = "http://localhost:5000"
+_DEFAULT_AUTH_PUBLIC_URL = "http://127.0.0.1:5000"
 _DEFAULT_AUTH_INTERNAL_URL = "http://vectoplan-auth:5000"
 _DEFAULT_AUTH_ROUTE = "/auth"
 _DEFAULT_AUTH_ME_PATH = "/auth/me"
@@ -694,6 +694,13 @@ class Config:
     VECTOPLAN_AUTH_PUBLIC_BASE_URL = VECTOPLAN_AUTH_PUBLIC_URL
     AUTH_PUBLIC_URL = VECTOPLAN_AUTH_PUBLIC_URL
     AUTH_PUBLIC_BASE_URL = VECTOPLAN_AUTH_PUBLIC_URL
+    VECTOPLAN_AUTH_SESSION_COOKIE_NAME = _env_str_first(
+        (
+            "VECTOPLAN_AUTH_SESSION_COOKIE_NAME",
+            "AUTH_SESSION_COOKIE_NAME",
+        ),
+        "vectoplan_auth_session",
+    )
 
     VECTOPLAN_AUTH_BASE_URL = _norm_url(
         _env_str_first(
@@ -1253,9 +1260,9 @@ class Config:
     LV_IFRAME_URL = VECTOPLAN_LV_IFRAME_URL
     LV_EMBED_ENABLED = VECTOPLAN_LV_EMBED_ENABLED
 
-    # Project-scoped Filecloud microservice. The app forwards only the public
-    # project key; filecloud authenticates the browser independently through
-    # vectoplan-auth and revalidates project access against this app.
+    # Project-scoped Filecloud microservice. Browser embedding uses a short-lived
+    # signed access ticket which Filecloud exchanges for its own scoped session.
+    # This avoids attempting to render the central login page in a nested iframe.
     VECTOPLAN_FILECLOUD_PUBLIC_URL = _norm_url(
         _env_str_first(
             (
@@ -1282,6 +1289,15 @@ class Config:
     VECTOPLAN_FILECLOUD_EMBED_ENABLED = _as_bool(
         _env_first(("VECTOPLAN_FILECLOUD_EMBED_ENABLED", "FILECLOUD_EMBED_ENABLED"), None),
         True,
+    )
+    VECTOPLAN_FILECLOUD_ACCESS_TICKET_SECRET = _env_str(
+        "VECTOPLAN_FILECLOUD_ACCESS_TICKET_SECRET",
+        "",
+    )
+    VECTOPLAN_FILECLOUD_ACCESS_TICKET_TTL_SECONDS = _clamp_int(
+        _as_int(_env("VECTOPLAN_FILECLOUD_ACCESS_TICKET_TTL_SECONDS"), 300),
+        30,
+        900,
     )
     FILECLOUD_PUBLIC_URL = VECTOPLAN_FILECLOUD_PUBLIC_URL
     FILECLOUD_INTERNAL_URL = VECTOPLAN_FILECLOUD_INTERNAL_URL

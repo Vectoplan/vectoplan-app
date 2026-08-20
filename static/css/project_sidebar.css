@@ -1330,6 +1330,115 @@
   }
 }
 
+/* Mobile app-shell trigger: the collapsed project drawer must not consume a
+   permanent content column. The complete drawer still opens at full height. */
+@media (max-width: 900px) {
+  .vp-chat-viewer-with-project-sidebar {
+    padding-left: 0;
+  }
+
+  .vp-project-sidebar.is-collapsed:not(.is-mobile-open),
+  .vp-project-sidebar[data-project-sidebar-collapsed="true"]:not(.is-mobile-open) {
+    top: auto;
+    bottom: max(6px, env(safe-area-inset-bottom, 0px));
+    left: 6px;
+    z-index: calc(var(--vp-project-sidebar-mobile-z-index) + 100);
+    width: 52px;
+    min-width: 52px;
+    max-width: 52px;
+    height: 52px;
+    min-height: 52px;
+    max-height: 52px;
+    flex-basis: 52px;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    transform: none;
+    overflow: visible;
+  }
+
+  .vp-project-shell--has-notice > .vp-project-sidebar.is-collapsed:not(.is-mobile-open),
+  .vp-project-shell--has-notice > .vp-project-sidebar[data-project-sidebar-collapsed="true"]:not(.is-mobile-open) {
+    top: auto;
+    bottom: max(6px, env(safe-area-inset-bottom, 0px));
+  }
+
+  .vp-project-sidebar.is-collapsed:not(.is-mobile-open) .vp-project-sidebar__panel,
+  .vp-project-sidebar[data-project-sidebar-collapsed="true"]:not(.is-mobile-open) .vp-project-sidebar__panel {
+    width: 52px;
+    height: 52px;
+    min-height: 52px;
+    border: 1px solid var(--vp-project-sidebar-border);
+    border-radius: 13px;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 8px 24px rgba(16, 24, 40, 0.16);
+    backdrop-filter: blur(10px) saturate(125%);
+  }
+
+  .vp-project-sidebar.is-collapsed:not(.is-mobile-open) .vp-project-sidebar__header,
+  .vp-project-sidebar[data-project-sidebar-collapsed="true"]:not(.is-mobile-open) .vp-project-sidebar__header {
+    width: 52px;
+    min-height: 52px;
+    height: 52px;
+    padding: 4px;
+    border: 0;
+  }
+
+  .vp-project-sidebar.is-collapsed:not(.is-mobile-open) .vp-project-sidebar__toggle,
+  .vp-project-sidebar[data-project-sidebar-collapsed="true"]:not(.is-mobile-open) .vp-project-sidebar__toggle {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+  }
+
+  .vp-project-sidebar.is-collapsed:not(.is-mobile-open) .vp-project-sidebar__actions,
+  .vp-project-sidebar.is-collapsed:not(.is-mobile-open) .vp-project-sidebar__status,
+  .vp-project-sidebar.is-collapsed:not(.is-mobile-open) .vp-project-sidebar__error,
+  .vp-project-sidebar.is-collapsed:not(.is-mobile-open) .vp-project-sidebar__nav,
+  .vp-project-sidebar.is-collapsed:not(.is-mobile-open) .vp-project-sidebar__footer,
+  .vp-project-sidebar[data-project-sidebar-collapsed="true"]:not(.is-mobile-open) .vp-project-sidebar__actions,
+  .vp-project-sidebar[data-project-sidebar-collapsed="true"]:not(.is-mobile-open) .vp-project-sidebar__status,
+  .vp-project-sidebar[data-project-sidebar-collapsed="true"]:not(.is-mobile-open) .vp-project-sidebar__error,
+  .vp-project-sidebar[data-project-sidebar-collapsed="true"]:not(.is-mobile-open) .vp-project-sidebar__nav,
+  .vp-project-sidebar[data-project-sidebar-collapsed="true"]:not(.is-mobile-open) .vp-project-sidebar__footer {
+    display: none !important;
+  }
+
+  .vp-project-sidebar.is-expanded,
+  .vp-project-sidebar.is-mobile-open {
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(340px, 94vw);
+    min-width: min(260px, 94vw);
+    max-width: 94vw;
+    height: 100dvh;
+    min-height: 100dvh;
+    max-height: 100dvh;
+    z-index: 1200;
+    transform: translateX(0);
+  }
+
+  .vp-project-sidebar.is-expanded .vp-project-sidebar__toggle,
+  .vp-project-sidebar.is-mobile-open .vp-project-sidebar__toggle,
+  .vp-project-sidebar.is-expanded .vp-project-sidebar__refresh,
+  .vp-project-sidebar.is-mobile-open .vp-project-sidebar__refresh {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+
+  .vp-project-sidebar.is-expanded .vp-project-sidebar__create,
+  .vp-project-sidebar.is-mobile-open .vp-project-sidebar__create {
+    min-height: 44px;
+  }
+}
+
 /* Reduced project sidebar -------------------------------------------------- */
 .vp-project-sidebar__heading{
   min-width:0;

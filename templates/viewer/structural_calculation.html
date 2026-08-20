@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#10283f">
+  <title>{{ workspace_label }} · VECTOPLAN</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='statik/css/main.css') }}">
+</head>
+<body>
+  <div
+    class="statik-app"
+    id="statik-app"
+    data-api-base="{{ route_prefix }}"
+    data-display-only="true"
+    data-model-url="{{ url_for('static', filename='statik/examples/sample_model.json') }}"
+    data-experience="guided"
+  >
+    <main class="workspace-grid">
+      <aside class="navigator-panel" id="navigator-panel" aria-label="Tragwerksnavigator">
+        <div class="panel-titlebar">
+          <div>
+            <span class="eyebrow">Projektstruktur</span>
+            <strong>Tragwerksnavigator</strong>
+          </div>
+          <button type="button" class="icon-button mobile-close" data-action="close-panels" aria-label="Navigator schließen">×</button>
+        </div>
+
+        <div class="panel-tabs" role="tablist" aria-label="Navigatorinhalt">
+          <button type="button" class="is-active" data-nav-tab="model" role="tab" aria-selected="true">Modell</button>
+          <button type="button" data-nav-tab="checks" role="tab" aria-selected="false">Prüfliste <span id="attention-count">2</span></button>
+        </div>
+
+        <div class="tree-scroll" id="model-tree" role="tree" aria-label="Bauteile"></div>
+        <div class="check-scroll" id="check-list" hidden></div>
+
+        <div class="navigator-footer">
+          <div class="automation-state">
+            <span class="automation-icon" aria-hidden="true">✦</span>
+            <div><strong>Automatik vorbereitet</strong><small>Geometrie, Lasten und Materialquellen nachvollziehbar</small></div>
+          </div>
+        </div>
+      </aside>
+
+      <section class="stage-panel" aria-label="Tragwerksmodell">
+        <header class="stage-titlebar">
+          <div class="stage-context-row">
+            <div class="stage-breadcrumb">
+              <button type="button" class="mobile-panel-button explorer-button" data-action="toggle-navigator" aria-label="Bauteilnavigator öffnen"><span aria-hidden="true">☷</span> Bauteile</button>
+              <span class="workspace-badge">Tragwerk</span>
+              <span id="stage-level">Erdgeschoss</span><span aria-hidden="true">/</span><strong id="stage-selection">Decke EG · Feld A</strong>
+            </div>
+            <div class="stage-meta">
+              <span><i class="status-indicator is-ok"></i> Modell plausibel</span>
+              <span>Revision <strong id="revision-label">0001</strong></span>
+              <button type="button" class="mobile-panel-button" data-action="toggle-inspector" aria-label="Eigenschaften öffnen">Eigenschaften</button>
+            </div>
+          </div>
+
+          <div class="stage-tool-row">
+            <div class="workflow-steps workflow-compact" id="workflow-steps" aria-label="Arbeitsablauf">
+              <button type="button" class="workflow-step is-done" data-workflow="model" title="1 · Modell"><span class="step-number">1</span><span>Modell</span></button>
+              <span class="step-link" aria-hidden="true"></span>
+              <button type="button" class="workflow-step is-done" data-workflow="idealize" title="2 · Tragwerk"><span class="step-number">2</span><span>Tragwerk</span></button>
+              <span class="step-link" aria-hidden="true"></span>
+              <button type="button" class="workflow-step is-done" data-workflow="loads" title="3 · Lasten"><span class="step-number">3</span><span>Lasten</span></button>
+              <span class="step-link" aria-hidden="true"></span>
+              <button type="button" class="workflow-step is-active" data-workflow="calculate" title="4 · Prüfen"><span class="step-number">4</span><span>Prüfen</span></button>
+              <span class="step-link" aria-hidden="true"></span>
+              <button type="button" class="workflow-step" data-workflow="publish" title="5 · Freigabe"><span class="step-number">5</span><span>Freigabe</span></button>
+            </div>
+
+            <div class="stage-tool-divider" aria-hidden="true"></div>
+
+            <div class="segmented-control" role="group" aria-label="Darstellung">
+              <button type="button" class="is-active" data-view="system" aria-pressed="true">2D</button>
+              <button type="button" data-view="loads" aria-pressed="false">Fläche</button>
+              <button type="button" data-view="results" aria-pressed="false">3D</button>
+            </div>
+
+            <div class="compact-actions" aria-label="Ansicht">
+              <button type="button" data-action="zoom-out" title="Verkleinern" aria-label="Verkleinern">−</button>
+              <button type="button" data-action="zoom-fit" title="Ansicht einpassen">Einpassen</button>
+              <button type="button" data-action="zoom-in" title="Vergrößern" aria-label="Vergrößern">+</button>
+            </div>
+          </div>
+        </header>
+
+        <div class="canvas-shell" id="canvas-shell">
+          <svg id="structural-canvas" viewBox="0 0 920 560" role="img" aria-label="Interaktives Tragwerksmodell"></svg>
+          <canvas id="surface-result-canvas" class="analysis-view-canvas" hidden aria-label="Flächige Ergebnisdarstellung"></canvas>
+          <canvas id="structural-3d-canvas" class="analysis-view-canvas" hidden aria-label="Dreidimensionale Bauteilauswahl"></canvas>
+
+          <div class="viewer-mode-note" id="viewer-mode-note" hidden>
+            <strong id="viewer-mode-title">Flächensimulation</strong>
+            <span id="viewer-mode-description">Lineare Ergebnisdarstellung</span>
+          </div>
+
+          <div class="canvas-compass" aria-hidden="true">
+            <span>N</span><i></i>
+          </div>
+
+          <div class="canvas-legend" aria-label="Legende">
+            <span><i class="legend-slab"></i> Decke</span>
+            <span><i class="legend-beam"></i> Träger</span>
+            <span><i class="legend-wall"></i> Tragwand</span>
+            <span><i class="legend-column"></i> Stütze</span>
+          </div>
+
+          <div class="automation-banner">
+            <span class="automation-orb" aria-hidden="true">✦</span>
+            <div><strong>Aus dem Modell abgeleitet</strong><span id="automation-message">Spannweite, Auflager und Lastfläche wurden automatisch vorbelegt.</span></div>
+            <button type="button" data-action="show-provenance">Quellen ansehen</button>
+          </div>
+        </div>
+
+        <section class="calculation-dossier is-open" id="calculation-dossier" aria-label="Rechenakte der ausgewählten Position">
+          <header class="dossier-header">
+            <div class="dossier-title">
+              <span class="eyebrow">Rechenakte</span>
+              <strong id="dossier-position">Position wird geladen</strong>
+              <span class="dossier-status" id="dossier-status">Berechnung ausstehend</span>
+            </div>
+            <div class="dossier-tabs" role="tablist" aria-label="Inhalte der Rechenakte">
+              <button type="button" class="is-active" data-dossier-tab="overview">Übersicht</button>
+              <button type="button" data-dossier-tab="loads">Lastpfad</button>
+              <button type="button" data-dossier-tab="combinations">Kombinationen</button>
+              <button type="button" data-dossier-tab="checks">Nachweise</button>
+              <button type="button" data-dossier-tab="calculation">Rechenweg</button>
+              <button type="button" data-dossier-tab="standards">Normen &amp; Grenzen</button>
+            </div>
+            <button type="button" class="dossier-toggle" data-action="toggle-dossier" aria-expanded="true" title="Rechenakte ein- oder ausklappen">⌄</button>
+          </header>
+          <div class="dossier-content" id="dossier-content">
+            <div class="dossier-empty"><strong>Berechnung wird vorbereitet</strong><span>System, Lasten, Ergebnisse und Nachweise erscheinen hier direkt im Programm.</span></div>
+          </div>
+        </section>
+
+      </section>
+
+      <aside class="inspector-panel" id="inspector-panel" aria-label="Bauteileigenschaften">
+        <div class="panel-titlebar">
+          <div>
+            <span class="eyebrow">Auswahl</span>
+            <strong>Bauteil &amp; Annahmen</strong>
+          </div>
+          <div class="title-actions">
+            <span class="kind-badge" id="element-kind">Decke</span>
+            <button type="button" class="icon-button mobile-close" data-action="close-panels" aria-label="Eigenschaften schließen">×</button>
+          </div>
+        </div>
+
+        <div class="selected-element-card">
+          <div class="element-symbol slab-symbol" id="element-symbol" aria-hidden="true"><span></span></div>
+          <div><strong id="element-label">Decke EG · Feld A</strong><span id="element-id">slab_eg_01</span></div>
+          <span class="review-badge" id="review-badge">zu prüfen</span>
+        </div>
+
+        <div class="guided-explainer guided-only">
+          <span aria-hidden="true">✦</span>
+          <p><strong>Das ist bereits vorbereitet.</strong> Prüfe nur die hervorgehobenen Werte. Details bleiben jederzeit einsehbar.</p>
+        </div>
+
+        <form id="element-form" class="property-form">
+          <section class="property-section">
+            <div class="section-heading">
+              <div><span class="section-step">01</span><strong>Geometrie</strong></div>
+              <span class="source-chip source-model">Modell</span>
+            </div>
+            <div class="field-grid">
+              <label>
+                <span>Spannweite</span>
+                <span class="input-with-unit"><input name="span_m" type="number" min="0.2" max="100" step="0.1" required><i>m</i></span>
+              </label>
+              <label>
+                <span>Plattenbreite</span>
+                <span class="input-with-unit"><input name="width_m" type="number" min="0.2" max="100" step="0.1" required><i>m</i></span>
+              </label>
+              <label class="highlight-field">
+                <span>Dicke <em>Empfehlung</em></span>
+                <span class="input-with-unit"><input name="thickness_cm" type="number" min="5" max="300" step="1" required><i>cm</i></span>
+              </label>
+              <label>
+                <span>Tragsystem</span>
+                <select name="support_condition">
+                  <option value="continuous">Durchlaufend</option>
+                  <option value="simply_supported">Einfeld</option>
+                  <option value="two_way">Zweiseitig gespannt</option>
+                  <option value="cantilever">Kragarm</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="property-section">
+            <div class="section-heading">
+              <div><span class="section-step">02</span><strong>Lasten</strong></div>
+              <span class="source-chip source-auto">Automatik</span>
+            </div>
+            <div class="field-grid">
+              <label>
+                <span>Zusätzliche ständige Last</span>
+                <span class="input-with-unit"><input name="superimposed_dead_load_kn_m2" type="number" min="0" max="100" step="0.1" required><i>kN/m²</i></span>
+              </label>
+              <label class="highlight-field">
+                <span>Nutzlast <em>Wohnen</em></span>
+                <span class="input-with-unit"><input name="variable_load_kn_m2" type="number" min="0" max="100" step="0.1" required><i>kN/m²</i></span>
+              </label>
+            </div>
+            <button type="button" class="text-action" data-action="show-loads">3 automatisch erkannte Lastfälle anzeigen</button>
+          </section>
+
+          <section class="property-section professional-section">
+            <div class="section-heading">
+              <div><span class="section-step">03</span><strong>Material &amp; Bemessung</strong></div>
+              <span class="source-chip source-library">Library · lokal</span>
+            </div>
+            <div class="field-grid">
+              <label>
+                <span>Beton</span>
+                <select name="concrete_class"><option>C20/25</option><option selected>C25/30</option><option>C30/37</option><option>C35/45</option></select>
+              </label>
+              <label>
+                <span>Bewehrungsstahl</span>
+                <select name="reinforcement_class"><option>B500A</option><option selected>B500B</option></select>
+              </label>
+              <label>
+                <span>Betondeckung</span>
+                <span class="input-with-unit"><input name="cover_mm" type="number" min="5" max="150" step="5" required><i>mm</i></span>
+              </label>
+              <label>
+                <span>Vorh. Bewehrung</span>
+                <span class="input-with-unit"><input name="provided_reinforcement_mm2_m" type="number" min="1" max="20000" step="1" required><i>mm²/m</i></span>
+              </label>
+            </div>
+          </section>
+
+          <div class="form-actions">
+            <button type="button" data-action="reset-auto">Automatik wiederherstellen</button>
+            <button type="submit" class="primary-action"><span aria-hidden="true">▶</span> Neu berechnen</button>
+          </div>
+        </form>
+
+        <section class="inspector-result" aria-label="Prüfergebnis">
+          <div class="result-overview">
+            <div class="result-ring is-empty" id="result-ring" aria-label="Maßgebende Ausnutzung">
+              <svg viewBox="0 0 44 44" aria-hidden="true"><circle class="ring-track" cx="22" cy="22" r="18"></circle><circle class="ring-value" id="ring-value" cx="22" cy="22" r="18"></circle></svg>
+              <span><strong id="result-percent">–</strong><small>Ausnutzung</small></span>
+            </div>
+            <div class="result-summary-copy">
+              <span class="result-kicker" id="result-kicker">Bereit zur Konzeptprüfung</span>
+              <strong id="result-title">Automatik kann die Vorbemessung starten</strong>
+              <p id="result-message">Alle Eingaben bleiben sichtbar und können fachlich angepasst werden.</p>
+            </div>
+          </div>
+
+          <div class="check-cards" id="check-cards">
+            <article class="check-card is-placeholder"><span>Biegung</span><strong>–</strong><small>noch nicht berechnet</small></article>
+            <article class="check-card is-placeholder"><span>Querkraft</span><strong>–</strong><small>noch nicht berechnet</small></article>
+            <article class="check-card is-placeholder"><span>Schlankheit</span><strong>–</strong><small>noch nicht berechnet</small></article>
+          </div>
+
+          <div class="result-actions">
+            <button type="button" data-action="show-calculation" disabled>Rechenweg</button>
+            <button type="button" data-action="create-report">Bericht vorbereiten</button>
+          </div>
+        </section>
+
+        <div class="change-panel" id="change-panel" hidden>
+          <div><strong>Lokale Änderung</strong><span>Noch nicht an 2D/3D übertragen</span></div>
+          <button type="button" data-action="stage-command">Änderung vormerken</button>
+        </div>
+      </aside>
+
+      <button type="button" class="panel-backdrop" data-action="close-panels" aria-label="Seitenbereiche schließen"></button>
+    </main>
+
+    <dialog id="calculation-dialog">
+      <div class="dialog-header">
+        <div><span class="eyebrow">Nachvollziehbarkeit</span><h2>Rechenweg der Konzeptprüfung</h2></div>
+        <button type="button" class="icon-button" data-action="close-dialog" aria-label="Dialog schließen">×</button>
+      </div>
+      <div class="dialog-warning"><strong>Wichtiger Hinweis</strong><span>Diese Vorschau unterstützt die frühe Bemessung. Sie ist kein vollständiger, normgerechter oder prüffähiger statischer Nachweis.</span></div>
+      <div class="calculation-steps" id="calculation-steps"></div>
+      <div class="dialog-footer">
+        <span id="analysis-reference">Noch keine Berechnung</span>
+        <button type="button" data-action="close-dialog">Schließen</button>
+      </div>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden>
+      <span class="toast-icon" aria-hidden="true">✓</span>
+      <div><strong id="toast-title">Erledigt</strong><span id="toast-message"></span></div>
+      <button type="button" data-action="hide-toast" aria-label="Meldung schließen">×</button>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='statik/plugins/cad-analysis-plugin.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='statik/plugins/editor-selection-plugin.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='statik/js/main.js') }}" defer></script>
+</body>
+</html>

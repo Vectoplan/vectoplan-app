@@ -1672,6 +1672,20 @@ a {
 
   .vp-project-btn {
     width: 100%;
+    min-height: 44px;
+  }
+
+  .vp-project-btn--ghost,
+  .vp-project-btn--danger,
+  .vp-project-input,
+  .vp-project-select {
+    min-height: 44px;
+  }
+
+  .vp-project-details summary {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
   }
 
   .vp-project-input,
@@ -1686,6 +1700,16 @@ a {
 }
 
 @media (max-width: 420px) {
+  .vp-project-workspace {
+    --vp-project-page-pad: 10px;
+    gap: 10px;
+  }
+
+  .vp-project-hero,
+  .vp-project-card {
+    padding: 14px;
+  }
+
   .vp-project-hero__title {
     font-size: 1.45rem;
   }
@@ -1697,6 +1721,26 @@ a {
   .vp-project-card__text,
   .vp-project-hero__text {
     font-size: 0.88rem;
+  }
+
+  .vp-project-hero__eyebrow,
+  .vp-project-hero__title,
+  .vp-project-hero__text,
+  .vp-project-card__title,
+  .vp-project-card__text,
+  .vp-project-help,
+  .vp-project-inline-note,
+  .vp-project-alert {
+    overflow-wrap: anywhere;
+  }
+
+  .vp-project-status,
+  .vp-project-chip,
+  .vp-project-role-chip,
+  .vp-project-lock-chip,
+  .vp-project-permission-chip {
+    white-space: normal;
+    line-height: 1.25;
   }
 }
 
@@ -2527,16 +2571,22 @@ body {
     display: none;
   }
 }
-/* Mobile collapsed sidebar rail clearance */
+/* The mobile project drawer floats above the shell; content keeps full width. */
 @media (max-width: 900px) {
   body > main.app-wrap.vp-project-shell.vp-chat-viewer-with-project-sidebar {
-    padding-left: calc(var(--vp-project-sidebar-collapsed-width, 64px) + 12px);
+    padding-left: 12px;
   }
 }
 
 @media (max-width: 520px) {
   body > main.app-wrap.vp-project-shell.vp-chat-viewer-with-project-sidebar {
-    padding-left: calc(var(--vp-project-sidebar-collapsed-width, 64px) + 10px);
+    padding-left: 0;
+  }
+}
+
+@media (max-width: 900px) and (max-height: 520px) {
+  body > main.app-wrap.vp-project-shell.vp-chat-viewer-with-project-sidebar {
+    padding-left: 0;
   }
 }
 /* Map-first landing page for public viewers and project readers. */
@@ -2722,5 +2772,35 @@ body.vp-project-page--viewer-landing {
 
   .vp-project-team-row__actions {
     grid-column: 1 / -1;
+  }
+}
+
+/* Final narrow-iframe contract. These rules intentionally come last because
+   this stylesheet is shared by the standalone page and the shell iframe. */
+@media (max-width: 700px) {
+  .vp-project-team-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vp-project-team-row__role,
+  .vp-project-team-row__permissions,
+  .vp-project-team-row__actions {
+    grid-column: 1;
+  }
+
+  .vp-project-form__create {
+    padding-bottom: max(14px, env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (max-width: 420px) {
+  .vp-project-workspace {
+    padding: 10px;
+    gap: 10px;
+  }
+
+  .vp-project-hero,
+  .vp-project-card {
+    padding: 14px;
   }
 }

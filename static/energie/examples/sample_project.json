@@ -1,0 +1,123 @@
+{
+  "schema_version": "energy-project/0.1",
+  "revision": "demo-rev-17",
+  "project": {
+    "id": "vp-demo-energie-001",
+    "name": "Wohnquartier Am Stadtpark",
+    "phase": "Entwurfsplanung",
+    "address": "Musterstraße 18, 50667 Köln",
+    "last_updated": "2026-08-14T09:30:00+02:00"
+  },
+  "building": {
+    "type": "residential",
+    "type_label": "Mehrfamilienhaus",
+    "construction_year": 2026,
+    "condition": "new_build",
+    "floors": 4,
+    "units": 12,
+    "zones": 8
+  },
+  "geometry": {
+    "heated_floor_area_m2": 642.8,
+    "net_room_area_m2": 611.4,
+    "envelope_area_m2": 1174.6,
+    "conditioned_volume_m3": 2011.3,
+    "window_share": 0.18,
+    "orientation": "Süd-Südwest",
+    "source": "demo_building_snapshot",
+    "source_revision": "cad-demo-42"
+  },
+  "envelope": {
+    "source": "library",
+    "catalog_revision": "library-demo-7",
+    "components": [
+      {
+        "id": "wall-01",
+        "name": "Außenwand Holz-Hybrid",
+        "kind": "exterior_wall",
+        "area_m2": 446.3,
+        "thickness_cm": 38,
+        "insulation_cm": 20,
+        "u_value": 0.19,
+        "status": "verified",
+        "source": "library"
+      },
+      {
+        "id": "roof-01",
+        "name": "Flachdach extensiv begrünt",
+        "kind": "roof",
+        "area_m2": 246.7,
+        "thickness_cm": 46,
+        "insulation_cm": 24,
+        "u_value": 0.16,
+        "status": "verified",
+        "source": "library"
+      },
+      {
+        "id": "floor-01",
+        "name": "Bodenplatte gegen Erdreich",
+        "kind": "floor",
+        "area_m2": 270.2,
+        "thickness_cm": 42,
+        "insulation_cm": 16,
+        "u_value": 0.24,
+        "status": "assumption",
+        "source": "energy_default"
+      },
+      {
+        "id": "window-01",
+        "name": "Fenster 3-fach",
+        "kind": "window",
+        "area_m2": 211.4,
+        "u_value": 0.95,
+        "g_value": 0.52,
+        "status": "verified",
+        "source": "library"
+      }
+    ]
+  },
+  "systems": {
+    "heating": {
+      "type": "heat_pump",
+      "label": "Luft/Wasser-Wärmepumpe",
+      "seasonal_performance_factor": 3.6,
+      "flow_temperature_c": 35,
+      "verified": false
+    },
+    "ventilation": {
+      "type": "balanced_with_heat_recovery",
+      "heat_recovery_rate": 0.78,
+      "verified": false
+    },
+    "renewables": {
+      "pv_peak_kwp": 14.8,
+      "battery_kwh": 8.0,
+      "roof_potential_kwp": 22.4
+    }
+  },
+  "usage": {
+    "indoor_temperature_c": 20,
+    "occupants": 28,
+    "climate_location": "Köln",
+    "usage_profile": "residential_multi_family"
+  },
+  "data_quality": {
+    "score_percent": 91,
+    "verified_items": 46,
+    "assumptions": 5,
+    "open_items": 3,
+    "items": [
+      {"id": "geometry", "label": "Geometrie & Flächen", "status": "verified", "source": "3D-Modell"},
+      {"id": "zones", "label": "Räume & Zonen", "status": "verified", "source": "2D/3D-Modell"},
+      {"id": "envelope", "label": "Bauteilaufbauten", "status": "partial", "source": "Library + Annahmen"},
+      {"id": "systems", "label": "Anlagentechnik", "status": "partial", "source": "Energie-Entwurf"},
+      {"id": "climate", "label": "Standort & Klima", "status": "verified", "source": "Demo-Standort"}
+    ]
+  },
+  "provenance": {
+    "geometry_revision": "cad-demo-42",
+    "library_revision": "library-demo-7",
+    "calculation_revision": null,
+    "detached_demo": true
+  }
+}
