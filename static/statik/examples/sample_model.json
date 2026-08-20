@@ -1,0 +1,152 @@
+{
+  "contract_version": "structural-model/0.1",
+  "project_ref": "statik_demo_wohnen_01",
+  "model_revision_ref": "local_demo_revision_0001",
+  "project": {
+    "name": "Wohnhaus am Stadtgarten",
+    "type": "residential_building",
+    "phase": "Entwurf",
+    "location": "Berlin",
+    "standard_basis": "DIN EN 1990–1992 · Vorbereitung",
+    "review_status": "unreviewed"
+  },
+  "levels": [
+    {"level_ref": "level_ug", "label": "Untergeschoss", "elevation_m": -2.8},
+    {"level_ref": "level_eg", "label": "Erdgeschoss", "elevation_m": 0.0},
+    {"level_ref": "level_og", "label": "1. Obergeschoss", "elevation_m": 2.9}
+  ],
+  "load_cases": [
+    {"load_case_ref": "lc_g", "label": "Eigengewicht", "category": "permanent", "automatic": true},
+    {"load_case_ref": "lc_g2", "label": "Ausbau", "category": "permanent", "automatic": true},
+    {"load_case_ref": "lc_q", "label": "Nutzlast Wohnen", "category": "variable", "automatic": true}
+  ],
+  "elements": [
+    {
+      "element_ref": "slab_eg_01",
+      "kind": "slab",
+      "label": "Decke EG · Feld A",
+      "group": "Decken",
+      "level_ref": "level_eg",
+      "geometry": {"type": "polygon", "points": [[120, 120], [470, 120], [470, 400], [120, 400]]},
+      "parameters": {
+        "span_m": 5.2,
+        "width_m": 4.2,
+        "thickness_cm": 20,
+        "support_condition": "continuous",
+        "superimposed_dead_load_kn_m2": 1.5,
+        "variable_load_kn_m2": 2.0,
+        "concrete_class": "C25/30",
+        "reinforcement_class": "B500B",
+        "cover_mm": 30,
+        "provided_reinforcement_mm2_m": 754
+      },
+      "provenance": {"geometry": "3D-Modell · vorbereitet", "loads": "Profil Wohnen", "material": "lokaler Fallback"},
+      "review": {"status": "ready_for_review", "last_utilization": 0.72}
+    },
+    {
+      "element_ref": "slab_eg_02",
+      "kind": "slab",
+      "label": "Decke EG · Feld B",
+      "group": "Decken",
+      "level_ref": "level_eg",
+      "geometry": {"type": "polygon", "points": [[470, 120], [790, 120], [790, 400], [470, 400]]},
+      "parameters": {
+        "span_m": 4.8,
+        "width_m": 3.8,
+        "thickness_cm": 20,
+        "support_condition": "continuous",
+        "superimposed_dead_load_kn_m2": 1.5,
+        "variable_load_kn_m2": 2.0,
+        "concrete_class": "C25/30",
+        "reinforcement_class": "B500B",
+        "cover_mm": 30,
+        "provided_reinforcement_mm2_m": 654
+      },
+      "provenance": {"geometry": "3D-Modell · vorbereitet", "loads": "Profil Wohnen", "material": "lokaler Fallback"},
+      "review": {"status": "ready_for_review", "last_utilization": 0.64}
+    },
+    {
+      "element_ref": "beam_eg_01",
+      "kind": "beam",
+      "label": "Unterzug UZ-01",
+      "group": "Träger",
+      "level_ref": "level_eg",
+      "geometry": {"type": "line", "start": [470, 120], "end": [470, 400], "width": 18},
+      "parameters": {"span_m": 5.6, "width_cm": 30, "height_cm": 50, "concrete_class": "C30/37", "elastic_modulus_mpa": 33000, "permanent_load_kn_m": 22.0, "variable_load_kn_m": 11.0, "cover_mm": 35, "bar_diameter_mm": 16, "provided_reinforcement_mm2": 1608},
+      "provenance": {"geometry": "2D-System · vorbereitet", "material": "lokaler Fallback"},
+      "review": {"status": "unreviewed", "last_utilization": 0.81}
+    },
+    {
+      "element_ref": "beam_eg_02",
+      "kind": "beam",
+      "label": "Randträger RT-02",
+      "group": "Träger",
+      "level_ref": "level_eg",
+      "geometry": {"type": "line", "start": [120, 400], "end": [790, 400], "width": 14},
+      "parameters": {"span_m": 6.7, "width_cm": 24, "height_cm": 45, "concrete_class": "C25/30", "elastic_modulus_mpa": 31000, "permanent_load_kn_m": 18.0, "variable_load_kn_m": 9.0, "cover_mm": 35, "bar_diameter_mm": 16, "provided_reinforcement_mm2": 1206},
+      "provenance": {"geometry": "2D-System · vorbereitet", "material": "lokaler Fallback"},
+      "review": {"status": "attention", "last_utilization": 0.94}
+    },
+    {
+      "element_ref": "wall_eg_01",
+      "kind": "wall",
+      "label": "Tragwand W-01",
+      "group": "Wände",
+      "level_ref": "level_eg",
+      "geometry": {"type": "line", "start": [120, 120], "end": [120, 400], "width": 16},
+      "parameters": {"length_m": 5.2, "height_m": 2.9, "thickness_cm": 24, "material": "masonry", "masonry_grade": "MZ12_NMIIA", "design_axial_kn": 420, "design_moment_knm": 8.5},
+      "provenance": {"geometry": "3D-Modell · vorbereitet", "material": "lokaler Fallback"},
+      "review": {"status": "ready_for_review", "last_utilization": 0.52}
+    },
+    {
+      "element_ref": "wall_eg_02",
+      "kind": "wall",
+      "label": "Kernwand W-02",
+      "group": "Wände",
+      "level_ref": "level_eg",
+      "geometry": {"type": "line", "start": [790, 120], "end": [790, 400], "width": 18},
+      "parameters": {"length_m": 5.2, "thickness_cm": 25, "material": "reinforced_concrete"},
+      "provenance": {"geometry": "3D-Modell · vorbereitet", "material": "lokaler Fallback"},
+      "review": {"status": "ready_for_review", "last_utilization": 0.48}
+    },
+    {
+      "element_ref": "column_eg_01",
+      "kind": "column",
+      "label": "Stütze S-01",
+      "group": "Stützen",
+      "level_ref": "level_eg",
+      "geometry": {"type": "point", "point": [470, 120], "size": 24},
+      "parameters": {"height_m": 2.9, "width_cm": 30, "depth_cm": 30, "concrete_class": "C30/37"},
+      "provenance": {"geometry": "3D-Modell · vorbereitet", "material": "lokaler Fallback"},
+      "review": {"status": "ready_for_review", "last_utilization": 0.59}
+    },
+    {
+      "element_ref": "column_eg_02",
+      "kind": "column",
+      "label": "Stütze S-02",
+      "group": "Stützen",
+      "level_ref": "level_eg",
+      "geometry": {"type": "point", "point": [470, 400], "size": 24},
+      "parameters": {"height_m": 2.9, "width_cm": 30, "depth_cm": 30, "concrete_class": "C30/37"},
+      "provenance": {"geometry": "3D-Modell · vorbereitet", "material": "lokaler Fallback"},
+      "review": {"status": "attention", "last_utilization": 0.88}
+    },
+    {
+      "element_ref": "foundation_01",
+      "kind": "foundation",
+      "label": "Einzelfundament F-01",
+      "group": "Gründung",
+      "level_ref": "level_ug",
+      "geometry": {"type": "point", "point": [470, 120], "size": 42},
+      "parameters": {"width_m": 1.4, "length_m": 1.4, "height_cm": 45, "soil_pressure_kn_m2": 210, "design_axial_kn": 315, "design_moment_x_knm": 18, "design_moment_y_knm": 12, "design_horizontal_kn": 24, "base_friction_coefficient": 0.45},
+      "provenance": {"geometry": "Automatik · Vorschlag", "soil": "noch nicht verbunden"},
+      "review": {"status": "unreviewed", "last_utilization": 0.0}
+    }
+  ],
+  "automation": {
+    "model_idealization": "prepared",
+    "load_path": "local_preview",
+    "material_resolution": "local_fallback",
+    "feedback_to_source_model": "not_connected"
+  }
+}

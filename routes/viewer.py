@@ -3733,7 +3733,97 @@ def project_files_workspace(project_id: str) -> Response:
             503,
             code="filecloud_public_url_invalid",
         )
-    target = f"{base_url}{route}?{urlencode({'project_id': public_id})}"
+
+    current_user = _safe_dict((context or {}).get("current_user") or (context or {}).get("auth"))
+    user_auth = _safe_dict(current_user.get("auth"))
+    access = _safe_dict((context or {}).get("workspace_access"))
+    project_access = _safe_dict(project_payload.get("access"))
+    auth_user_id = _safe_str(
+        current_user.get("canonical_user_id")
+        or current_user.get("canonicalUserId")
+        or current_user.get("auth_user_id")
+        or current_user.get("authUserId")
+        or user_auth.get("auth_user_id")
+        or user_auth.get("authUserId"),
+        "",
+        160,
+    )
+    role = _safe_str(
+        access.get("project_role")
+        or access.get("projectRole")
+        or access.get("role")
+        or project_access.get("role"),
+        "",
+        32,
+    ).lower()
+    authenticated = _safe_bool(
+        current_user.get("authenticated") or current_user.get("is_authenticated"),
+        False,
+    )
+    can_view = _safe_bool(
+        access.get("allowed")
+        or access.get("can_view")
+        or access.get("canView")
+        or project_access.get("can_view"),
+        False,
+    )
+    public_viewer = _safe_bool(
+        access.get("public_viewer")
+        or access.get("publicViewer")
+        or project_access.get("public_viewer"),
+        False,
+    )
+    if not authenticated or not auth_user_id or not can_view or public_viewer or role not in {"owner", "admin", "editor", "viewer"}:
+        return _error_response(
+            "Filecloud benötigt eine gültige Projektmitgliedschaft.",
+            403 if authenticated else 401,
+            code="filecloud_access_ticket_denied",
+        )
+
+    try:
+        from services.filecloud_access_ticket import mint_filecloud_access_ticket
+
+        access_ticket = mint_filecloud_access_ticket(
+            {
+                "project_id": public_id,
+                "project_name": _safe_str(project_payload.get("name"), public_id, 160),
+                "auth_user_id": auth_user_id,
+                "email": _safe_str(current_user.get("email") or user_auth.get("email"), "", 320),
+                "display_name": _safe_str(
+                    current_user.get("display_name")
+                    or current_user.get("displayName")
+                    or user_auth.get("display_name")
+                    or user_auth.get("displayName"),
+                    "",
+                    160,
+                ),
+                "account_id": _safe_str(
+                    current_user.get("account_id")
+                    or current_user.get("accountId")
+                    or user_auth.get("account_id")
+                    or user_auth.get("accountId"),
+                    "",
+                    160,
+                ),
+                "authenticated": True,
+                "access_mode": "authenticated",
+                "role": role,
+                "can_view": True,
+                "can_edit": _safe_bool(access.get("can_edit") or access.get("canEdit") or project_access.get("can_edit"), False),
+                "can_manage": _safe_bool(access.get("can_manage") or access.get("canManage") or project_access.get("can_manage"), False),
+                "read_only": _safe_bool(access.get("read_only") or access.get("readOnly") or project_access.get("read_only"), role == "viewer"),
+                "public_viewer": False,
+            }
+        )
+    except Exception as exc:
+        _log_exception("Filecloud access ticket creation failed", exc)
+        return _error_response(
+            "Filecloud-Zugriff konnte nicht vorbereitet werden.",
+            503,
+            code="filecloud_access_ticket_failed",
+        )
+
+    target = f"{base_url}{route}?{urlencode({'project_id': public_id, 'vp_access_ticket': access_ticket})}"
     return _redirect_response(target, status=302, workspace="files")
 
 
@@ -3744,6 +3834,34 @@ def _render_calculation_workspace(project_id: str, workspace: str, label: str) -
     payload = _safe_dict(context)
     payload["workspace"] = workspace
     payload["workspace_label"] = label
+
+    preview_templates = {
+        "structural_calculation": "viewer/structural_calculation.html",
+        "energy_calculation": "viewer/energy_calculation.html",
+    }
+    template_name = preview_templates.get(workspace)
+    if template_name:
+        project = _safe_dict(payload.get("project"))
+        project_public_id = _safe_str(
+            project.get("public_id") or project.get("publicId") or project_id,
+            project_id,
+            160,
+        )
+        html = render_template(
+            template_name,
+            project=project,
+            project_public_id=project_public_id,
+            workspace=workspace,
+            workspace_label=label,
+            preview_only=True,
+            route_prefix="",
+        )
+        response = _html_response(html, status=200)
+        response.headers["X-VECTOPLAN-Workspace"] = workspace
+        response.headers["X-VECTOPLAN-Preview"] = "display-only"
+        response.headers["X-VECTOPLAN-Project"] = project_public_id
+        return response
+
     return _render_generic_workspace(payload)
 
 

@@ -1119,6 +1119,11 @@ class ProjectChunkProvisioningService:
         commit: bool,
     ) -> ProjectChunkProvisioningResult:
         finished_at = _iso(_utcnow())
+        failure_status = (
+            ProvisioningStatus.PENDING.value
+            if error.retryable
+            else ProvisioningStatus.FAILED.value
+        )
         LOGGER.warning(
             "Chunk provisioning failed project=%s code=%s retryable=%s",
             project_public_id,
@@ -1132,7 +1137,7 @@ class ProjectChunkProvisioningService:
                 _state_set(
                     project,
                     "status",
-                    ProvisioningStatus.FAILED.value,
+                    failure_status,
                     attrs=("chunk_provisioning_status",),
                 )
                 _state_set(
@@ -1167,7 +1172,11 @@ class ProjectChunkProvisioningService:
                 )
                 self._audit(
                     project,
-                    "chunk_provisioning_failed",
+                    (
+                        "chunk_provisioning_pending"
+                        if error.retryable
+                        else "chunk_provisioning_failed"
+                    ),
                     owner_user_id,
                     error.to_dict(),
                 )
@@ -1182,7 +1191,7 @@ class ProjectChunkProvisioningService:
         return ProjectChunkProvisioningResult(
             ok=False,
             code=error.code,
-            status=ProvisioningStatus.FAILED.value,
+            status=failure_status,
             project_public_id=project_public_id,
             owner_user_id=owner_user_id,
             requested_world_template=policy.requested_template,

@@ -48,3 +48,16 @@ def test_per_parcel_grid_state_survives_project_state_sanitizing():
     grid_state = normalized["last_map_selection"]["parcelGridState"]
     assert grid_state["activeParcelId"] == "flurstuecke:42"
     assert grid_state["guides"][0]["depthMeters"] == 4
+
+
+def test_manual_project_coordinate_override_survives_state_sanitizing():
+    selection = {
+        "projectPublicId": "prj_world_edit_12345678",
+        "projectCoordinate": {"longitude": 13.40491, "latitude": 52.52081},
+        "projectCoordinateManualOverride": True,
+        "parcels": [],
+    }
+
+    normalized = _selection_payload(_json_safe({"last_map_selection": selection}))
+
+    assert normalized["last_map_selection"]["projectCoordinateManualOverride"] is True

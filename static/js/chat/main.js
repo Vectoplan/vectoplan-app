@@ -65,8 +65,8 @@ const MODE_TITLE = {
   editor: "VECTOPLAN Editor",
   editor3d: "VECTOPLAN Editor",
   map: "Karte",
-  "2d": "2D Ansicht",
-  cad2d: "2D Ansicht",
+  "2d": "CAD",
+  cad2d: "CAD",
   lv: "Leistungsverzeichnis",
   files: "Dateien",
   structural_calculation: "Tragwerksberechnung",
@@ -1504,6 +1504,46 @@ function editorPreloadFrame() {
   }
 }
 
+function prepareParcelCatalogFrame() {
+  try {
+    const currentFrame = viewerFrame();
+    const rawTarget = String(mapUrl() || "").trim();
+    if (!currentFrame || !rawTarget || isUnsafeLegacyTarget(rawTarget)) return false;
+
+    const currentTarget = currentFrame.dataset.target || currentFrame.getAttribute("src") || "";
+    if (stableLocalUrl(currentTarget) === stableLocalUrl(rawTarget)) {
+      currentFrame.dataset.parcelCatalogSource = "true";
+      return true;
+    }
+
+    // 3D and the normal workspaces intentionally use separate frames. While
+    // 3D is visible, keep the hidden workspace frame on Map so OpenLayers can
+    // stream the nearby cadastral catalogue to the shared parcel bridge. If
+    // the frame still contains CAD/LV/etc., the editor only knows already
+    // selected parcels and can therefore remove but never add one.
+    const fresh = document.createElement("iframe");
+    fresh.id = currentFrame.id;
+    fresh.className = currentFrame.className;
+    fresh.classList.remove("is-workspace-active");
+    fresh.setAttribute("title", "Karte · Flurstückkatalog");
+    fresh.setAttribute("aria-hidden", "true");
+    applyIframeCapabilities(fresh);
+    setFrameDataset(fresh, {
+      mode: "map",
+      key: canonicalTabKey("map"),
+      target: rawTarget,
+      workspaceActive: "false",
+      parcelCatalogSource: "true",
+      swappedAt: Date.now(),
+    });
+    currentFrame.replaceWith(fresh);
+    fresh.src = cacheBustLocalUrl(rawTarget);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function requestEditorRuntimeStatus(frame = editorPreloadFrame()) {
   try {
     if (!frame || !frame.contentWindow) return false;
@@ -1534,6 +1574,7 @@ function setWorkspaceFrameActive(frame, active) {
 function activateWorkspaceFrame(mode) {
   try {
     const editorActive = normalizeMode(mode) === "3d";
+    if (editorActive) prepareParcelCatalogFrame();
     setWorkspaceFrameActive(viewerFrame(), !editorActive);
     setWorkspaceFrameActive(editorPreloadFrame(), editorActive);
   } catch (_) {}
@@ -2077,7 +2118,7 @@ async function setWorkspaceMode(mode, options = {}) {
       target = await resolve2dUrl();
       hardSwapIframe(cacheBustLocalUrl(target), {
         mode: "2d",
-        title: "2D Ansicht",
+        title: "CAD",
       });
     } else if (normalized === "lv") {
       activateWorkspaceFrame(normalized);
@@ -2867,6 +2908,7 @@ function wireParcelSelectionBridge() {
       coveragePolicy: "cell-center",
       revision: 0,
       projectCoordinate: initialProjectCoordinate(),
+      projectCoordinateManualOverride: false,
       gridRotationDegrees: 0,
       parcels: [],
       adjacentParcels: [],
@@ -2876,6 +2918,9 @@ function wireParcelSelectionBridge() {
     let currentSelection = emptySelection();
     let hydrated = false;
     let availableParcels = [];
+    let localMutationSerial = 0;
+    let selectionPersistQueue = Promise.resolve();
+    let coordinatePersistQueue = Promise.resolve(false);
 
     const normalizeGridRotation = (value) => {
       let result = Number.isFinite(Number(value)) ? Number(value) : 0;
@@ -2976,6 +3021,56 @@ function wireParcelSelectionBridge() {
       };
     };
 
+    const ringCentroid = (ring) => {
+      const points = (Array.isArray(ring) ? ring : [])
+        .map((point) => [Number(point?.[0]), Number(point?.[1])])
+        .filter((point) => point.every(Number.isFinite));
+      if (points.length < 3) return null;
+      const origin = points[0];
+      let crossSum = 0;
+      let longitudeSum = 0;
+      let latitudeSum = 0;
+      for (let index = 0; index < points.length; index += 1) {
+        const current = points[index];
+        const next = points[(index + 1) % points.length];
+        const currentLongitude = current[0] - origin[0];
+        const currentLatitude = current[1] - origin[1];
+        const nextLongitude = next[0] - origin[0];
+        const nextLatitude = next[1] - origin[1];
+        const cross = currentLongitude * nextLatitude - nextLongitude * currentLatitude;
+        crossSum += cross;
+        longitudeSum += (currentLongitude + nextLongitude) * cross;
+        latitudeSum += (currentLatitude + nextLatitude) * cross;
+      }
+      if (!Number.isFinite(crossSum) || Math.abs(crossSum) < 1e-18) return null;
+      const longitude = origin[0] + longitudeSum / (3 * crossSum);
+      const latitude = origin[1] + latitudeSum / (3 * crossSum);
+      if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return null;
+      return { coordinate: { longitude, latitude }, area: Math.abs(crossSum) / 2 };
+    };
+
+    const parcelCenterCoordinate = (parcel) => {
+      let largest = null;
+      for (const polygon of polygonCoordinates(parcel)) {
+        const centroid = ringCentroid(Array.isArray(polygon?.[0]) ? polygon[0] : []);
+        if (centroid && (!largest || centroid.area > largest.area)) largest = centroid;
+      }
+      if (largest) return largest.coordinate;
+      const bounds = parcelBounds(parcel);
+      if (!bounds) return null;
+      return {
+        longitude: (bounds.minLon + bounds.maxLon) / 2,
+        latitude: (bounds.minLat + bounds.maxLat) / 2,
+      };
+    };
+
+    const automaticCoordinateForSelection = (previous, next) => {
+      if (previous?.projectCoordinateManualOverride || next?.projectCoordinateManualOverride) return null;
+      const previousIds = new Set((previous?.parcels || []).map((parcel) => parcel.parcelId));
+      const added = (next?.parcels || []).filter((parcel) => !previousIds.has(parcel.parcelId));
+      return added.length ? parcelCenterCoordinate(added[added.length - 1]) : null;
+    };
+
     const adjacentParcelsFor = (selected, available) => {
       if (!selected.length || !available.length) return [];
       const selectedIds = new Set(selected.map((parcel) => parcel.parcelId));
@@ -3016,6 +3111,10 @@ function wireParcelSelectionBridge() {
         const coordinateSource = source.projectCoordinate || source.project_coordinate || {};
         const longitude = Number(coordinateSource.longitude ?? coordinateSource.lon ?? coordinateSource.lng);
         const latitude = Number(coordinateSource.latitude ?? coordinateSource.lat);
+        const manualOverrideValue = source.projectCoordinateManualOverride
+          ?? source.project_coordinate_manual_override;
+        const projectCoordinateManualOverride = currentSelection?.projectCoordinateManualOverride === true
+          || (manualOverrideValue != null && boolFromValue(manualOverrideValue, false));
         const parcelGridState = normalizeParcelGridState(
           source.parcelGridState
           || source.parcel_grid_state
@@ -3029,6 +3128,7 @@ function wireParcelSelectionBridge() {
           projectCoordinate: Number.isFinite(longitude) && Number.isFinite(latitude)
             ? { longitude, latitude }
             : (currentSelection?.projectCoordinate || initialProjectCoordinate()),
+          projectCoordinateManualOverride,
           gridRotationDegrees: dominantGridRotation(
             parcels,
             Number.isFinite(latitude) ? latitude : (currentSelection?.projectCoordinate?.latitude || 0),
@@ -3043,6 +3143,18 @@ function wireParcelSelectionBridge() {
     };
 
     const broadcastSelection = () => {
+      // Persist every known selected geometry in the in-memory catalogue as
+      // well. This keeps a parcel immediately re-selectable even before the
+      // hidden Map frame has finished loading its viewport catalogue.
+      availableParcels = normalizeParcelList([
+        ...currentSelection.parcels,
+        ...availableParcels,
+      ], 512);
+      const root = appRoot();
+      if (root) {
+        root.dataset.parcelCatalogCount = String(availableParcels.length);
+        root.dataset.parcelSelectionCount = String(currentSelection.parcels.length);
+      }
       const message = {
         type: "vectoplan-app:parcel-selection-sync",
         kind: "vectoplan-app:parcel-selection-sync",
@@ -3056,39 +3168,65 @@ function wireParcelSelectionBridge() {
       uiState.lastParcelSelectionTs = Date.now();
     };
 
-    const persistSelection = async () => {
+    const persistSelection = () => {
       try {
         const statePath = pathValue("statePutPath") || cfgValue("statePutPath");
-        if (!statePath || statePath === "__DISABLED__") return;
-        await fetch(statePath, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          credentials: "same-origin",
-          cache: "no-store",
-          body: JSON.stringify({
-            last_map_selection: currentSelection,
-            last_map_selection_ts: Date.now(),
-            legacy_3d_backend: false,
-          }),
-        }).catch(() => {});
-      } catch (_) {}
+        if (!statePath || statePath === "__DISABLED__") return Promise.resolve();
+        const selectionSnapshot = JSON.parse(JSON.stringify(currentSelection));
+        const selectionTimestamp = Date.now();
+        selectionPersistQueue = selectionPersistQueue.catch(() => undefined).then(async () => {
+          try {
+            await fetch(statePath, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              credentials: "same-origin",
+              cache: "no-store",
+              body: JSON.stringify({
+                last_map_selection: selectionSnapshot,
+                last_map_selection_ts: selectionTimestamp,
+                legacy_3d_backend: false,
+              }),
+            });
+          } catch (_) {}
+        });
+        return selectionPersistQueue;
+      } catch (_) {
+        return Promise.resolve();
+      }
     };
 
-    const persistProjectCoordinate = async (coordinate) => {
+    const persistProjectCoordinate = (coordinate) => {
       try {
-        const endpoint = cfgValue("projectApiPath");
-        if (!endpoint || endpoint === "__DISABLED__") return;
-        await fetch(endpoint, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json", "Accept": "application/json" },
-          credentials: "same-origin",
-          cache: "no-store",
-          body: JSON.stringify({
-            longitude: coordinate.longitude,
-            latitude: coordinate.latitude,
-          }),
+        const endpoint = pathValue("projectApiPath") || cfgValue("projectApiPath");
+        if (!endpoint || endpoint === "__DISABLED__") return Promise.resolve(false);
+        const coordinateSnapshot = {
+          longitude: Number(coordinate.longitude),
+          latitude: Number(coordinate.latitude),
+        };
+        coordinatePersistQueue = coordinatePersistQueue.catch(() => false).then(async () => {
+          try {
+            const response = await fetch(endpoint, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json", "Accept": "application/json" },
+              credentials: "same-origin",
+              cache: "no-store",
+              body: JSON.stringify(coordinateSnapshot),
+            });
+            if (!response.ok) return false;
+            const project = currentProject();
+            project.longitude = coordinateSnapshot.longitude;
+            project.latitude = coordinateSnapshot.latitude;
+            project.lng = coordinateSnapshot.longitude;
+            project.lat = coordinateSnapshot.latitude;
+            return true;
+          } catch (_) {
+            return false;
+          }
         });
-      } catch (_) {}
+        return coordinatePersistQueue;
+      } catch (_) {
+        return Promise.resolve(false);
+      }
     };
 
     safeOn(window, "message", (event) => {
@@ -3106,13 +3244,28 @@ function wireParcelSelectionBridge() {
           (type === "vectoplan-map:parcel-selection-changed" && fromMap)
           || (type === "vectoplan-editor:parcel-selection-changed" && fromEditor)
         ) {
-          const nextSelection = normalizedSelection(data.detail || data);
+          localMutationSerial += 1;
+          const previousSelection = currentSelection;
+          const normalized = normalizedSelection(data.detail || data);
+          const automaticCoordinate = automaticCoordinateForSelection(previousSelection, normalized);
+          const nextSelection = {
+            ...normalized,
+            revision: Math.max(
+              Number(previousSelection.revision || 0) + 1,
+              Number(normalized.revision || 0),
+            ),
+            projectCoordinate: automaticCoordinate
+              || (previousSelection.projectCoordinateManualOverride === true
+                ? previousSelection.projectCoordinate
+                : normalized.projectCoordinate),
+          };
           currentSelection = {
             ...nextSelection,
             adjacentParcels: adjacentParcelsFor(nextSelection.parcels, availableParcels),
           };
           broadcastSelection();
           void persistSelection();
+          if (automaticCoordinate) void persistProjectCoordinate(automaticCoordinate);
           return;
         }
 
@@ -3123,9 +3276,13 @@ function wireParcelSelectionBridge() {
           const incomingProjectId = String(detail.projectPublicId || detail.project_public_id || "").trim();
           if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return;
           if (incomingProjectId && incomingProjectId !== projectPublicId()) return;
+          localMutationSerial += 1;
           currentSelection = {
             ...currentSelection,
             projectCoordinate: { longitude, latitude },
+            projectCoordinateManualOverride: detail.projectCoordinateManualOverride == null
+              ? true
+              : boolFromValue(detail.projectCoordinateManualOverride, true),
             revision: Number(currentSelection.revision || 0) + 1,
           };
           broadcastSelection();
@@ -3138,12 +3295,17 @@ function wireParcelSelectionBridge() {
           const detail = data.detail && typeof data.detail === "object" ? data.detail : data;
           const incomingProjectId = String(detail.projectPublicId || detail.project_public_id || "").trim();
           if (incomingProjectId && incomingProjectId !== projectPublicId()) return;
+          localMutationSerial += 1;
           availableParcels = normalizedSelection({
             ...currentSelection,
             parcels: detail.availableParcels || detail.available_parcels || [],
           }, 512).parcels;
           const coordinate = detail.projectCoordinate || detail.project_coordinate;
-          if (coordinate && typeof coordinate === "object") {
+          if (
+            currentSelection.projectCoordinateManualOverride !== true
+            && coordinate
+            && typeof coordinate === "object"
+          ) {
             const longitude = Number(coordinate.longitude ?? coordinate.lon ?? coordinate.lng);
             const latitude = Number(coordinate.latitude ?? coordinate.lat);
             if (Number.isFinite(longitude) && Number.isFinite(latitude)) {
@@ -3174,6 +3336,7 @@ function wireParcelSelectionBridge() {
     });
 
     void (async () => {
+      const hydrationMutationSerial = localMutationSerial;
       try {
         const statePath = pathValue("stateGetPath") || cfgValue("stateGetPath");
         if (!statePath || statePath === "__DISABLED__") {
@@ -3190,7 +3353,9 @@ function wireParcelSelectionBridge() {
         if (response.ok) {
           const payload = await response.json();
           const selectionState = payload?.selection || payload?.viewer_selection || payload || {};
-          currentSelection = normalizedSelection(selectionState.last_map_selection || selectionState);
+          if (localMutationSerial === hydrationMutationSerial) {
+            currentSelection = normalizedSelection(selectionState.last_map_selection || selectionState);
+          }
         }
       } catch (_) {}
       hydrated = true;

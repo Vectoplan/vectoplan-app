@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 from flask import Flask, Response
 
@@ -11,12 +12,19 @@ from services import project_publication_service, project_workspace_context
 
 
 def _app() -> Flask:
-    app = Flask(__name__)
+    root = Path(__file__).parents[1]
+    app = Flask(
+        __name__,
+        template_folder=str(root / "templates"),
+        static_folder=str(root / "static"),
+        static_url_path="/static",
+    )
     app.config.update(
         TESTING=True,
         VECTOPLAN_FILECLOUD_EMBED_ENABLED=True,
         VECTOPLAN_FILECLOUD_PUBLIC_URL="http://localhost:5107",
         VECTOPLAN_FILECLOUD_ROUTE="/files",
+        VECTOPLAN_FILECLOUD_ACCESS_TICKET_SECRET="test-filecloud-access-ticket-secret-32-bytes-minimum",
     )
     app.register_blueprint(bp)
     return app
@@ -28,7 +36,21 @@ def _project_context() -> dict:
             "public_id": "prj_alpha_12345678",
             "name": "Alpha",
             "configured": True,
-        }
+            "access": {"role": "owner", "can_view": True, "can_edit": True, "can_manage": True},
+        },
+        "current_user": {
+            "authenticated": True,
+            "auth_user_id": "auth_user_alpha",
+            "email": "owner@example.com",
+        },
+        "workspace_access": {
+            "allowed": True,
+            "can_view": True,
+            "can_edit": True,
+            "can_manage": True,
+            "project_role": "owner",
+            "access_mode": "authenticated",
+        },
     }
 
 
@@ -38,7 +60,11 @@ def test_files_route_uses_public_project_id_and_filecloud_port() -> None:
         response = app.test_client().get("/ui/project/prj_alpha_12345678/files")
 
     assert response.status_code == 302
-    assert response.headers["Location"] == "http://localhost:5107/files?project_id=prj_alpha_12345678"
+    location = urlsplit(response.headers["Location"])
+    query = parse_qs(location.query)
+    assert (location.scheme, location.netloc, location.path) == ("http", "localhost:5107", "/files")
+    assert query["project_id"] == ["prj_alpha_12345678"]
+    assert len(query["vp_access_ticket"][0].split(".")) == 2
 
 
 def test_calculation_routes_have_project_scoped_shells() -> None:
@@ -54,6 +80,33 @@ def test_calculation_routes_have_project_scoped_shells() -> None:
             response = client.get(f"/ui/project/prj_alpha_12345678/{suffix}")
             assert response.status_code == 200
             assert label in response.get_data(as_text=True)
+
+            if suffix == "structural-calculation":
+                assert 'id="statik-app"' in response.get_data(as_text=True)
+                assert 'class="mobile-panel-button explorer-button"' in response.get_data(as_text=True)
+                assert response.headers["X-VECTOPLAN-Preview"] == "display-only"
+            elif suffix == "energy-calculation":
+                assert 'id="energy-app"' in response.get_data(as_text=True)
+                assert '<nav class="module-rail"' in response.get_data(as_text=True)
+                assert '<aside class="module-rail"' not in response.get_data(as_text=True)
+                assert response.headers["X-VECTOPLAN-Preview"] == "display-only"
+
+
+def test_calculation_preview_assets_are_served_locally() -> None:
+    app = _app()
+    client = app.test_client()
+
+    for path in (
+        "/static/statik/css/main.css",
+        "/static/statik/js/main.js",
+        "/static/statik/examples/sample_model.json",
+        "/static/energie/css/main.css",
+        "/static/energie/js/main.js",
+        "/static/energie/examples/sample_project.json",
+        "/static/energie/examples/display_pipeline.json",
+    ):
+        response = client.get(path)
+        assert response.status_code == 200, path
 
 
 def test_side_menu_replaces_versions_and_admin() -> None:

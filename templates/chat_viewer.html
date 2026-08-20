@@ -282,9 +282,9 @@
     })();
   </script>
 
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}?v={{ chat_id_s }}-icon-tooltips-20260730">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_sidebar.css') }}?v={{ chat_id_s }}-project-list-20260730">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ project_public_id|default('new', true) }}-calm-palette-20260730">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}?v={{ chat_id_s }}-mobile-shell-20260818-1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_sidebar.css') }}?v={{ chat_id_s }}-mobile-shell-20260818-1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ project_public_id|default('new', true) }}-mobile-shell-20260818-1">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/notice_stream.css') }}?v={{ project_public_id|default('new', true) }}">
 
   <script>
@@ -756,6 +756,9 @@
         data-default-mode="{{ resolved_default_mode }}"
         data-workspace-mode="{{ resolved_workspace_mode }}"
         data-project-page-path="{{ resolved_project_url }}"
+        data-project-api-path="{{ ('/v1/projects/' ~ project_public_id_q) if project_public_id and project_public_id != 'new' else '/v1/projects' }}"
+        data-state-get-path="{{ state_get_path }}"
+        data-state-put-path="{{ state_put_path }}"
         data-editor-page-path="{{ editor_page_path }}"
         data-editor3d-page-path="{{ editor_page_path }}"
         data-map-page-path="{{ map_page_path }}"
@@ -832,16 +835,16 @@
           <button id="mode2dBtn"
                   class="btn workspace-rail__button"
                   type="button"
-                  aria-label="2D"
+                  aria-label="CAD"
                   aria-pressed="{{ 'true' if resolved_default_mode == '2d' else 'false' }}"
-                  title="2D"
+                  title="CAD"
                   data-workspace-mode-button="2d"
                   data-workspace-key="cad2d"
                   data-workspace-path="{{ cad2d_page_path }}"
                   data-requires-configured-project="true"
                   {% if not cad2d_workspace_enabled %}disabled aria-disabled="true"{% endif %} data-i18n-aria-label="server.app.chat_viewer.button_aria-label.2d.1d579d71" data-i18n-title="server.app.chat_viewer.button_title.2d.7e7f2b43">
-            <span class="workspace-rail__icon workspace-rail__icon--text" aria-hidden="true" data-i18n="vectoplan.server.app.chat_viewer.span.2d.facabb20">2D</span>
-            <span class="workspace-rail__label" data-i18n="vectoplan.server.app.chat_viewer.span.2d.3c53e5f0">2D</span>
+            <span class="workspace-rail__icon workspace-rail__icon--text" aria-hidden="true">CAD</span>
+            <span class="workspace-rail__label">CAD</span>
           </button>
 
           <button id="modeLvBtn"
@@ -952,6 +955,6 @@
   <script src="{{ url_for('static', filename='js/chat/project_sidebar_resize.js') }}?v={{ chat_id_s }}"></script>
   <script src="{{ url_for('static', filename='js/chat/project_sidebar.js') }}?v={{ chat_id_s }}-force-public-sidebar-20260731"></script>
   <script src="{{ url_for('static', filename='js/chat/icon_tooltips.js') }}?v={{ chat_id_s }}-icon-tooltips-20260730"></script>
-  <script type="module" src="{{ url_for('static', filename='js/chat/main.js') }}?v={{ chat_id_s }}-workspace-settings-20260731"></script>
+  <script type="module" src="{{ url_for('static', filename='js/chat/main.js') }}?v={{ chat_id_s }}-parcel-coordinate-sync-20260815-2"></script>
 </body>
 </html>

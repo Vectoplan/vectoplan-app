@@ -6,7 +6,7 @@ import importlib
 import threading
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from flask import Blueprint, Flask, current_app, jsonify, request
+from flask import Blueprint, Flask, current_app, jsonify, redirect, request
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import Config
@@ -142,6 +142,26 @@ def _status_ok(value: Any) -> bool:
         return False
 
 
+def _canonical_local_cookie_url(
+    host: str,
+    url: str,
+    *,
+    auth_session_present: bool = False,
+) -> Optional[str]:
+    # Keep the incoming host when it already carries the verified auth
+    # session. Redirecting an authenticated localhost request to 127.0.0.1
+    # would cross the browser's cookie-host boundary and turn the user into a
+    # guest inside the embedded app.
+    if auth_session_present:
+        return None
+    if _safe_str(host, "", 256).casefold() != "localhost:5103":
+        return None
+    source = _safe_str(url, "", 8000)
+    if not source.startswith("http://localhost:5103"):
+        return None
+    return source.replace("http://localhost:5103", "http://127.0.0.1:5103", 1)
+
+
 # ─────────────────────────────────────────────────────────────
 # Blueprint imports
 # ─────────────────────────────────────────────────────────────
@@ -256,6 +276,7 @@ def _apply_default_config(app: Flask) -> None:
     app.config.setdefault("VECTOPLAN_FORCE_DEMO_MODE", False)
     app.config.setdefault("VECTOPLAN_ALLOW_DEMO_QUERY_PARAM", False)
     app.config.setdefault("VECTOPLAN_DEMO_TTL_SECONDS", 3600)
+    app.config.setdefault("VECTOPLAN_AUTH_SESSION_COOKIE_NAME", "vectoplan_auth_session")
 
     # vectoplan-auth URLs.
     # INTERNAL_URL is server-to-server and must be reachable from the app container.
@@ -721,10 +742,11 @@ def _allowed_frame_ancestors(app: Flask, *, desktop_embed: bool = False) -> str:
         "http://127.0.0.1:5200"
     )
     if desktop_embed:
-        # The native launcher intentionally serves its trusted shell from a
-        # packaged file:// URL. Only the explicit allow_embed=1 request may
-        # therefore be framed by a local desktop document.
-        allowed = f"{allowed} file:"
+        # PyWebView can use either a packaged file:// document or an ephemeral
+        # loopback HTTP port for its trusted shell.  This broader source is
+        # only emitted when the explicit desktop marker accompanies
+        # allow_embed=1.
+        allowed = f"{allowed} file: http://127.0.0.1:* http://localhost:*"
 
     try:
         extra = (
@@ -753,13 +775,19 @@ def _allowed_frame_ancestors(app: Flask, *, desktop_embed: bool = False) -> str:
 
 def _request_allows_desktop_embed() -> bool:
     try:
-        return request.args.get("allow_embed") == "1"
+        return (
+            request.args.get("allow_embed") == "1"
+            and str(request.args.get("client_source") or "").strip().lower() == "desktop"
+        )
     except Exception:
         return False
 
 
 def _request_allows_embed() -> bool:
-    allow_embed = _request_allows_desktop_embed()
+    try:
+        allow_embed = request.args.get("allow_embed") == "1"
+    except Exception:
+        allow_embed = False
 
     try:
         path = str(request.path or "")
@@ -826,6 +854,25 @@ def create_app() -> Flask:
 
     app.config.from_object(Config)
     _apply_default_config(app)
+
+    @app.before_request
+    def _canonicalize_local_cookie_host():
+        # Browser cookies are host-bound, not port-bound. Auth development uses
+        # 127.0.0.1, so a manual unauthenticated localhost:5103 request may be
+        # moved there. An existing localhost session must stay on localhost.
+        auth_cookie_name = _config_str(
+            app,
+            "VECTOPLAN_AUTH_SESSION_COOKIE_NAME",
+            "vectoplan_auth_session",
+        )
+        target = _canonical_local_cookie_url(
+            request.host,
+            request.url,
+            auth_session_present=bool(request.cookies.get(auth_cookie_name)),
+        )
+        if target is None:
+            return None
+        return redirect(target, code=307)
 
     # Logging.
     try:

@@ -1,0 +1,744 @@
+{
+  "ok": true,
+  "pipeline_version": "energy-pipeline/0.3",
+  "rule_profile": "de-working-2026.1",
+  "calculation_status": "working",
+  "normative": false,
+  "calculated_at": "2026-08-15T07:21:02.773927+00:00",
+  "project_id": "vp-demo-energie-001",
+  "project_revision": "demo-rev-17",
+  "model_fingerprint": "fd25a04dcf4cdb6e6f71",
+  "normalized_project": {
+    "schema_version": "energy-project/0.2",
+    "source_schema_version": "energy-project/0.1",
+    "revision": "demo-rev-17",
+    "project": {
+      "id": "vp-demo-energie-001",
+      "name": "Wohnquartier Am Stadtpark",
+      "phase": "Entwurfsplanung",
+      "address": "Musterstraße 18, 50667 Köln",
+      "last_updated": "2026-08-14T09:30:00+02:00"
+    },
+    "building": {
+      "type": "residential",
+      "type_label": "Mehrfamilienhaus",
+      "construction_year": 2026,
+      "condition": "new_build",
+      "floors": 4,
+      "units": 12,
+      "zones": 8
+    },
+    "geometry": {
+      "heated_floor_area_m2": 642.8,
+      "net_room_area_m2": 611.4,
+      "envelope_area_m2": 1174.6,
+      "conditioned_volume_m3": 2011.3,
+      "window_share": 0.18,
+      "orientation": "Süd-Südwest",
+      "source": "demo_building_snapshot",
+      "source_revision": "cad-demo-42"
+    },
+    "zones": [
+      {
+        "id": "zone-building",
+        "name": "Gesamtgebäude",
+        "usage_profile": "residential_multi_family",
+        "conditioned": true,
+        "floor_area_m2": 642.8,
+        "volume_m3": 2011.3,
+        "indoor_temperature_c": 20.0,
+        "occupants": 28.0
+      }
+    ],
+    "envelope": {
+      "source": "library",
+      "catalog_revision": "library-demo-7",
+      "components": [
+        {
+          "id": "wall-01",
+          "name": "Außenwand Holz-Hybrid",
+          "kind": "exterior_wall",
+          "area_m2": 446.3,
+          "thickness_cm": 38,
+          "insulation_cm": 20,
+          "u_value": 0.19,
+          "status": "verified",
+          "source": "library",
+          "boundary_temperature_factor": 1.0,
+          "layers": []
+        },
+        {
+          "id": "roof-01",
+          "name": "Flachdach extensiv begrünt",
+          "kind": "roof",
+          "area_m2": 246.7,
+          "thickness_cm": 46,
+          "insulation_cm": 24,
+          "u_value": 0.16,
+          "status": "verified",
+          "source": "library",
+          "boundary_temperature_factor": 1.0,
+          "layers": []
+        },
+        {
+          "id": "floor-01",
+          "name": "Bodenplatte gegen Erdreich",
+          "kind": "floor",
+          "area_m2": 270.2,
+          "thickness_cm": 42,
+          "insulation_cm": 16,
+          "u_value": 0.24,
+          "status": "assumption",
+          "source": "energy_default",
+          "boundary_temperature_factor": 1.0,
+          "layers": []
+        },
+        {
+          "id": "window-01",
+          "name": "Fenster 3-fach",
+          "kind": "window",
+          "area_m2": 211.4,
+          "u_value": 0.95,
+          "g_value": 0.52,
+          "status": "verified",
+          "source": "library",
+          "boundary_temperature_factor": 1.0,
+          "layers": []
+        }
+      ],
+      "thermal_bridges": []
+    },
+    "systems": {
+      "heating": {
+        "type": "heat_pump",
+        "label": "Luft/Wasser-Wärmepumpe",
+        "seasonal_performance_factor": 3.6,
+        "flow_temperature_c": 35,
+        "verified": false
+      },
+      "ventilation": {
+        "type": "balanced_with_heat_recovery",
+        "heat_recovery_rate": 0.78,
+        "verified": false
+      },
+      "renewables": {
+        "pv_peak_kwp": 14.8,
+        "battery_kwh": 8.0,
+        "roof_potential_kwp": 22.4
+      }
+    },
+    "usage": {
+      "indoor_temperature_c": 20,
+      "occupants": 28,
+      "climate_location": "Köln",
+      "usage_profile": "residential_multi_family"
+    },
+    "climate": {},
+    "targets": {},
+    "economics": {},
+    "provenance": {
+      "geometry_revision": "cad-demo-42",
+      "library_revision": "library-demo-7",
+      "calculation_revision": null,
+      "detached_demo": true,
+      "normalized_from": "energy-project/0.1"
+    }
+  },
+  "summary": {
+    "mean_u_value_w_m2k": 0.33198,
+    "heat_transfer_w_k": 448.677,
+    "design_heat_load_kw": 18.657,
+    "useful_space_heating_kwh_a": 5417.41,
+    "final_energy_kwh_m2a": 11.634,
+    "primary_energy_kwh_m2a": 20.942,
+    "co2_kg_m2a": 4.188,
+    "energy_class": "A+",
+    "data_quality_percent": 98
+  },
+  "quality": {
+    "score_percent": 98,
+    "errors": 0,
+    "warnings": 0,
+    "verified_components": 3,
+    "component_count": 4
+  },
+  "issues": [],
+  "stages": [
+    {
+      "id": "model",
+      "label": "Projektmodell normalisieren",
+      "status": "completed",
+      "inputs": [
+        "project",
+        "editor-selection",
+        "cad-selection"
+      ],
+      "output": {
+        "model_fingerprint": "fd25a04dcf4cdb6e6f71",
+        "issues": []
+      }
+    },
+    {
+      "id": "envelope",
+      "label": "Gebäudehülle & Wärmebrücken",
+      "status": "completed",
+      "inputs": [
+        "envelope.components",
+        "envelope.thermal_bridges"
+      ],
+      "output": {
+        "components": [
+          {
+            "id": "wall-01",
+            "name": "Außenwand Holz-Hybrid",
+            "kind": "exterior_wall",
+            "area_m2": 446.3,
+            "boundary_temperature_factor": 1.0,
+            "heat_transfer_w_k": 84.797,
+            "thermal": {
+              "u_value_w_m2k": 0.19,
+              "r_total_m2k_w": 5.26316,
+              "source": "supplied",
+              "layers": []
+            },
+            "source": "library",
+            "status": "verified"
+          },
+          {
+            "id": "roof-01",
+            "name": "Flachdach extensiv begrünt",
+            "kind": "roof",
+            "area_m2": 246.7,
+            "boundary_temperature_factor": 1.0,
+            "heat_transfer_w_k": 39.472,
+            "thermal": {
+              "u_value_w_m2k": 0.16,
+              "r_total_m2k_w": 6.25,
+              "source": "supplied",
+              "layers": []
+            },
+            "source": "library",
+            "status": "verified"
+          },
+          {
+            "id": "floor-01",
+            "name": "Bodenplatte gegen Erdreich",
+            "kind": "floor",
+            "area_m2": 270.2,
+            "boundary_temperature_factor": 1.0,
+            "heat_transfer_w_k": 64.848,
+            "thermal": {
+              "u_value_w_m2k": 0.24,
+              "r_total_m2k_w": 4.16667,
+              "source": "supplied",
+              "layers": []
+            },
+            "source": "energy_default",
+            "status": "assumption"
+          },
+          {
+            "id": "window-01",
+            "name": "Fenster 3-fach",
+            "kind": "window",
+            "area_m2": 211.4,
+            "boundary_temperature_factor": 1.0,
+            "heat_transfer_w_k": 200.83,
+            "thermal": {
+              "u_value_w_m2k": 0.95,
+              "r_total_m2k_w": 1.05263,
+              "source": "supplied",
+              "layers": []
+            },
+            "source": "library",
+            "status": "verified"
+          }
+        ],
+        "thermal_bridges": [],
+        "blanket_thermal_bridge_delta_u_w_m2k": 0.05,
+        "component_heat_transfer_w_k": 389.947,
+        "thermal_bridge_heat_transfer_w_k": 58.73,
+        "total_heat_transfer_w_k": 448.677,
+        "envelope_area_m2": 1174.6,
+        "mean_u_value_w_m2k": 0.33198
+      }
+    },
+    {
+      "id": "ventilation",
+      "label": "Lüftung & Infiltration",
+      "status": "completed",
+      "inputs": [
+        "systems.ventilation",
+        "zones"
+      ],
+      "output": {
+        "type": "balanced_with_heat_recovery",
+        "conditioned_volume_m3": 2011.3,
+        "occupants": 28.0,
+        "mechanical_air_changes_per_hour": 0.5,
+        "infiltration_air_changes_per_hour": 0.1,
+        "heat_recovery_rate": 0.78,
+        "design_airflow_m3_h": 1005.65,
+        "hygienic_screening_airflow_m3_h": 700.0,
+        "hygienic_screening_passed": true,
+        "effective_thermal_airflow_m3_h": 422.37,
+        "heat_transfer_w_k": 143.607,
+        "screening_only": true
+      }
+    },
+    {
+      "id": "heating-load",
+      "label": "Auslegungs-Heizlast",
+      "status": "completed",
+      "inputs": [
+        "envelope",
+        "ventilation",
+        "climate"
+      ],
+      "output": {
+        "indoor_temperature_c": 20.0,
+        "design_outdoor_temperature_c": -10.0,
+        "design_temperature_difference_k": 30.0,
+        "transmission_heat_load_kw": 13.46,
+        "ventilation_heat_load_kw": 4.308,
+        "design_heat_load_kw": 18.657,
+        "safety_factor": 1.05,
+        "method": "steady-state-working-method",
+        "normative": false
+      }
+    },
+    {
+      "id": "moisture",
+      "label": "Feuchteschutz-Screening",
+      "status": "completed",
+      "inputs": [
+        "envelope.components.layers",
+        "climate"
+      ],
+      "output": {
+        "components": [],
+        "risk_count": 0,
+        "status": "insufficient-data",
+        "method": "stationary-vapour-pressure-screening",
+        "normative": false
+      }
+    },
+    {
+      "id": "summer-comfort",
+      "label": "Sommerlicher Wärmeschutz",
+      "status": "completed",
+      "inputs": [
+        "windows",
+        "shading",
+        "zones"
+      ],
+      "output": {
+        "solar_gain_peak_w": 32153.9,
+        "specific_solar_gain_w_m2": 50.02,
+        "screening_threshold_w_m2": 45.0,
+        "screening_passed": false,
+        "status": "screened",
+        "method": "solar-gain-working-screen",
+        "normative": false
+      }
+    },
+    {
+      "id": "annual-balance",
+      "label": "Jahres-Nutzenergiebilanz",
+      "status": "completed",
+      "inputs": [
+        "envelope",
+        "ventilation",
+        "usage",
+        "climate"
+      ],
+      "output": {
+        "floor_area_m2": 642.8,
+        "heating_degree_days_kd": 3400.0,
+        "transmission_heat_loss_kwh_a": 36612.04,
+        "ventilation_heat_loss_kwh_a": 11718.33,
+        "internal_gains_kwh_a": 6272.0,
+        "solar_gains_kwh_a": 35451.78,
+        "usable_gains_kwh_a": 34213.5,
+        "useful_space_heating_kwh_a": 5417.41,
+        "useful_hot_water_kwh_a": 17360.0,
+        "loss_utilization_factor": 0.82,
+        "method": "annual-degree-day-working-balance",
+        "normative": false
+      }
+    },
+    {
+      "id": "systems",
+      "label": "Anlagen-, End- und Primärenergie",
+      "status": "completed",
+      "inputs": [
+        "systems",
+        "annual-balance"
+      ],
+      "output": {
+        "heating_system_type": "heat_pump",
+        "energy_carrier": "electricity",
+        "seasonal_efficiency": 3.6,
+        "heating_and_hot_water_final_kwh_a": 6327.06,
+        "lighting_kwh_a": 4821.0,
+        "auxiliary_kwh_a": 1285.6,
+        "pv_generation_kwh_a": 13764.0,
+        "pv_self_use_kwh_a": 4955.04,
+        "pv_self_use_demand_coverage_cap": 0.75,
+        "final_energy_kwh_a": 7478.62,
+        "final_energy_kwh_m2a": 11.634,
+        "primary_energy_factor": 1.8,
+        "primary_energy_kwh_a": 13461.51,
+        "primary_energy_kwh_m2a": 20.942,
+        "co2_kg_a": 2692.3,
+        "co2_kg_m2a": 4.188,
+        "renewable_heat_share": 1.0,
+        "renewable_heat_65_percent_screening": true,
+        "energy_class": "A+",
+        "factor_profile": "de-working-factors/2026.1",
+        "normative": false
+      }
+    },
+    {
+      "id": "target-screen",
+      "label": "Ziel- und Regelprofilprüfung",
+      "status": "completed",
+      "inputs": [
+        "targets",
+        "systems",
+        "envelope"
+      ],
+      "output": {
+        "target": "GEG",
+        "checks": [
+          {
+            "id": "primary-reference",
+            "status": "data-missing",
+            "message": "Referenzgebäude-Primärenergie fehlt."
+          },
+          {
+            "id": "transmission-reference",
+            "status": "data-missing",
+            "message": "Referenzwert des baulichen Wärmeschutzes fehlt."
+          },
+          {
+            "id": "renewable-heat-screen",
+            "status": "passed",
+            "actual_percent": 100.0,
+            "screening_threshold_percent": 65
+          }
+        ],
+        "status": "incomplete",
+        "normative": false
+      }
+    }
+  ],
+  "compliance_screen": {
+    "target": "GEG",
+    "checks": [
+      {
+        "id": "primary-reference",
+        "status": "data-missing",
+        "message": "Referenzgebäude-Primärenergie fehlt."
+      },
+      {
+        "id": "transmission-reference",
+        "status": "data-missing",
+        "message": "Referenzwert des baulichen Wärmeschutzes fehlt."
+      },
+      {
+        "id": "renewable-heat-screen",
+        "status": "passed",
+        "actual_percent": 100.0,
+        "screening_threshold_percent": 65
+      }
+    ],
+    "status": "incomplete",
+    "normative": false
+  },
+  "readiness": {
+    "working_calculation": true,
+    "normative_output_allowed": false,
+    "energy_certificate_allowed": false,
+    "isfp_export_allowed": false,
+    "missing_gates": [
+      "validated DIN V 18599 calculation kernel",
+      "complete official climate and usage profile",
+      "reference-building calculation",
+      "authorized expert review and signature",
+      "official registration/export workflow"
+    ]
+  },
+  "sources": [
+    {
+      "id": "geg",
+      "url": "https://www.gesetze-im-internet.de/geg/BJNR172810020.html",
+      "role": "legal-structure-and-output-gates"
+    },
+    {
+      "id": "bafa-isfp",
+      "url": "https://www.bafa.de/DE/Energie/Energieberatung/Energieberatung_Wohngebaeude/energieberatung_wohngebaeude.html",
+      "role": "roadmap-export-gate"
+    },
+    {
+      "id": "kfw-tfaq",
+      "url": "https://www.kfw.de/PDF/Download-Center/F%C3%B6rderprogramme-%28Inlandsf%C3%B6rderung%29/PDF-Dokumente/6000004865_Infoblatt_BEG_TFAQ_Effizienzhaus.pdf",
+      "role": "funding-profile-reference"
+    }
+  ],
+  "disclaimer": "Reproduzierbare Facharbeitsberechnung; kein normativer GEG-, Förder-, iSFP- oder Energieausweis-Nachweis.",
+  "variants": [
+    {
+      "id": "envelope",
+      "label": "Gebäudehülle",
+      "changes": [
+        {
+          "measure": "u-value-exterior_wall",
+          "component_ids": [
+            "wall-01"
+          ],
+          "target_u_value": 0.18
+        },
+        {
+          "measure": "u-value-roof",
+          "component_ids": [
+            "roof-01"
+          ],
+          "target_u_value": 0.14
+        },
+        {
+          "measure": "u-value-floor",
+          "component_ids": [
+            "floor-01"
+          ],
+          "target_u_value": 0.22
+        },
+        {
+          "measure": "u-value-window",
+          "component_ids": [
+            "window-01"
+          ],
+          "target_u_value": 0.9
+        }
+      ],
+      "summary": {
+        "mean_u_value_w_m2k": 0.31038,
+        "heat_transfer_w_k": 423.306,
+        "design_heat_load_kw": 17.858,
+        "useful_space_heating_kwh_a": 3719.78,
+        "final_energy_kwh_m2a": 10.901,
+        "primary_energy_kwh_m2a": 19.621,
+        "co2_kg_m2a": 3.924,
+        "energy_class": "A+",
+        "data_quality_percent": 92
+      },
+      "primary_energy_saving_percent": 6.3
+    },
+    {
+      "id": "systems",
+      "label": "Wärmepumpe & Lüftung",
+      "changes": [
+        {
+          "measure": "heat-pump-and-ventilation"
+        }
+      ],
+      "summary": {
+        "mean_u_value_w_m2k": 0.33198,
+        "heat_transfer_w_k": 448.677,
+        "design_heat_load_kw": 18.226,
+        "useful_space_heating_kwh_a": 4502.25,
+        "final_energy_kwh_m2a": 10.294,
+        "primary_energy_kwh_m2a": 18.53,
+        "co2_kg_m2a": 3.706,
+        "energy_class": "A+",
+        "data_quality_percent": 98
+      },
+      "primary_energy_saving_percent": 11.5
+    },
+    {
+      "id": "complete",
+      "label": "Gesamtsanierung",
+      "changes": [
+        {
+          "measure": "u-value-exterior_wall",
+          "component_ids": [
+            "wall-01"
+          ],
+          "target_u_value": 0.16
+        },
+        {
+          "measure": "u-value-roof",
+          "component_ids": [
+            "roof-01"
+          ],
+          "target_u_value": 0.12
+        },
+        {
+          "measure": "u-value-floor",
+          "component_ids": [
+            "floor-01"
+          ],
+          "target_u_value": 0.18
+        },
+        {
+          "measure": "u-value-window",
+          "component_ids": [
+            "window-01"
+          ],
+          "target_u_value": 0.8
+        },
+        {
+          "measure": "heat-pump-and-ventilation"
+        },
+        {
+          "measure": "pv-roof-potential"
+        }
+      ],
+      "summary": {
+        "mean_u_value_w_m2k": 0.27138,
+        "heat_transfer_w_k": 377.498,
+        "design_heat_load_kw": 15.984,
+        "useful_space_heating_kwh_a": 0.0,
+        "final_energy_kwh_m2a": 4.585,
+        "primary_energy_kwh_m2a": 8.253,
+        "co2_kg_m2a": 1.651,
+        "energy_class": "A+",
+        "data_quality_percent": 92
+      },
+      "primary_energy_saving_percent": 60.6
+    }
+  ],
+  "renovation_roadmap": {
+    "type": "renovation-roadmap-draft",
+    "status": "working-draft",
+    "normative": false,
+    "steps": [
+      {
+        "step": 1,
+        "variant_id": "envelope",
+        "title": "Gebäudehülle",
+        "measures": [
+          {
+            "measure": "u-value-exterior_wall",
+            "component_ids": [
+              "wall-01"
+            ],
+            "target_u_value": 0.18
+          },
+          {
+            "measure": "u-value-roof",
+            "component_ids": [
+              "roof-01"
+            ],
+            "target_u_value": 0.14
+          },
+          {
+            "measure": "u-value-floor",
+            "component_ids": [
+              "floor-01"
+            ],
+            "target_u_value": 0.22
+          },
+          {
+            "measure": "u-value-window",
+            "component_ids": [
+              "window-01"
+            ],
+            "target_u_value": 0.9
+          }
+        ],
+        "result": {
+          "mean_u_value_w_m2k": 0.31038,
+          "heat_transfer_w_k": 423.306,
+          "design_heat_load_kw": 17.858,
+          "useful_space_heating_kwh_a": 3719.78,
+          "final_energy_kwh_m2a": 10.901,
+          "primary_energy_kwh_m2a": 19.621,
+          "co2_kg_m2a": 3.924,
+          "energy_class": "A+",
+          "data_quality_percent": 92
+        },
+        "dependencies": []
+      },
+      {
+        "step": 2,
+        "variant_id": "systems",
+        "title": "Wärmepumpe & Lüftung",
+        "measures": [
+          {
+            "measure": "heat-pump-and-ventilation"
+          }
+        ],
+        "result": {
+          "mean_u_value_w_m2k": 0.33198,
+          "heat_transfer_w_k": 448.677,
+          "design_heat_load_kw": 18.226,
+          "useful_space_heating_kwh_a": 4502.25,
+          "final_energy_kwh_m2a": 10.294,
+          "primary_energy_kwh_m2a": 18.53,
+          "co2_kg_m2a": 3.706,
+          "energy_class": "A+",
+          "data_quality_percent": 98
+        },
+        "dependencies": [
+          "envelope"
+        ]
+      },
+      {
+        "step": 3,
+        "variant_id": "complete",
+        "title": "Gesamtsanierung",
+        "measures": [
+          {
+            "measure": "u-value-exterior_wall",
+            "component_ids": [
+              "wall-01"
+            ],
+            "target_u_value": 0.16
+          },
+          {
+            "measure": "u-value-roof",
+            "component_ids": [
+              "roof-01"
+            ],
+            "target_u_value": 0.12
+          },
+          {
+            "measure": "u-value-floor",
+            "component_ids": [
+              "floor-01"
+            ],
+            "target_u_value": 0.18
+          },
+          {
+            "measure": "u-value-window",
+            "component_ids": [
+              "window-01"
+            ],
+            "target_u_value": 0.8
+          },
+          {
+            "measure": "heat-pump-and-ventilation"
+          },
+          {
+            "measure": "pv-roof-potential"
+          }
+        ],
+        "result": {
+          "mean_u_value_w_m2k": 0.27138,
+          "heat_transfer_w_k": 377.498,
+          "design_heat_load_kw": 15.984,
+          "useful_space_heating_kwh_a": 0.0,
+          "final_energy_kwh_m2a": 4.585,
+          "primary_energy_kwh_m2a": 8.253,
+          "co2_kg_m2a": 1.651,
+          "energy_class": "A+",
+          "data_quality_percent": 92
+        },
+        "dependencies": [
+          "systems"
+        ]
+      }
+    ],
+    "note": "Fachlich prüfbarer Arbeitsentwurf; kein über die BAFA-Druckapplikation erzeugter iSFP."
+  }
+}

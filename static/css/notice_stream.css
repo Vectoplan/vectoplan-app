@@ -323,12 +323,14 @@
 
   .vp-notice-stream__dismiss {
     position: absolute;
-    inset-block-start: 6px;
-    inset-inline-end: 8px;
+    inset-block-start: 1px;
+    inset-inline-end: 2px;
+    width: 40px;
+    height: 40px;
   }
 
   .vp-notice-stream__viewport {
-    padding-inline-end: 32px;
+    padding-inline-end: 42px;
   }
 }
 
