@@ -86,9 +86,35 @@ def test_calculation_routes_have_project_scoped_shells() -> None:
                 assert 'class="mobile-panel-button explorer-button"' in response.get_data(as_text=True)
                 assert response.headers["X-VECTOPLAN-Preview"] == "display-only"
             elif suffix == "energy-calculation":
-                assert 'id="energy-app"' in response.get_data(as_text=True)
-                assert '<nav class="module-rail"' in response.get_data(as_text=True)
-                assert '<aside class="module-rail"' not in response.get_data(as_text=True)
+                html = response.get_data(as_text=True)
+                assert 'id="energy-app"' in html
+                assert '<nav class="module-rail"' in html
+                assert '<aside class="module-rail"' not in html
+                assert "project-tabs-bar" not in html
+                assert "Projektziel festlegen" in html
+                assert 'data-step="1"' in html
+                assert 'id="funding-program-grid"' in html
+                assert 'id="funding-units"' in html
+                assert 'id="funding-income"' in html
+                assert 'id="funding-children"' in html
+                assert 'id="system-flow-stage"' in html
+                assert 'id="system-heat-source"' in html
+                assert 'id="system-floor-heating"' in html
+                assert 'class="flow-particle electric particle-pv"' in html
+                assert 'id="planner-floor-heating-visual"' in html
+                assert 'id="balance-thermal-bridge"' in html
+                assert 'data-isfp-step' in html
+                assert 'id="pipeline-strip"' not in html
+                assert "Projektmodell normalisieren" not in html
+                assert 'class="diagram-controls"' in html
+                assert 'class="certificate-workspace"' in html
+                assert 'id="certificate-preview-final"' in html
+                assert 'data-certificate-preview-page="1"' in html
+                assert 'data-certificate-preview-page="2"' in html
+                assert "GEG-Muster 2024" in html
+                assert "Projektmodell · 2D" not in html
+                assert "Projektmodell · 3D" not in html
+                assert "Ziel übernehmen" not in html
                 assert response.headers["X-VECTOPLAN-Preview"] == "display-only"
 
 
