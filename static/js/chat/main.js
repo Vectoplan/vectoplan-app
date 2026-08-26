@@ -3240,6 +3240,19 @@ function wireParcelSelectionBridge() {
         const fromEditor = !!editorFrame?.contentWindow && event.source === editorFrame.contentWindow;
         if (!fromMap && !fromEditor) return;
 
+        if (type === "vectoplan-cad:worldedit-measurement" && fromMap) {
+          const measurementMessage = {
+            type,
+            kind: type,
+            source: "vectoplan-app",
+            detail: data.detail && typeof data.detail === "object" ? data.detail : data,
+          };
+          uiState.lastCadWorldEditMeasurement = measurementMessage;
+          uiState.lastCadWorldEditMeasurementTs = Date.now();
+          try { editorFrame?.contentWindow?.postMessage(measurementMessage, "*"); } catch (_) {}
+          return;
+        }
+
         if (
           (type === "vectoplan-map:parcel-selection-changed" && fromMap)
           || (type === "vectoplan-editor:parcel-selection-changed" && fromEditor)
@@ -3396,6 +3409,9 @@ function wireEditorEventBridge() {
           uiState.editorReady = true;
           frame.dataset.editorReady = "true";
           hideWorkspaceFallback();
+          if (uiState.lastCadWorldEditMeasurement) {
+            try { frame.contentWindow.postMessage(uiState.lastCadWorldEditMeasurement, "*"); } catch (_) {}
+          }
 
           const pending = uiState.pendingEditorWorkspace;
           uiState.pendingEditorWorkspace = null;

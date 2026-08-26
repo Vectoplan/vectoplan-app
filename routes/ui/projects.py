@@ -901,90 +901,161 @@ def _auth_problem_html_response(
 <html lang="de">
 <head>
   <meta charset="utf-8">
-  <title>{{ title }}</title>
+  <title>{{ title }} | VECTOPLAN</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
       color-scheme: light;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #f4f7fb;
-      color: #172033;
+      color: #244c5e;
+      background: #f5f9fa;
     }
     * {
       box-sizing: border-box;
     }
     body {
-      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      min-height: 100dvh;
       margin: 0;
-      display: grid;
-      place-items: center;
-      padding: 24px;
-      background: #f4f7fb;
+      overflow-x: hidden;
+      background:
+        linear-gradient(rgba(17, 107, 136, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(17, 107, 136, .035) 1px, transparent 1px),
+        #f5f9fa;
+      background-size: 32px 32px;
     }
-    main {
-      width: min(680px, 100%);
-      border: 1px solid #d8e0ec;
-      border-top: 4px solid #2563eb;
-      border-radius: 10px;
-      padding: clamp(22px, 4vw, 34px);
-      background: #ffffff;
-      box-shadow: 0 18px 48px rgba(31, 48, 77, .10);
+    .header {
+      flex: 0 0 72px;
+      min-height: 72px;
+      background: rgba(255, 255, 255, .96);
+      border-bottom: 1px solid #d9e6ea;
+      box-shadow: 0 8px 26px rgba(17, 52, 67, .07);
+    }
+    .header__inner {
+      display: flex;
+      align-items: center;
+      width: min(1120px, 100%);
+      height: 72px;
+      margin: 0 auto;
+      padding: 0 22px;
+    }
+    .header-logo {
+      color: #153b4b;
+      font-size: 20px;
+      font-weight: 900;
+      letter-spacing: .08em;
+      text-decoration: none;
+    }
+    .content {
+      display: grid;
+      flex: 1 1 auto;
+      place-items: center;
+      min-height: calc(100dvh - 72px);
+      padding: clamp(38px, 8vw, 88px) 20px;
+      text-align: center;
+    }
+    .error-panel {
+      display: flex;
+      align-items: center;
+      flex-direction: column;
+      width: min(760px, 100%);
+    }
+    .error-number {
+      margin: 0;
+      color: #0d7f97;
+      font-size: clamp(5.5rem, 24vw, 10rem);
+      font-weight: 900;
+      line-height: .9;
+      letter-spacing: -.06em;
     }
     h1 {
-      margin: 0 0 12px;
-      color: #111827;
-      font-size: clamp(22px, 4vw, 28px);
-      line-height: 1.2;
-      letter-spacing: -.02em;
+      margin: 22px 0 12px;
+      color: #153b4b;
+      font-size: clamp(1.65rem, 6vw, 2.6rem);
+      line-height: 1.12;
     }
-    p {
-      margin: 0 0 16px;
-      color: #536176;
-      line-height: 1.6;
+    .error-text {
+      width: 100%;
+      max-width: 570px;
+      margin: 0 auto 12px;
+      color: #597481;
+      font-size: 16px;
+      line-height: 1.7;
+      overflow-wrap: anywhere;
     }
     code {
       padding: 2px 6px;
-      border: 1px solid #d8e0ec;
+      border: 1px solid #cbdde3;
       border-radius: 4px;
-      background: #eef3f9;
-      color: #26364d;
+      background: #edf5f7;
+      color: #244c5e;
     }
-    a {
-      color: #155eef;
-      font-weight: 650;
-      text-underline-offset: 3px;
+    .btn-error {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: min(260px, 100%);
+      min-height: 48px;
+      margin-top: 16px;
+      padding: 12px 20px;
+      color: #fff;
+      background: #0d7f97;
+      border: 1px solid #0d7187;
+      border-radius: 11px;
+      box-shadow: 0 10px 25px rgba(13, 113, 135, .16);
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .btn-error:hover,
+    .btn-error:focus-visible {
+      background: #0a687d;
+    }
+    .btn-error:focus-visible,
+    .header-logo:focus-visible {
+      outline: 3px solid rgba(10, 132, 158, .4);
+      outline-offset: 4px;
     }
     .meta {
-      margin-top: 20px;
-      padding-top: 14px;
-      border-top: 1px solid #e2e8f0;
+      margin-top: 28px;
       font-size: 13px;
-      color: #68758a;
+      color: #6a828d;
     }
-    @media (max-width: 540px) {
-      body {
-        place-items: start stretch;
-        padding: 12px;
+    @media (max-width: 480px) {
+      .header__inner {
+        padding: 0 16px;
       }
-      main {
-        margin-top: 8vh;
+      .content {
+        padding: 36px 16px 52px;
+      }
+      .btn-error {
+        width: 100%;
       }
     }
   </style>
 </head>
 <body>
-  <main>
-    <h1>{{ title }}</h1>
-    <p>{{ message }}</p>
-    {% if status_code == 503 %}
-      <p>Das ist kein Benutzer-Ban. Die App kann den zentralen Auth-Service aktuell nicht erreichen und sperrt deshalb fail-closed.</p>
-    {% endif %}
-    {% if login_url %}
-      <p><a href="{{ login_url }}">Zur Anmeldung</a></p>
-    {% endif %}
-    <div class="meta">
-      Status {{ status_code }} · <code>{{ reason }}</code>
+  <header class="header">
+    <div class="header__inner">
+      <a class="header-logo" href="/">VECTOPLAN</a>
     </div>
+  </header>
+  <main class="content">
+    <section class="error-panel" aria-labelledby="error-title">
+      <p class="error-number" aria-hidden="true">{{ status_code }}</p>
+      <h1 id="error-title">{{ title }}</h1>
+      <p class="error-text">{{ message }}</p>
+      {% if status_code == 503 %}
+        <p class="error-text">Das ist kein Benutzer-Ban. Die App kann den zentralen Auth-Service aktuell nicht erreichen und sperrt deshalb fail-closed.</p>
+        <a class="btn-error" href="">Erneut versuchen</a>
+      {% endif %}
+      {% if login_url %}
+        <a class="btn-error" href="{{ login_url }}">Zur Anmeldung</a>
+      {% endif %}
+      <div class="meta">
+        Status {{ status_code }} · <code>{{ reason }}</code>
+      </div>
+    </section>
   </main>
 </body>
 </html>

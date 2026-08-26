@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from flask import Blueprint, Flask, current_app, jsonify, redirect, request
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.exceptions import HTTPException
 
 from config import Config
 from extensions import db, init_logging
@@ -1019,6 +1020,12 @@ def create_app() -> Flask:
 
     @app.errorhandler(Exception)
     def internal_error(error: Exception):
+        # Routing and authorization errors are intentional HTTP responses, not
+        # application crashes.  Returning them unchanged preserves status codes
+        # such as 401/403/405 as well as protocol headers such as ``Allow``.
+        if isinstance(error, HTTPException):
+            return error
+
         try:
             current_app.logger.exception("Unhandled error")
         except Exception:
@@ -1035,7 +1042,7 @@ def create_app() -> Flask:
                 return jsonify(
                     {
                         "ok": False,
-                        "error": str(error),
+                        "error": "internal error",
                         "code": "internal_error",
                     }
                 ), 500
