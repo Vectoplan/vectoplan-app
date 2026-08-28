@@ -2573,6 +2573,46 @@ def project_access_get(project_id: str):
         return _exception_response("project_access_get failed", exc, code="project_access_failed")
 
 
+@bp.get("/v1/projects/<project_id>/filecloud-access")
+def project_filecloud_access(project_id: str):
+    """Project-scoped ticket for server-to-server imports, also before setup.
+
+    The project must already be persisted and owned/shared with this identity.
+    No entitlement flags or identities are accepted from the caller.
+    """
+    try:
+        persistent_error = _require_persistent_context()
+        if persistent_error is not None:
+            return persistent_error
+        project = resolve_project(project_id)
+        if project is None:
+            return _json_error("project not found", 404, code="project_not_found")
+        user_id = _current_user_id_optional()
+        _require_project_permission_checked(project, PERMISSION_VIEW, user_id, allow_public_view=False)
+        access = serialize_project_permissions(project, user_id=user_id)
+        role = str(access.get("role") or "").lower()
+        auth_id = _current_auth_user_id()
+        if not auth_id or role not in {"owner", "admin", "editor", "viewer"} or not access.get("can_view"):
+            return _json_error("Filecloud benötigt eine bestätigte Projektmitgliedschaft.", 403, code="filecloud_access_denied")
+        from services.filecloud_access_ticket import mint_filecloud_access_ticket
+        context = _current_user_context_dict(ensure=False)
+        public_id = str(project.public_id)
+        read_only = _project_read_only(project, user_id)
+        token = mint_filecloud_access_ticket({
+            "project_id": public_id, "project_name": str(project.name), "auth_user_id": auth_id,
+            "email": _current_email() or "", "display_name": str(context.get("display_name") or ""),
+            "account_id": str(context.get("account_id") or ""), "authenticated": True,
+            "role": role, "can_view": True, "can_edit": access.get("can_edit") is True and not read_only,
+            "can_manage": access.get("can_manage") is True and not read_only,
+            "read_only": read_only, "public_viewer": False, "access_mode": "authenticated",
+        }, ttl_seconds=120)
+        return _json_response({"project_id": public_id, "ticket": token}, 200, no_store=True)
+    except PermissionDenied as exc:
+        return _permission_error_response(exc)
+    except Exception as exc:
+        return _exception_response("project_filecloud_access failed", exc, code="filecloud_access_failed")
+
+
 @bp.get("/v1/projects/<project_id>/members")
 def project_members_list(project_id: str):
     try:

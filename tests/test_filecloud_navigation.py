@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
 from flask import Flask, Response
 
 from routes.viewer import bp
@@ -185,16 +186,28 @@ def test_workspace_navigation_has_bookmarkable_project_suffixes() -> None:
 
     assert '@bp.get("/project=<project_id>/<workspace>")' in routes_source
     for suffix in (
-        "files",
-        "structural-calculation",
-        "energy-calculation",
-        "sound-protection-calculation",
+        "einstellungen", "map", "3d", "2d", "lv",
+        "file", "statik", "energie", "schallschutz",
     ):
         assert f'"{suffix}"' in shell_source
     assert "window.history.pushState" in shell_source
 
 
-def test_direct_workspace_suffix_opens_shell_in_requested_mode() -> None:
+@pytest.mark.parametrize(("suffix", "mode"), [
+    ("einstellungen", "project"), ("project", "project"),
+    ("map", "map"), ("3d", "3d"), ("2d", "2d"), ("lv", "lv"),
+    ("file", "files"), ("files", "files"), ("dateien", "files"),
+    ("statik", "structural_calculation"),
+    ("structural-calculation", "structural_calculation"),
+    ("structural_calculation", "structural_calculation"),
+    ("energie", "energy_calculation"),
+    ("energy-calculation", "energy_calculation"),
+    ("energy_calculation", "energy_calculation"),
+    ("schallschutz", "sound_protection_calculation"),
+    ("sound-protection-calculation", "sound_protection_calculation"),
+    ("sound_protection_calculation", "sound_protection_calculation"),
+])
+def test_direct_workspace_suffix_opens_shell_in_requested_mode(suffix: str, mode: str) -> None:
     app = Flask(__name__)
     app.register_blueprint(project_shell_routes.bp)
     project = object()
@@ -206,16 +219,49 @@ def test_direct_workspace_suffix_opens_shell_in_requested_mode() -> None:
         patch.object(
             project_shell_routes,
             "_render_project_shell",
-            return_value=Response("energy_calculation", status=200),
+            return_value=Response(mode, status=200),
         ) as render_shell,
     ):
         response = app.test_client().get(
-            "/project=prj_alpha_12345678/energy-calculation"
+            f"/project=prj_alpha_12345678/{suffix}"
         )
 
     assert response.status_code == 200
     render_shell.assert_called_once_with(
         selected_project=project,
         is_new=False,
-        initial_workspace="energy_calculation",
+        initial_workspace=mode,
     )
+
+
+def test_unknown_workspace_suffix_is_rejected() -> None:
+    app = Flask(__name__)
+    app.register_blueprint(project_shell_routes.bp)
+    response = app.test_client().get("/project=prj_alpha_12345678/not-a-workspace")
+    assert response.status_code == 404
+
+
+def test_workspace_csp_allows_nested_vergabe_without_wildcard_origins():
+    app = _app()
+    with app.test_request_context('/project=prj_alpha_12345678?allow_embed=1'):
+        policy = project_shell_routes._workspace_csp_header_value()
+        assert 'http://localhost:5203' in policy and 'http://127.0.0.1:5203' in policy
+        assert 'http://localhost:*' not in policy
+        app.config['VECTOPLAN_VERGABE_PUBLIC_URL'] = 'https://vergabe.example/vergabe'
+        policy = project_shell_routes._workspace_csp_header_value()
+        assert 'https://vergabe.example;' in policy or 'https://vergabe.example ' in policy
+        assert 'https://vergabe.example/vergabe' not in policy
+
+
+def test_direct_workspace_suffix_keeps_access_checks() -> None:
+    app = Flask(__name__)
+    app.register_blueprint(project_shell_routes.bp)
+    with (
+        patch.object(project_shell_routes, "_current_user_payload", return_value={}),
+        patch.object(project_shell_routes, "_is_access_blocked_context", return_value=True),
+        patch.object(project_shell_routes, "_blocked_response", return_value=Response(status=403)),
+        patch.object(project_shell_routes, "_render_project_shell") as render_shell,
+    ):
+        response = app.test_client().get("/project=prj_alpha_12345678/file")
+    assert response.status_code == 403
+    render_shell.assert_not_called()
