@@ -174,9 +174,15 @@ Einige Dateien tragen aus historischen Gründen noch `chat` im Namen, obwohl sie
 
 ## Projekt- und Workspace-Logik
 
-Ohne Workspace-Suffix startet die Shell im Modus `Projekt`. Ein direkter,
-zulässiger Suffix wie `/map`, `/3d`, `/2d` oder `/files` öffnet bei einem
-konfigurierten Projekt unmittelbar den angeforderten Bereich.
+Die eigenständige App startet bestehende Projekte ohne Workspace-Suffix direkt
+in `2D`; die Plattform öffnet ohne Suffix die Einstellungen.
+Die Seitenmenü-Bereiche haben eigene URLs unter `/project=<project_public_id>`
+und in der Plattform unter `/editor/project=<project_public_id>`:
+`/einstellungen`, `/map`, `/3d`, `/2d`, `/lv`, `/file`, `/statik`, `/energie`
+und `/schallschutz`. Direkte Aufrufe öffnen bei einem freigeschalteten Projekt
+den angeforderten Bereich. Bisherige Suffixe wie `/project`, `/files`,
+`/structural-calculation`, `/energy-calculation` und
+`/sound-protection-calculation` bleiben als Aliase verfügbar.
 
 Für ein neues Projekt:
 

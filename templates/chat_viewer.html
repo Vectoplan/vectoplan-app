@@ -2,6 +2,7 @@
 {% set chat_id_s = (chat_id|string) if chat_id is defined and chat_id is not none else '' %}
 {% set base_url_s = request.host_url.rstrip('/') %}
 {% set chat_id_q = chat_id_s|urlencode %}
+{% set vergabe_setup_requested = request.args.get('vergabe_import') in ['setup', 'partial'] and request.args.get('vergabe') %}
 
 {# Values passed by routes/ui/projects.py. Defensive fallbacks stay local to vectoplan-app. #}
 {% set workspace_raw = workspace|default({}, true) %}
@@ -533,6 +534,7 @@
 
           defaultMode: {{ resolved_default_mode|tojson }},
           workspaceMode: {{ resolved_workspace_mode|tojson }},
+          vergabePublicUrl: {{ config.get('VECTOPLAN_VERGABE_PUBLIC_URL', 'http://localhost:5203/vergabe')|tojson }},
           initialWorkspaceUrl: initialWorkspaceUrl,
           workspacePaths: workspacePaths,
 
@@ -928,7 +930,7 @@
       <iframe id="viewer-frame"
               class="viewer-iframe is-workspace-active"
               title="VECTOPLAN Workspace"
-              src="{{ resolved_project_url if resolved_default_mode == '3d' else resolved_workspace_src }}"
+              src="{{ 'about:blank' if vergabe_setup_requested else (resolved_project_url if resolved_default_mode == '3d' else resolved_workspace_src) }}"
               data-workspace-frame="standard"
               aria-hidden="false"
               referrerpolicy="no-referrer"
@@ -938,7 +940,7 @@
       <iframe id="editor-preload-frame"
               class="viewer-iframe viewer-iframe--editor"
               title="VECTOPLAN Editor"
-              src="{{ initial_editor_path if editor3d_workspace_enabled and initial_editor_path else 'about:blank' }}"
+              src="{{ initial_editor_path if editor3d_workspace_enabled and initial_editor_path and not vergabe_setup_requested else 'about:blank' }}"
               data-workspace-frame="editor3d"
               data-preloaded="true"
               aria-hidden="true"
@@ -955,6 +957,6 @@
   <script src="{{ url_for('static', filename='js/chat/project_sidebar_resize.js') }}?v={{ chat_id_s }}"></script>
   <script src="{{ url_for('static', filename='js/chat/project_sidebar.js') }}?v={{ chat_id_s }}-force-public-sidebar-20260731"></script>
   <script src="{{ url_for('static', filename='js/chat/icon_tooltips.js') }}?v={{ chat_id_s }}-icon-tooltips-20260730"></script>
-  <script type="module" src="{{ url_for('static', filename='js/chat/main.js') }}?v={{ chat_id_s }}-worldedit-measurement-20260826-1"></script>
+  <script type="module" src="{{ url_for('static', filename='js/chat/main.js') }}?v={{ chat_id_s }}-vergabe-settings-20260828-1"></script>
 </body>
 </html>

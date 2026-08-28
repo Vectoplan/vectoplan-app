@@ -6,6 +6,7 @@ import os
 import re
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+from urllib.parse import urlparse
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2048,6 +2049,10 @@ class Config:
         VECTOPLAN_ALLOWED_FRAME_PARENTS,
     )
 
+    VECTOPLAN_VERGABE_PUBLIC_URL = _norm_url(
+        _env_str("VECTOPLAN_VERGABE_PUBLIC_URL", "http://localhost:5203/vergabe")
+    )
+
     VECTOPLAN_APP_ALLOWED_FRAME_SRC_LIST = _cached_origin_list(
         _env_str_first(
             (
@@ -2063,6 +2068,8 @@ class Config:
     VECTOPLAN_APP_ALLOWED_FRAME_SRC_LIST = _dedupe_texts(
         [
             *VECTOPLAN_APP_ALLOWED_FRAME_SRC_LIST,
+            VECTOPLAN_VERGABE_PUBLIC_URL,
+            *(["http://localhost:5203", "http://127.0.0.1:5203"] if urlparse(VECTOPLAN_VERGABE_PUBLIC_URL).hostname in {"localhost", "127.0.0.1"} else []),
             VECTOPLAN_AUTH_PUBLIC_URL,
             VECTOPLAN_EDITOR_PUBLIC_URL,
             VECTOPLAN_CAD_PUBLIC_URL,

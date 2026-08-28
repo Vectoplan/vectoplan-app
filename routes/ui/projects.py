@@ -28,7 +28,7 @@ Wichtig:
 """
 
 from typing import Any, Dict, List, Mapping, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from flask import (
     Blueprint,
@@ -619,9 +619,14 @@ def _workspace_csp_header_value() -> str:
         chunk_public = _config_url("VECTOPLAN_CHUNK_PUBLIC_URL", "http://localhost:5102")
         library_public = _config_url("VECTOPLAN_LIBRARY_PUBLIC_URL", "http://localhost:5101")
         app_public = _config_url("VECTOPLAN_APP_PUBLIC_URL", "http://localhost:5103")
+        vergabe = urlsplit(_config_url("VECTOPLAN_VERGABE_PUBLIC_URL", "http://localhost:5203/vergabe"))
+        vergabe_origins = [urlunsplit((vergabe.scheme, vergabe.netloc, "", "", ""))]
+        if vergabe.hostname in {"localhost", "127.0.0.1", "::1"}:
+            vergabe_origins.extend(f"{vergabe.scheme}://{host}" + (f":{vergabe.port}" if vergabe.port else "") for host in ("localhost", "127.0.0.1", "[::1]"))
 
         frame_src_items = [
             "'self'",
+            *vergabe_origins,
             auth_public,
             "http://127.0.0.1:5000",
             editor_public,
@@ -3069,6 +3074,7 @@ def project_workspace_by_equals(project_id: str, workspace: str) -> Response:
     """Open the project shell directly on a stable, bookmarkable workspace URL."""
     aliases = {
         "project": "project",
+        "einstellungen": "project",
         "map": "map",
         "3d": "3d",
         "editor": "3d",
@@ -3078,16 +3084,20 @@ def project_workspace_by_equals(project_id: str, workspace: str) -> Response:
         "cad2d": "2d",
         "lv": "lv",
         "files": "files",
+        "file": "files",
         "dateien": "files",
         "structural-calculation": "structural_calculation",
         "structural_calculation": "structural_calculation",
         "tragwerksberechnung": "structural_calculation",
+        "statik": "structural_calculation",
         "energy-calculation": "energy_calculation",
         "energy_calculation": "energy_calculation",
         "energieberechnung": "energy_calculation",
+        "energie": "energy_calculation",
         "sound-protection-calculation": "sound_protection_calculation",
         "sound_protection_calculation": "sound_protection_calculation",
         "schallschutzberechnung": "sound_protection_calculation",
+        "schallschutz": "sound_protection_calculation",
     }
     requested_workspace = _safe_str(workspace, "", 120).lower().replace(" ", "-")
     initial_workspace = aliases.get(requested_workspace)

@@ -13,6 +13,9 @@
 import { $, uiState } from "./core.js";
 import { getConfig } from "./api.js";
 import { loadVersions } from "./versions.js";
+import { createVergabeSetup } from "./vergabe-setup.js";
+
+let vergabeSetup = null;
 
 
 /* ───────────────────────── Constants ───────────────────────── */
@@ -393,7 +396,7 @@ function normalizeMode(mode) {
   try {
     const value = String(mode || "").trim().toLowerCase().replace(/-/g, "_");
 
-    if (["project", "projekt", "meta", "metadata", "info", "overview"].includes(value)) return "project";
+    if (["project", "projekt", "einstellungen", "meta", "metadata", "info", "overview"].includes(value)) return "project";
 
     if (["editor", "editor3d", "editor_3d", "viewer", "viewer3d", "model", "3d"].includes(value)) return "3d";
 
@@ -403,7 +406,7 @@ function normalizeMode(mode) {
 
     if (["lv", "boq", "leistungsverzeichnis"].includes(value)) return "lv";
 
-    if (["files", "dateien", "filecloud"].includes(value)) return "files";
+    if (["files", "file", "dateien", "filecloud"].includes(value)) return "files";
 
     if (["structural_calculation", "tragwerksberechnung", "tragwerk", "statik"].includes(value)) return "structural_calculation";
 
@@ -1345,17 +1348,19 @@ function relayProjectNavigation(detail = {}, source = "shell") {
       detail.workspaceMode ||
       detail.workspace_mode ||
       detail.mode ||
-      "";
+      uiState.workspaceMode ||
+      cfgValue("defaultMode", dataValue("defaultMode", "project"));
     const normalizedWorkspace = requestedWorkspace ? normalizeMode(requestedWorkspace) : "";
     const suffixByWorkspace = {
+      project: "einstellungen",
       map: "map",
       "3d": "3d",
       "2d": "2d",
       lv: "lv",
-      files: "files",
-      structural_calculation: "structural-calculation",
-      energy_calculation: "energy-calculation",
-      sound_protection_calculation: "sound-protection-calculation",
+      files: "file",
+      structural_calculation: "statik",
+      energy_calculation: "energie",
+      sound_protection_calculation: "schallschutz",
     };
     let routePrefix = "";
     try {
@@ -1376,7 +1381,18 @@ function relayProjectNavigation(detail = {}, source = "shell") {
     if (!targetOrigin) {
       try {
         if (workspacePath && window.parent === window) {
-          window.history.pushState({ projectPublicId: publicId, workspace: normalizedWorkspace }, "", workspacePath);
+          const target = new URL(window.location.href);
+          target.pathname = workspacePath;
+          // A stale ?mode= must not override the selected URL after reloading.
+          target.searchParams.delete("mode");
+          if (target.href !== window.location.href) {
+            const state = { projectPublicId: publicId, workspace: normalizedWorkspace };
+            if (source === "initial-workspace" || source === "platform_request") {
+              window.history.replaceState(state, "", target.href);
+            } else {
+              window.history.pushState(state, "", target.href);
+            }
+          }
           return true;
         }
       } catch (_) {}
@@ -1855,6 +1871,7 @@ function isWorkspaceModeAllowed(mode) {
     const normalized = normalizeMode(mode);
 
     if (normalized === "project") return true;
+    if (vergabeSetup?.active) return false;
 
     if (normalized === "admin") {
       return projectExists() && canManageProject() && tabEnabled("admin", true);
@@ -1877,6 +1894,7 @@ function isWorkspaceModeAllowed(mode) {
 
 function workspaceModeDisabledMessage(mode) {
   try {
+    if (vergabeSetup?.active) return "Vergabe-Unterlagen werden in den Einstellungen übernommen.";
     const normalized = normalizeMode(mode);
 
     if (normalized === "admin" && !canManageProject()) {
@@ -1950,7 +1968,7 @@ function syncWorkspaceGating(options = {}) {
       if (!btn) continue;
 
       const allowed = mode === "versions"
-        ? projectExists()
+        ? projectExists() && !vergabeSetup?.active
         : isWorkspaceModeAllowed(mode);
 
       btn.disabled = !allowed;
@@ -2038,7 +2056,7 @@ async function setWorkspaceMode(mode, options = {}) {
       if (requested !== "project" && options.fallback !== false) {
         await setWorkspaceMode("project", {
           persist: false,
-          reason: "mode-blocked",
+          reason: options.reason === "initial-workspace" ? options.reason : "mode-blocked",
           fallback: false,
         });
       }
@@ -2096,8 +2114,9 @@ async function setWorkspaceMode(mode, options = {}) {
 
     if (normalized === "project") {
       activateWorkspaceFrame(normalized);
-      target = projectUrl();
-      hardSwapIframe(cacheBustLocalUrl(target), {
+      target = vergabeSetup?.active ? vergabeSetup.url : projectUrl();
+      // Clicking Settings again must not interrupt an in-flight import.
+      if (!vergabeSetup?.active || viewerFrame()?.src !== target) hardSwapIframe(cacheBustLocalUrl(target), {
         mode: "project",
         title: "Projekt",
       });
@@ -2116,6 +2135,7 @@ async function setWorkspaceMode(mode, options = {}) {
     } else if (normalized === "2d") {
       activateWorkspaceFrame(normalized);
       target = await resolve2dUrl();
+      if (uiState.workspaceMode !== normalized) return false;
       hardSwapIframe(cacheBustLocalUrl(target), {
         mode: "2d",
         title: "CAD",
@@ -2168,10 +2188,6 @@ async function setWorkspaceMode(mode, options = {}) {
       });
     }
 
-    if (shouldPersist) {
-      await persistWorkspaceMode(normalized);
-    }
-
     if (normalized !== "versions") {
       try {
         versionsClose();
@@ -2187,6 +2203,11 @@ async function setWorkspaceMode(mode, options = {}) {
 
 
     showStatus("");
+
+    // Update navigation before waiting for the optional state persistence.
+    if (shouldPersist) {
+      await persistWorkspaceMode(normalized);
+    }
 
     return true;
   } catch (error) {
@@ -2228,15 +2249,22 @@ async function applyInitialWorkspaceMode() {
 
     const queryMode = new URLSearchParams(location.search).get("mode");
     if (queryMode) {
-      await setWorkspaceMode(queryMode, { persist: false });
+      await setWorkspaceMode(queryMode, { persist: false, reason: "initial-workspace" });
       return;
     }
 
     const initialMode = cfgValue("defaultMode", dataValue("defaultMode", "project")) || "project";
-    await setWorkspaceMode(initialMode || "project", { persist: false });
+    await setWorkspaceMode(initialMode || "project", { persist: false, reason: "initial-workspace" });
   } catch (_) {
-    await setWorkspaceMode("project", { persist: false });
+    await setWorkspaceMode("project", { persist: false, reason: "initial-workspace" });
   }
+}
+
+function wireWorkspaceHistory() {
+  if (window.parent !== window) return;
+  // Reload the shell for the URL's project and workspace, including access checks.
+  // Embedded shells are restored by the Platform's own history handler.
+  safeOn(window, "popstate", () => window.location.reload());
 }
 
 function wireWorkspaceToolbar() {
@@ -3630,10 +3658,23 @@ async function boot() {
 
   safeCall("exposeWorkspaceDebugApi", exposeWorkspaceDebugApi);
 
+  safeCall("initVergabeSetup", () => {
+    vergabeSetup = createVergabeSetup({
+      baseUrl: cfgValue("vergabePublicUrl"), projectId: projectPublicId(),
+      frame: viewerFrame, parentOrigin: platformParentOrigin,
+      finish: () => {
+        syncWorkspaceGating({fallbackToProject:false});
+        void setWorkspaceMode("project", {persist:false, reason:"vergabe-complete"});
+      },
+    });
+    if (vergabeSetup?.active) syncWorkspaceGating({fallbackToProject:false});
+  });
+
 
   safeCall("wireEditorEventBridge", wireEditorEventBridge);
   safeCall("wireParcelSelectionBridge", wireParcelSelectionBridge);
   safeCall("prepareEditorPreloadFrame", () => {
+    if (vergabeSetup?.active) return false;
     if (!projectToolsEnabled()) return false;
     return prepareEditorPreloadFrame(editorUrl());
   });
@@ -3643,15 +3684,7 @@ async function boot() {
   safeCall("wireHotkeys", wireHotkeys);
 
   safeCall("wireProjectEventBridge", wireProjectEventBridge);
-  safeCall("announceCurrentProject", () => {
-    relayProjectNavigation(
-      {
-        projectPublicId: projectPublicId(),
-        project: currentProject(),
-      },
-      "shell_ready"
-    );
-  });
+  safeCall("wireWorkspaceHistory", wireWorkspaceHistory);
   safeCall("wireWorkspaceToolbar", wireWorkspaceToolbar);
   safeCall("wireVersionsDropdown", wireVersionsDropdown);
 
