@@ -451,34 +451,64 @@
     }
   }
 
+  function preserveDesktopEmbedMarkers(input) {
+    try {
+      var href = trimString(input, "");
+      var win = getWindow();
+      var shellUrl = new URL(String(win.location && win.location.href || ""));
+
+      if (
+        shellUrl.searchParams.get("allow_embed") !== "1" ||
+        shellUrl.searchParams.get("client_source") !== "desktop"
+      ) {
+        return href;
+      }
+
+      var target = new URL(href || "/", shellUrl.href);
+      if (target.origin !== shellUrl.origin) {
+        return href;
+      }
+
+      target.searchParams.set("allow_embed", "1");
+      target.searchParams.set("client_source", "desktop");
+      return target.href;
+    } catch (error) {
+      return trimString(input, "");
+    }
+  }
+
   function buildProjectHref(projectId, config) {
     try {
       var dataApi = getDataApi();
 
       if (dataApi && typeof dataApi.buildProjectHref === "function") {
-        return dataApi.buildProjectHref(projectId, {
+        return preserveDesktopEmbedMarkers(dataApi.buildProjectHref(projectId, {
           config: config
-        });
+        }));
       }
 
       var id = trimString(projectId, "");
 
       if (!id || id === "new") {
-        return DEFAULT_CREATE_PROJECT_URL;
+        return preserveDesktopEmbedMarkers(DEFAULT_CREATE_PROJECT_URL);
       }
 
       var routeBase = getRouteBase();
 
       if (!routeBase || routeBase === "/") {
-        return "/project=" + encodeURIComponent(id);
+        return preserveDesktopEmbedMarkers("/project=" + encodeURIComponent(id));
       }
 
       if (routeBase.indexOf("project=") !== -1) {
-        return routeBase.replace(/project=[^/?#&]*/g, "project=" + encodeURIComponent(id));
+        return preserveDesktopEmbedMarkers(
+          routeBase.replace(/project=[^/?#&]*/g, "project=" + encodeURIComponent(id))
+        );
       }
 
       var separator = routeBase.indexOf("?") === -1 ? "?" : "&";
-      return routeBase + separator + "project=" + encodeURIComponent(id);
+      return preserveDesktopEmbedMarkers(
+        routeBase + separator + "project=" + encodeURIComponent(id)
+      );
     } catch (error) {
       return DEFAULT_CREATE_PROJECT_URL;
     }
@@ -1097,6 +1127,7 @@
       var chatId = trimString(item.chatId || item.chat_id || item.conversationId || item.conversation_id, "");
       var href = trimString(item.href, "") ||
         (projectId ? buildProjectHref(projectId) : buildChatHref(chatId));
+      href = preserveDesktopEmbedMarkers(href);
 
       node.setAttribute("href", href);
       node.setAttribute("title", item.title || "");
@@ -1781,7 +1812,7 @@
           }
 
           var cfg = refreshConfig();
-          var href = getCreateProjectUrl(cfg);
+          var href = preserveDesktopEmbedMarkers(getCreateProjectUrl(cfg));
 
           dispatch(root, "vectoplan:project-sidebar:create-requested", {
             href: href,
@@ -2506,7 +2537,8 @@
       readStorage: readStorage,
       writeStorage: writeStorage,
       buildProjectHref: buildProjectHref,
-      getCreateProjectUrl: getCreateProjectUrl
+      getCreateProjectUrl: getCreateProjectUrl,
+      preserveDesktopEmbedMarkers: preserveDesktopEmbedMarkers
     }
   };
 

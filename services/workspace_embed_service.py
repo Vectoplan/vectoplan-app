@@ -251,6 +251,8 @@ DEFAULT_ALLOWED_EXTRA_QUERY_KEYS = frozenset(
         "view",
         "bearing",
         "zoom",
+        "allow_embed",
+        "client_source",
     }
 )
 
@@ -2568,6 +2570,18 @@ def build_workspace_embed_result(
             params = dict(extras)
             params.update(base_params)  # Security contract overwrites every external value.
             params = _clean_query_params(params, allow_security_controls=True)
+
+        # A desktop shell remains an ancestor of every nested workspace frame.
+        # Forward only the exact, non-identity desktop marker so downstream
+        # services can extend frame-ancestors for the ephemeral loopback port.
+        desktop_extras = _clean_extra_query_params(extra_params or {})
+        if (
+            _safe_str(desktop_extras.get("allow_embed"), "", 16) == "1"
+            and _safe_str(desktop_extras.get("client_source"), "", 40).lower() == "desktop"
+        ):
+            params["allow_embed"] = "1"
+            params["client_source"] = "desktop"
+
         request_target_url = _match_loopback_target_host(
             target.public_route_url,
             request_obj,
