@@ -559,9 +559,34 @@ function normalizeRelativeUrl(input) {
   }
 }
 
-function cacheBustLocalUrl(input) {
+function desktopEmbedUrl(input) {
   try {
     const raw = String(input || "").trim();
+    if (!raw) return raw;
+
+    const shell = new URL(window.location.href);
+    const isDesktopShell =
+      shell.searchParams.get("allow_embed") === "1"
+      && String(shell.searchParams.get("client_source") || "").toLowerCase() === "desktop";
+    if (!isDesktopShell) return raw;
+
+    const url = new URL(raw, shell.href);
+    if (!["http:", "https:"].includes(url.protocol)) return raw;
+    url.searchParams.set("allow_embed", "1");
+    url.searchParams.set("client_source", "desktop");
+
+    if (raw.startsWith("/") && url.origin === shell.origin) {
+      return url.pathname + (url.search ? url.search : "") + (url.hash || "");
+    }
+    return url.href;
+  } catch (_) {
+    return String(input || "").trim();
+  }
+}
+
+function cacheBustLocalUrl(input) {
+  try {
+    const raw = desktopEmbedUrl(input);
     if (!raw) return raw;
 
     if (!raw.startsWith("/")) return raw;
@@ -577,7 +602,7 @@ function cacheBustLocalUrl(input) {
 
 function stableLocalUrl(input) {
   try {
-    const raw = String(input || "").trim();
+    const raw = desktopEmbedUrl(input);
     if (!raw) return raw;
 
     if (!raw.startsWith("/")) return raw;
@@ -1523,7 +1548,7 @@ function editorPreloadFrame() {
 function prepareParcelCatalogFrame() {
   try {
     const currentFrame = viewerFrame();
-    const rawTarget = String(mapUrl() || "").trim();
+    const rawTarget = desktopEmbedUrl(mapUrl());
     if (!currentFrame || !rawTarget || isUnsafeLegacyTarget(rawTarget)) return false;
 
     const currentTarget = currentFrame.dataset.target || currentFrame.getAttribute("src") || "";
@@ -1578,12 +1603,53 @@ function requestEditorRuntimeStatus(frame = editorPreloadFrame()) {
   }
 }
 
+function postWorkspaceFrameVisibility(frame, active) {
+  try {
+    if (!frame?.contentWindow) return false;
+    const visible = Boolean(active) && uiState.desktopVisible !== false;
+    frame.contentWindow.postMessage(
+      {
+        type: "vectoplan-app:workspace-visibility",
+        kind: "vectoplan-app:workspace-visibility",
+        source: "vectoplan-app",
+        visible,
+      },
+      "*"
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function wireDesktopVisibilityBridge() {
+  try {
+    if (window.__VECTOPLAN_DESKTOP_VISIBILITY_WIRED__) return;
+    window.__VECTOPLAN_DESKTOP_VISIBILITY_WIRED__ = true;
+    if (uiState.desktopVisible == null) uiState.desktopVisible = true;
+
+    window.addEventListener("message", (event) => {
+      try {
+        if (event.source !== window.parent || !event.data) return;
+        if (event.data.type !== "vectoplan-client:service-visibility") return;
+        if (event.data.source !== "vectoplan-client") return;
+        uiState.desktopVisible = event.data.visible !== false;
+        const editorFrame = editorPreloadFrame();
+        const workspaceFrame = viewerFrame();
+        postWorkspaceFrameVisibility(editorFrame, editorFrame?.dataset.workspaceActive === "true");
+        postWorkspaceFrameVisibility(workspaceFrame, workspaceFrame?.dataset.workspaceActive === "true");
+      } catch (_) {}
+    });
+  } catch (_) {}
+}
+
 function setWorkspaceFrameActive(frame, active) {
   try {
     if (!frame) return;
     frame.classList.toggle("is-workspace-active", Boolean(active));
     frame.setAttribute("aria-hidden", active ? "false" : "true");
     frame.dataset.workspaceActive = active ? "true" : "false";
+    postWorkspaceFrameVisibility(frame, active);
   } catch (_) {}
 }
 
@@ -1599,7 +1665,7 @@ function activateWorkspaceFrame(mode) {
 function prepareEditorPreloadFrame(nextSrc) {
   try {
     const frame = editorPreloadFrame();
-    const rawSrc = String(nextSrc || "").trim();
+    const rawSrc = desktopEmbedUrl(nextSrc);
     if (!frame || !rawSrc || isUnsafeLegacyTarget(rawSrc)) return false;
 
     applyIframeCapabilities(frame);
@@ -1701,6 +1767,7 @@ function makeIframeLoadHandlers(frame, rawSrc, mode) {
 
       if (normalizedMode === "3d") {
         requestEditorRuntimeStatus(frame);
+        postWorkspaceFrameVisibility(frame, frame.dataset.workspaceActive === "true");
       }
 
       try {
@@ -1764,7 +1831,7 @@ function safeFallbackForMode(mode) {
 function hardSwapIframe(nextSrc, options = {}) {
   try {
     const oldFrame = viewerFrame();
-    const rawSrc = String(nextSrc || "").trim();
+    const rawSrc = desktopEmbedUrl(nextSrc);
 
     if (!oldFrame || !rawSrc) return false;
 
@@ -2224,9 +2291,15 @@ async function applyInitialWorkspaceMode() {
     const currentFrame = viewerFrame();
     if (currentFrame) {
       applyIframeCapabilities(currentFrame);
+      const currentTarget = desktopEmbedUrl(
+        currentFrame.getAttribute("src") || currentFrame.src || ""
+      );
+      if (currentTarget && currentTarget !== currentFrame.getAttribute("src")) {
+        currentFrame.src = currentTarget;
+      }
       makeIframeLoadHandlers(
         currentFrame,
-        currentFrame.getAttribute("src") || currentFrame.src || "",
+        currentTarget,
         normalizeMode(cfgValue("defaultMode", dataValue("defaultMode", "project")))
       );
     }
@@ -2236,10 +2309,13 @@ async function applyInitialWorkspaceMode() {
     const editorFrame = editorPreloadFrame();
     if (editorFrame) {
       applyIframeCapabilities(editorFrame);
-      const editorTarget = editorUrl();
+      const editorTarget = desktopEmbedUrl(editorUrl());
       if (editorTarget) {
         editorFrame.dataset.target = editorTarget;
         makeIframeLoadHandlers(editorFrame, editorTarget, "3d");
+        if (editorTarget !== editorFrame.getAttribute("src")) {
+          editorFrame.src = editorTarget;
+        }
       }
     }
   } catch (_) {}
@@ -3633,6 +3709,7 @@ function exposeWorkspaceDebugApi() {
         frame: viewerFrame,
         swap: hardSwapIframe,
         unsafe: isUnsafeLegacyTarget,
+        desktopEmbedUrl,
         stableLocalUrl,
         cacheBustLocalUrl,
       },
@@ -3672,6 +3749,7 @@ async function boot() {
 
 
   safeCall("wireEditorEventBridge", wireEditorEventBridge);
+  safeCall("wireDesktopVisibilityBridge", wireDesktopVisibilityBridge);
   safeCall("wireParcelSelectionBridge", wireParcelSelectionBridge);
   safeCall("prepareEditorPreloadFrame", () => {
     if (vergabeSetup?.active) return false;

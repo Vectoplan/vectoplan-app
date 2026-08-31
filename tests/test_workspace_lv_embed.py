@@ -42,3 +42,23 @@ def test_lv_embed_forwards_only_the_public_project_key() -> None:
     parsed = urlsplit(result.url)
     assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "http://localhost:5105/lv"
     assert parse_qs(parsed.query) == {"project_public_id": ["prj_demo_lv"]}
+
+
+def test_lv_embed_forwards_only_the_explicit_desktop_embed_marker() -> None:
+    result = build_workspace_embed_result(
+        WORKSPACE_LV,
+        project_payload=_owner_project(),
+        current_user={"authenticated": True},
+        extra_params={
+            "allow_embed": "1",
+            "client_source": "desktop",
+            "token": "must-not-leak",
+        },
+    )
+
+    assert result.ok is True
+    assert parse_qs(urlsplit(result.url).query) == {
+        "project_public_id": ["prj_demo_lv"],
+        "allow_embed": ["1"],
+        "client_source": ["desktop"],
+    }

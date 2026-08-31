@@ -3192,6 +3192,8 @@ def _request_extra_embed_params() -> Dict[str, Any]:
         "quality",
         "renderer",
         "initial_panel",
+        "allow_embed",
+        "client_source",
     }
     if _config_bool("VECTOPLAN_VIEWER_ALLOW_DEBUG_EMBED_PARAMS", False):
         allowed.update({"debug", "debug_ui", "debug_chunks", "devtools"})
@@ -3823,7 +3825,14 @@ def project_files_workspace(project_id: str) -> Response:
             code="filecloud_access_ticket_failed",
         )
 
-    target = f"{base_url}{route}?{urlencode({'project_id': public_id, 'vp_access_ticket': access_ticket})}"
+    target_params = {"project_id": public_id, "vp_access_ticket": access_ticket}
+    if (
+        request.args.get("allow_embed") == "1"
+        and _safe_str(request.args.get("client_source"), "", 40).lower() == "desktop"
+    ):
+        target_params["allow_embed"] = "1"
+        target_params["client_source"] = "desktop"
+    target = f"{base_url}{route}?{urlencode(target_params)}"
     return _redirect_response(target, status=302, workspace="files")
 
 

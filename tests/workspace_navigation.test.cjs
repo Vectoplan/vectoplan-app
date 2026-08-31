@@ -4,6 +4,10 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(require.resolve('../static/js/chat/main.js'), 'utf8')
   .replace(/^import .*;\r?\n/gm, '').replace(/^void boot\(\);\s*$/m, '');
+const projectSidebarSource = fs.readFileSync(
+  require.resolve('../static/js/chat/project_sidebar.js'),
+  'utf8',
+);
 const project = 'prj_test_12345678';
 const base = `/project=${project}`;
 const workspaces = [
@@ -47,6 +51,18 @@ function fixture(path = `${base}/2d`, embedded = false) {
   return { context, window, uiState, changes, handlers, sent, navigate, reloads: () => reloads };
 }
 
+function projectSidebarFixture(path) {
+  const document = { readyState: 'loading', addEventListener() {} };
+  const window = {
+    location: new URL(path, 'http://localhost:5103'),
+    document,
+    APP_CONFIG: {},
+  };
+  const context = vm.createContext({ window, document, URL, Date, console });
+  vm.runInContext(projectSidebarSource, context);
+  return window.VectoplanProjectSidebar._private;
+}
+
 test('every workspace has a canonical URL and accepts its suffix as a mode', () => {
   const f = fixture();
   for (const [mode, suffix] of workspaces) {
@@ -71,6 +87,36 @@ test('initial navigation replaces legacy mode parameters while retaining embed o
   f.handlers.popstate();
   assert.equal(f.reloads(), 1);
   assert.equal(f.changes.length, 1);
+});
+
+test('desktop embed markers propagate to nested same-origin and editor frames', () => {
+  const f = fixture(`${base}?allow_embed=1&client_source=desktop`);
+  const local = new URL(f.context.desktopEmbedUrl('/ui/project/prj_nested/project'), 'http://localhost:5103');
+  assert.equal(local.searchParams.get('allow_embed'), '1');
+  assert.equal(local.searchParams.get('client_source'), 'desktop');
+
+  const editor = new URL(f.context.desktopEmbedUrl('http://127.0.0.1:5100/editor'));
+  assert.equal(editor.searchParams.get('allow_embed'), '1');
+  assert.equal(editor.searchParams.get('client_source'), 'desktop');
+
+  const normal = fixture(base);
+  assert.equal(normal.context.desktopEmbedUrl('/ui/project/prj_nested/project'), '/ui/project/prj_nested/project');
+});
+
+test('desktop embed markers survive native project sidebar navigation', () => {
+  const desktop = projectSidebarFixture(`${base}?allow_embed=1&client_source=desktop`);
+  const target = new URL(desktop.buildProjectHref('prj_next'));
+  assert.equal(target.pathname, '/project=prj_next');
+  assert.equal(target.searchParams.get('allow_embed'), '1');
+  assert.equal(target.searchParams.get('client_source'), 'desktop');
+
+  const apiHref = desktop.preserveDesktopEmbedMarkers('/project=prj_api');
+  const apiTarget = new URL(apiHref);
+  assert.equal(apiTarget.searchParams.get('allow_embed'), '1');
+  assert.equal(apiTarget.searchParams.get('client_source'), 'desktop');
+
+  const browser = projectSidebarFixture(base);
+  assert.equal(browser.buildProjectHref('prj_next'), '/project=prj_next');
 });
 
 test('project updates preserve the current workspace and the URL prefix', () => {
