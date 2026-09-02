@@ -17,6 +17,18 @@ DEFAULT_ENDPOINT = "https://api.mapbox.com/search/geocode/v6/forward"
 DEFAULT_TIMEOUT_SECONDS = 4.0
 MAX_QUERY_LENGTH = 256
 MAX_RESULT_LIMIT = 6
+DEFAULT_BERLIN_ID = "fallback:berlin-default"
+DEFAULT_BERLIN_PROVIDER = "fallback/default_berlin"
+DEFAULT_BERLIN_LONGITUDE = 13.4050
+DEFAULT_BERLIN_LATITUDE = 52.5200
+DEFAULT_BERLIN_LABEL = "Berlin, Deutschland (Standardstandort)"
+TOKEN_ENV_NAMES = (
+    "VECTOPLAN_APP_MAPBOX_ACCESS_TOKEN",
+    "VECTOPLAN_APP_MAPBOX_TOKEN",
+    "VECTOPLAN_MAPBOX_TOKEN",
+    "MAPBOX_ACCESS_TOKEN",
+    "MAPBOX_TOKEN",
+)
 
 
 class GeocodingError(RuntimeError):
@@ -71,24 +83,107 @@ def _timeout(value: Any = None) -> float:
         return DEFAULT_TIMEOUT_SECONDS
 
 
+def _clean_token(value: Any) -> str:
+    token = _text(value, "", 2048)
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'}:
+        token = token[1:-1].strip()
+    return token
+
+
 def _configured_token() -> str:
-    return _text(os.getenv("MAPBOX_ACCESS_TOKEN"), "", 2048)
+    """Resolve the shared Mapbox credential without exposing it to clients."""
+    for name in TOKEN_ENV_NAMES:
+        token = _clean_token(os.getenv(name))
+        if token:
+            return token
+    return ""
 
 
 def geocoding_status() -> Dict[str, Any]:
     token = _configured_token()
     enabled = _bool_env("VECTOPLAN_APP_MAPBOX_GEOCODING_ENABLED", bool(token))
+    fallback_enabled = _bool_env(
+        "VECTOPLAN_APP_GEOCODING_FALLBACK_ENABLED",
+        True,
+    )
     return {
         "ok": bool(enabled and token),
         "enabled": enabled,
         "configured": bool(token),
         "provider": "mapbox",
         "api": "geocoding-v6",
+        "fallback_available": fallback_enabled,
+        "fallback_provider": DEFAULT_BERLIN_PROVIDER,
         "permanent_storage": _bool_env(
             "VECTOPLAN_APP_MAPBOX_PERMANENT_GEOCODING",
             True,
         ),
     }
+
+
+def _default_berlin_result(reason: str) -> Dict[str, Any]:
+    """Return the stable, explicitly marked fallback used without Mapbox.
+
+    The stable identifier is also accepted as a resolve query. This avoids a
+    race where Mapbox recovers between suggestion selection and project save.
+    """
+    longitude = _float(os.getenv("VECTOPLAN_APP_GEOCODING_FALLBACK_LONGITUDE"))
+    if longitude is None or not -180.0 <= longitude <= 180.0:
+        longitude = DEFAULT_BERLIN_LONGITUDE
+    latitude = _float(os.getenv("VECTOPLAN_APP_GEOCODING_FALLBACK_LATITUDE"))
+    if latitude is None or not -90.0 <= latitude <= 90.0:
+        latitude = DEFAULT_BERLIN_LATITUDE
+    label = _text(
+        os.getenv("VECTOPLAN_APP_GEOCODING_FALLBACK_LABEL"),
+        DEFAULT_BERLIN_LABEL,
+        MAX_QUERY_LENGTH,
+    ) or DEFAULT_BERLIN_LABEL
+    return {
+        "id": DEFAULT_BERLIN_ID,
+        "mapbox_id": DEFAULT_BERLIN_ID,
+        "label": label,
+        "address_text": label,
+        "feature_type": "fallback",
+        "longitude": longitude,
+        "latitude": latitude,
+        "x": longitude,
+        "y": latitude,
+        "coordinate_srid": "EPSG:4326",
+        "source_crs_id": "EPSG:4326",
+        "street": "",
+        "house_number": "",
+        "postal_code": "",
+        "city": "Berlin",
+        "region": "Berlin",
+        "country": "Deutschland",
+        "quality": "fallback",
+        "status": "resolved",
+        "source": "default_berlin",
+        "provider": DEFAULT_BERLIN_PROVIDER,
+        "is_fallback": True,
+        "fallback_reason": _text(reason, "mapbox_unavailable", 80),
+    }
+
+
+def _is_default_berlin_reference(query: str) -> bool:
+    return _text(query, "", MAX_QUERY_LENGTH).lower() == DEFAULT_BERLIN_ID
+
+
+def _fallback_or_raise(
+    reason: str,
+    message: str,
+    *,
+    status_code: int = 503,
+    retryable: bool = False,
+) -> List[Dict[str, Any]]:
+    if _bool_env("VECTOPLAN_APP_GEOCODING_FALLBACK_ENABLED", True):
+        return [_default_berlin_result(reason)]
+    raise GeocodingError(
+        reason,
+        message,
+        status_code=status_code,
+        retryable=retryable,
+    )
 
 
 def _context_value(properties: Mapping[str, Any], key: str, *names: str) -> str:
@@ -216,22 +311,6 @@ def search_addresses(
     timeout: Any = None,
     timeout_seconds: Any = None,
 ) -> List[Dict[str, Any]]:
-    status = geocoding_status()
-    if not status["enabled"]:
-        raise GeocodingError(
-            "geocoding_disabled",
-            "Die Adresssuche ist nicht aktiviert.",
-            status_code=503,
-        )
-
-    token = _configured_token()
-    if not token:
-        raise GeocodingError(
-            "mapbox_token_missing",
-            "Die Adresssuche ist noch nicht konfiguriert.",
-            status_code=503,
-        )
-
     text_query = _text(query, "", MAX_QUERY_LENGTH)
     if len(text_query) < 3:
         return []
@@ -240,6 +319,28 @@ def search_addresses(
             "geocoding_query_invalid",
             "Die Adresse enthält ein nicht unterstütztes Zeichen.",
             status_code=422,
+        )
+
+    if _is_default_berlin_reference(text_query):
+        if not _bool_env("VECTOPLAN_APP_GEOCODING_FALLBACK_ENABLED", True):
+            raise GeocodingError(
+                "geocoding_fallback_disabled",
+                "Der Standardstandort ist nicht aktiviert.",
+                status_code=422,
+            )
+        return [_default_berlin_result("selected_fallback")]
+
+    status = geocoding_status()
+    token = _configured_token()
+    if not token:
+        return _fallback_or_raise(
+            "mapbox_token_missing",
+            "Die Adresssuche ist noch nicht konfiguriert.",
+        )
+    if not status["enabled"]:
+        return _fallback_or_raise(
+            "geocoding_disabled",
+            "Die Adresssuche ist nicht aktiviert.",
         )
 
     try:
@@ -286,55 +387,66 @@ def search_addresses(
                 "User-Agent": "vectoplan-app-geocoder/1.0",
             },
         )
-    except requests.Timeout as exc:
-        raise GeocodingError(
+    except requests.Timeout:
+        return _fallback_or_raise(
             "mapbox_timeout",
             "Die Adresssuche hat zu lange gedauert. Bitte erneut versuchen.",
-            status_code=503,
             retryable=True,
-        ) from exc
-    except requests.RequestException as exc:
-        raise GeocodingError(
+        )
+    except requests.RequestException:
+        return _fallback_or_raise(
             "mapbox_unavailable",
             "Die Adresssuche ist vorübergehend nicht erreichbar.",
-            status_code=503,
             retryable=True,
-        ) from exc
+        )
 
     if response.status_code == 429:
-        raise GeocodingError(
+        return _fallback_or_raise(
             "mapbox_rate_limited",
             "Die Adresssuche ist ausgelastet. Bitte kurz warten.",
-            status_code=503,
             retryable=True,
         )
     if response.status_code in {401, 403}:
-        raise GeocodingError(
+        return _fallback_or_raise(
             "mapbox_token_rejected",
             "Die Adresssuche ist nicht korrekt autorisiert.",
-            status_code=503,
+        )
+    if response.status_code >= 500:
+        return _fallback_or_raise(
+            "mapbox_request_failed",
+            "Die Adresse konnte derzeit nicht geprüft werden.",
+            retryable=True,
         )
     if not 200 <= response.status_code < 300:
         raise GeocodingError(
             "mapbox_request_failed",
             "Die Adresse konnte derzeit nicht geprüft werden.",
-            status_code=503 if response.status_code >= 500 else 422,
-            retryable=response.status_code >= 500,
+            status_code=422,
+            retryable=False,
         )
 
     try:
         payload = response.json()
-    except ValueError as exc:
-        raise GeocodingError(
+    except ValueError:
+        return _fallback_or_raise(
             "mapbox_response_invalid",
             "Die Adresssuche hat eine ungültige Antwort geliefert.",
-            status_code=503,
             retryable=True,
-        ) from exc
+        )
 
-    features = payload.get("features") if isinstance(payload, Mapping) else []
+    if not isinstance(payload, Mapping):
+        return _fallback_or_raise(
+            "mapbox_response_invalid",
+            "Die Adresssuche hat eine ungültige Antwort geliefert.",
+            retryable=True,
+        )
+    features = payload.get("features")
     if not isinstance(features, list):
-        features = []
+        return _fallback_or_raise(
+            "mapbox_response_invalid",
+            "Die Adresssuche hat eine ungültige Antwort geliefert.",
+            retryable=True,
+        )
 
     normalized: List[Dict[str, Any]] = []
     for feature in features:
@@ -373,13 +485,22 @@ def geocode_address(
     )
     return {
         "ok": True,
-        "provider": "mapbox",
+        "provider": (
+            _text(results[0].get("provider"), "mapbox", 80)
+            if results
+            else "mapbox"
+        ),
         "result": results[0] if results else None,
         "results": results,
     }
 
 
 __all__ = [
+    "DEFAULT_BERLIN_ID",
+    "DEFAULT_BERLIN_LABEL",
+    "DEFAULT_BERLIN_LATITUDE",
+    "DEFAULT_BERLIN_LONGITUDE",
+    "DEFAULT_BERLIN_PROVIDER",
     "GeocodingError",
     "geocode_address",
     "geocoding_status",

@@ -2956,6 +2956,7 @@ def _build_project_workspace_context_safe(
         "workspace_access_view": dict(workspace_access or {}),
         "publication": base_publication,
         "publication_view": base_publication,
+        "project_dashboard": {},
         "ui_flags": {},
         "is_new": bool(is_new),
         "is_demo": _is_demo_project(project, base_project_payload),

@@ -17,6 +17,7 @@
   - title
   - description
   - address_text
+  - address_mapbox_id (Mapbox-ID oder stabile Berlin-Fallback-ID)
   - address.text
   - visibility
 
@@ -109,6 +110,8 @@
   var DEFAULT_REQUEST_TIMEOUT_MS = 30000;
   var MAX_RESPONSE_TEXT_LENGTH = 2 * 1024 * 1024;
   var GEOCODER_DEBOUNCE_MS = 350;
+  var BERLIN_DEFAULT_FALLBACK_ID = "fallback:berlin-default";
+  var BERLIN_DEFAULT_FALLBACK_DISPLAY = "Berlin (Standardstandort \u2013 Mapbox nicht verf\u00fcgbar)";
 
   var VALID_PROJECT_ROLES = {
     owner: true,
@@ -124,6 +127,7 @@
     project_created: true,
     project_created_with_flat_fallback: true,
     project_created_chunk_pending: true,
+    project_created_services_pending: true,
     project_created_chunk_repair_required: true,
     project_invitation_accepted_chunk_sync_pending: true,
     project_invitation_accepted_chunk_sync_failed: true
@@ -143,6 +147,8 @@
     isNew: true,
     canEdit: false,
     canManage: false,
+    canViewSettings: false,
+    canManageSettings: false,
     canMutate: false,
 
     demoMode: false,
@@ -172,6 +178,8 @@
     requestId: "",
     lastResponseStatus: null,
     isDirty: false,
+    dashboardDirty: false,
+    costCenterDirty: false,
     isSaving: false,
     isLoading: false,
     lastSavedAt: null,
@@ -487,6 +495,13 @@
       var accessSync = isObject(p.chunk_access_sync) ? p.chunk_access_sync : isObject(p.chunkAccessSync) ? p.chunkAccessSync : {};
       var access = isObject(p.access) ? p.access : {};
       var permissions = isObject(access.permissions) ? access.permissions : {};
+      var projectSettings = isObject(p.settings) ? p.settings : {};
+      var dashboardView = isObject(p.dashboard) ? p.dashboard : {};
+      var dashboardSettings = isObject(dashboardView.settings)
+        ? dashboardView.settings
+        : isObject(projectSettings.dashboard)
+          ? projectSettings.dashboard
+          : dashboardView;
 
       return sanitizeBrowserValue({
         id: p.id || p.project_id || p.projectId || "",
@@ -503,6 +518,15 @@
         description: p.description || "",
         cost_center: p.cost_center || p.costCenter || "",
         costCenter: p.costCenter || p.cost_center || "",
+        dashboard: {
+          budget_total: dashboardSettings.budget_total !== undefined ? dashboardSettings.budget_total : dashboardSettings.budgetTotal,
+          cost_actual: dashboardSettings.cost_actual !== undefined ? dashboardSettings.cost_actual : dashboardSettings.costActual,
+          planned_hours: dashboardSettings.planned_hours !== undefined ? dashboardSettings.planned_hours : dashboardSettings.plannedHours,
+          logged_hours: dashboardSettings.logged_hours !== undefined ? dashboardSettings.logged_hours : dashboardSettings.loggedHours,
+          completion_percent: dashboardSettings.completion_percent !== undefined ? dashboardSettings.completion_percent : dashboardSettings.completionPercent,
+          target_date: dashboardSettings.target_date !== undefined ? dashboardSettings.target_date : dashboardSettings.targetDate,
+          gross_floor_area_m2: dashboardSettings.gross_floor_area_m2 !== undefined ? dashboardSettings.gross_floor_area_m2 : dashboardSettings.grossFloorAreaM2
+        },
         address_text: p.address_text || p.addressText || address.text || "",
         addressText: p.addressText || p.address_text || address.text || "",
         address: { text: p.address_text || p.addressText || address.text || "" },
@@ -521,10 +545,14 @@
           can_view: toBooleanSafe(access.can_view !== undefined ? access.can_view : access.canView, false),
           can_edit: toBooleanSafe(access.can_edit !== undefined ? access.can_edit : access.canEdit, false),
           can_manage: toBooleanSafe(access.can_manage !== undefined ? access.can_manage : access.canManage, false),
+          can_view_settings: toBooleanSafe(access.can_view_settings !== undefined ? access.can_view_settings : access.canViewSettings, false),
+          can_manage_settings: toBooleanSafe(access.can_manage_settings !== undefined ? access.can_manage_settings : access.canManageSettings, false),
           permissions: {
             view: toBooleanSafe(permissions.view, false),
             edit: toBooleanSafe(permissions.edit, false),
-            manage: toBooleanSafe(permissions.manage, false)
+            manage: toBooleanSafe(permissions.manage, false),
+            view_settings: toBooleanSafe(permissions.view_settings, false),
+            manage_settings: toBooleanSafe(permissions.manage_settings, false)
           }
         },
         chunk: {
@@ -1324,6 +1352,19 @@
         config.canManage, config.can_manage, access.canManage,
         access.can_manage, attr(root, "data-project-can-manage", "")
       ], false) && roleCanManage && !publicViewer && !readOnly && !demoMode && !authUnavailable && !userBlocked && !accessBlocked && !identityMismatch;
+      var accessPermissions = isObject(access.permissions) ? access.permissions : {};
+      var canViewSettings = pickBoolean([
+        config.canViewSettings, config.can_view_settings,
+        access.canViewSettings, access.can_view_settings,
+        accessPermissions.view_settings,
+        attr(root, "data-project-can-view-settings", "")
+      ], false) && persistent && !publicViewer && !demoMode && !authUnavailable && !userBlocked && !accessBlocked && !identityMismatch;
+      var canManageSettings = pickBoolean([
+        config.canManageSettings, config.can_manage_settings,
+        access.canManageSettings, access.can_manage_settings,
+        accessPermissions.manage_settings,
+        attr(root, "data-project-can-manage-settings", "")
+      ], false) && canViewSettings && canEdit && !readOnly;
       var canMutate = pickBoolean([
         config.canMutate, config.can_mutate, access.canMutate,
         access.can_mutate, attr(root, "data-project-can-mutate", ""),
@@ -1345,6 +1386,8 @@
         isNew: isNew,
         canEdit: canEdit,
         canManage: canManage,
+        canViewSettings: canViewSettings,
+        canManageSettings: canManageSettings,
         canMutate: canMutate,
         demoMode: demoMode,
         publicViewer: publicViewer,
@@ -1469,6 +1512,13 @@
       name: queryById("projectName"),
       description: queryById("projectDescription"),
       costCenter: queryById("projectCostCenter"),
+      budgetTotal: queryById("projectBudgetTotal"),
+      costActual: queryById("projectCostActual"),
+      targetDate: queryById("projectTargetDate"),
+      completionPercent: queryById("projectCompletionPercent"),
+      plannedHours: queryById("projectPlannedHours"),
+      loggedHours: queryById("projectLoggedHours"),
+      grossFloorAreaM2: queryById("projectGrossFloorArea"),
       addressText: queryById("projectAddressText"),
       addressMapboxId: queryById("projectAddressMapboxId"),
 
@@ -1884,6 +1934,81 @@
     } catch (error) {}
   }
 
+  function normalizedGeocoderMarker(value) {
+    return trimString(value, "")
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_");
+  }
+
+  function isBerlinDefaultFallback(item, responseContext) {
+    try {
+      var suggestion = isObject(item) ? item : {};
+      var envelope = isObject(responseContext) ? responseContext : {};
+      var identifier = trimString(suggestion.mapbox_id || suggestion.id, "").toLowerCase();
+      var source = normalizedGeocoderMarker(suggestion.source || envelope.source);
+      var provider = normalizedGeocoderMarker(suggestion.provider || envelope.provider);
+      var reason = normalizedGeocoderMarker(
+        suggestion.fallback_reason || suggestion.fallbackReason ||
+        envelope.fallback_reason || envelope.fallbackReason
+      );
+      var explicitlyMarked = toBooleanSafe(
+        suggestion.is_fallback !== undefined ? suggestion.is_fallback :
+          (suggestion.isFallback !== undefined ? suggestion.isFallback : suggestion.fallback),
+        false
+      );
+
+      return (
+        identifier === BERLIN_DEFAULT_FALLBACK_ID ||
+        source === "default_berlin" ||
+        source === "berlin_default" ||
+        provider === "default_berlin" ||
+        provider === "berlin_default" ||
+        provider === "fallback/default_berlin" ||
+        provider === "fallback/berlin_default" ||
+        (provider === "fallback" && (explicitlyMarked || /berlin/.test(reason))) ||
+        (explicitlyMarked && (/berlin/.test(source) || /berlin/.test(provider) || /berlin/.test(reason)))
+      );
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function normalizeGeocoderSuggestion(item, responseContext) {
+    var suggestion = isObject(item) ? item : {};
+    if (!isBerlinDefaultFallback(suggestion, responseContext)) {
+      return suggestion;
+    }
+
+    var normalized = {};
+    Object.keys(suggestion).forEach(function copySuggestionField(key) {
+      normalized[key] = suggestion[key];
+    });
+    normalized.id = BERLIN_DEFAULT_FALLBACK_ID;
+    normalized.mapbox_id = BERLIN_DEFAULT_FALLBACK_ID;
+    normalized.is_fallback = true;
+    normalized.provider = "default_berlin";
+    normalized.source = "default_berlin";
+    normalized.ui_label = BERLIN_DEFAULT_FALLBACK_DISPLAY;
+    return normalized;
+  }
+
+  function geocoderSuggestionValue(item) {
+    if (isBerlinDefaultFallback(item)) {
+      return trimString(
+        item.address_text || item.label,
+        "Berlin, Deutschland (Standardstandort)"
+      );
+    }
+    return trimString(item && (item.label || item.address_text), "");
+  }
+
+  function geocoderSuggestionDisplayLabel(item) {
+    if (isBerlinDefaultFallback(item)) {
+      return BERLIN_DEFAULT_FALLBACK_DISPLAY;
+    }
+    return trimString(item && (item.label || item.address_text), "Adresse");
+  }
+
   function closeGeocoderSuggestions() {
     try {
       var refs = state.refs || {};
@@ -1903,21 +2028,32 @@
   function selectGeocoderSuggestion(index) {
     try {
       var item = state.geocoder.items[index];
-      var label = item && trimString(item.label || item.address_text, "");
+      var isBerlinFallback = isBerlinDefaultFallback(item);
+      var label = geocoderSuggestionValue(item);
       if (!label || !state.refs.addressText) { return; }
       setValue(state.refs.addressText, label);
-      setValue(state.refs.addressMapboxId, trimString(item.mapbox_id || item.id, ""));
+      setValue(
+        state.refs.addressMapboxId,
+        isBerlinFallback
+          ? BERLIN_DEFAULT_FALLBACK_ID
+          : trimString(item.mapbox_id || item.id, "")
+      );
       removeFieldError(state.refs.addressText);
       updateAddressCounter();
       closeGeocoderSuggestions();
-      setGeocoderStatus("Adresse ausgew\u00e4hlt \u00b7 Powered by Mapbox", "success");
+      setGeocoderStatus(
+        isBerlinFallback
+          ? BERLIN_DEFAULT_FALLBACK_DISPLAY
+          : "Adresse ausgew\u00e4hlt \u00b7 Powered by Mapbox",
+        isBerlinFallback ? "warning" : "success"
+      );
       if (canWriteProject()) {
         markDirtyFromInput();
       }
     } catch (error) {}
   }
 
-  function renderGeocoderSuggestions(items) {
+  function renderGeocoderSuggestions(items, responseContext) {
     try {
       var refs = state.refs || {};
       var list = refs.geocoderSuggestions;
@@ -1925,7 +2061,11 @@
       if (!list || !doc) { return; }
 
       list.replaceChildren();
-      state.geocoder.items = Array.isArray(items) ? items.slice(0, 6) : [];
+      state.geocoder.items = Array.isArray(items)
+        ? items.slice(0, 6).map(function normalizeSuggestion(item) {
+          return normalizeGeocoderSuggestion(item, responseContext);
+        })
+        : [];
       state.geocoder.activeIndex = -1;
 
       if (!state.geocoder.items.length) {
@@ -1934,23 +2074,34 @@
         return;
       }
 
+      var containsBerlinFallback = state.geocoder.items.some(function hasBerlinFallback(item) {
+        return isBerlinDefaultFallback(item);
+      });
+
       state.geocoder.items.forEach(function addSuggestion(item, index) {
+        var isBerlinFallback = isBerlinDefaultFallback(item);
         var option = doc.createElement("button");
         option.type = "button";
-        option.className = "vp-project-geocoder__option";
+        option.className = "vp-project-geocoder__option" + (isBerlinFallback ? " is-fallback" : "");
         option.id = "projectAddressSuggestion-" + String(index);
         option.setAttribute("role", "option");
         option.setAttribute("aria-selected", "false");
         option.setAttribute("data-geocoder-index", String(index));
+        option.setAttribute("data-geocoder-fallback", isBerlinFallback ? "berlin-default" : "false");
+        if (isBerlinFallback) {
+          option.setAttribute("aria-label", BERLIN_DEFAULT_FALLBACK_DISPLAY);
+        }
 
         var label = doc.createElement("span");
         label.className = "vp-project-geocoder__option-label";
-        label.textContent = trimString(item.label || item.address_text, "Adresse");
+        label.textContent = geocoderSuggestionDisplayLabel(item);
         option.appendChild(label);
 
         var meta = doc.createElement("span");
         meta.className = "vp-project-geocoder__option-meta";
-        meta.textContent = trimString(item.feature_type, "Adresse");
+        meta.textContent = isBerlinFallback
+          ? "Ohne Mapbox"
+          : trimString(item.feature_type, "Adresse");
         option.appendChild(meta);
 
         addListener(option, "mousedown", function keepFocus(event) {
@@ -1966,7 +2117,12 @@
       if (refs.addressText) {
         refs.addressText.setAttribute("aria-expanded", "true");
       }
-      setGeocoderStatus("Adresse ausw\u00e4hlen \u00b7 Powered by Mapbox", "neutral");
+      setGeocoderStatus(
+        containsBerlinFallback
+          ? BERLIN_DEFAULT_FALLBACK_DISPLAY
+          : "Adresse ausw\u00e4hlen \u00b7 Powered by Mapbox",
+        containsBerlinFallback ? "warning" : "neutral"
+      );
     } catch (error) {
       closeGeocoderSuggestions();
     }
@@ -2000,17 +2156,241 @@
         }
       );
       var payload = await response.json().catch(function emptyPayload() { return {}; });
-      if (!response.ok || payload.ok === false) {
+      var responseItems = Array.isArray(payload.items) ? payload.items : [];
+      var hasUsableBerlinFallback = responseItems.some(function hasFallback(item) {
+        return isBerlinDefaultFallback(item, payload);
+      });
+      if ((!response.ok || payload.ok === false) && !hasUsableBerlinFallback) {
         throw new Error(trimString(payload.message || payload.error, "Adresssuche fehlgeschlagen."));
       }
       if (getValue(state.refs.addressText) !== cleanQuery) {
         return;
       }
-      renderGeocoderSuggestions(payload.items || []);
+      renderGeocoderSuggestions(responseItems, payload);
     } catch (error) {
       if (error && error.name === "AbortError") { return; }
       closeGeocoderSuggestions();
-      setGeocoderStatus("Adresssuche derzeit nicht verf\u00fcgbar \u00b7 Powered by Mapbox", "error");
+      var errorMessage = trimString(error && error.message, "");
+      if (!errorMessage || /failed to fetch|networkerror|load failed/i.test(errorMessage)) {
+        errorMessage = "Adresssuche derzeit nicht verf\u00fcgbar";
+      }
+      setGeocoderStatus(errorMessage + " \u00b7 Powered by Mapbox", "error");
+    }
+  }
+
+  function canManageProjectSettings() {
+    try {
+      return !!(state.canViewSettings && state.canManageSettings && canWriteProject());
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function dashboardNumber(element) {
+    try {
+      var raw = getValue(element).replace(",", ".");
+      if (!raw) { return null; }
+      var value = Number(raw);
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function formatDashboardNumber(value) {
+    try {
+      if (!Number.isFinite(value)) { return "—"; }
+      return new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 }).format(value);
+    } catch (error) {
+      return Number.isFinite(value) ? String(Math.round(value * 100) / 100) : "—";
+    }
+  }
+
+  function syncDashboardPreview() {
+    try {
+      var dashboardRoot = query("[data-project-dashboard]");
+      var refs = state.refs || {};
+      if (!dashboardRoot || !refs.budgetTotal) { return; }
+
+      var currency = trimString(dashboardRoot.getAttribute("data-dashboard-currency-symbol"), "€");
+      var budget = dashboardNumber(refs.budgetTotal);
+      var actual = dashboardNumber(refs.costActual);
+      var planned = dashboardNumber(refs.plannedHours);
+      var logged = dashboardNumber(refs.loggedHours);
+      var progress = dashboardNumber(refs.completionPercent);
+      var gfa = dashboardNumber(refs.grossFloorAreaM2);
+      var money = function money(value) {
+        return value === null ? "—" : formatDashboardNumber(value) + " " + currency;
+      };
+
+      setText(query("[data-dashboard-budget-total]"), money(budget));
+      setText(
+        query("[data-dashboard-cost-summary]"),
+        "Ist: " + money(actual) + " · Rest: " + money(budget !== null && actual !== null ? budget - actual : null)
+      );
+
+      var budgetMeter = query("[data-dashboard-budget-meter]");
+      var budgetRatio = budget !== null && budget > 0 && actual !== null
+        ? Math.max(0, Math.min(100, actual / budget * 100))
+        : null;
+      setHidden(budgetMeter, budgetRatio === null);
+      if (budgetMeter && budgetRatio !== null) {
+        budgetMeter.setAttribute("aria-label", formatDashboardNumber(budgetRatio) + " Prozent des Budgets verbraucht");
+        var budgetFill = budgetMeter.querySelector("i");
+        if (budgetFill) { budgetFill.style.setProperty("--vp-meter-value", String(budgetRatio) + "%"); }
+      }
+
+      setText(query("[data-dashboard-progress]"), progress === null ? "—" : String(Math.min(100, Math.round(progress))) + " %");
+      setText(query("[data-dashboard-logged-hours]"), (logged === null ? "—" : formatDashboardNumber(logged)) + " h");
+      setText(query("[data-dashboard-planned-hours]"), "von " + (planned === null ? "—" : formatDashboardNumber(planned)) + " h geplant");
+
+      var gfaFact = query("[data-dashboard-gfa-fact]");
+      setHidden(gfaFact, gfa === null);
+      setText(query("[data-dashboard-gfa]"), gfa === null ? "—" : formatDashboardNumber(gfa));
+
+      var targetRaw = getValue(refs.targetDate);
+      var targetParts = /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/.exec(targetRaw);
+      var targetLabel = "—";
+      var remainingLabel = "Noch nicht geplant";
+      if (targetParts) {
+        var target = new Date(Number(targetParts[1]), Number(targetParts[2]) - 1, Number(targetParts[3]));
+        var nowDate = new Date();
+        var today = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
+        var remainingDays = Math.round((target.getTime() - today.getTime()) / 86400000);
+        targetLabel = targetParts[3] + "." + targetParts[2] + "." + targetParts[1];
+        remainingLabel = remainingDays >= 0
+          ? String(remainingDays) + " Tage verbleibend"
+          : String(Math.abs(remainingDays)) + " Tage überfällig";
+      }
+      setText(query("[data-dashboard-target-date]"), targetLabel);
+      setText(query("[data-dashboard-target-remaining]"), remainingLabel);
+    } catch (error) {}
+  }
+
+  function setDashboardDerivedPending(isPending) {
+    try {
+      var dashboardRoot = query("[data-project-dashboard]");
+      if (!dashboardRoot) { return; }
+      var pending = !!isPending;
+      setHidden(query("[data-dashboard-derived-pending]", dashboardRoot), !pending);
+      setHidden(query("[data-dashboard-derived]", dashboardRoot), pending);
+      var readinessSummary = query("[data-dashboard-readiness-summary]", dashboardRoot);
+      var readinessMeter = query("[data-dashboard-readiness-meter]", dashboardRoot);
+      if (pending) {
+        setText(readinessSummary, "Technischer Status wird nach dem Speichern aktualisiert");
+        setHidden(readinessMeter, true);
+      }
+    } catch (error) {}
+  }
+
+  function clearChildren(element) {
+    try {
+      while (element && element.firstChild) {
+        element.removeChild(element.firstChild);
+      }
+    } catch (error) {}
+  }
+
+  function applyDashboardView(dashboardValue) {
+    try {
+      var dashboard = isObject(dashboardValue) ? dashboardValue : {};
+      var dashboardRoot = query("[data-project-dashboard]");
+      if (!dashboardRoot || !trimString(dashboard.schema_version, "")) { return false; }
+
+      var readiness = Number(dashboard.readiness_percent);
+      readiness = Number.isFinite(readiness) ? Math.max(0, Math.min(100, readiness)) : 0;
+      setText(query("[data-dashboard-readiness-summary]", dashboardRoot), "Technisch bereit: " + String(Math.round(readiness)) + " %");
+      var readinessMeter = query("[data-dashboard-readiness-meter]", dashboardRoot);
+      setHidden(readinessMeter, false);
+      if (readinessMeter) {
+        readinessMeter.setAttribute("aria-label", String(Math.round(readiness)) + " Prozent technisch bereit");
+        var readinessFill = readinessMeter.querySelector("i");
+        if (readinessFill) { readinessFill.style.setProperty("--vp-meter-value", String(readiness) + "%"); }
+      }
+
+      var portfolio = isObject(dashboard.portfolio) ? dashboard.portfolio : {};
+      queryAll("[data-dashboard-published-count]", dashboardRoot).forEach(function updatePublished(element) {
+        setText(element, String(Math.max(0, Number(portfolio.published_workspace_count) || 0)));
+      });
+      if (portfolio.team_count !== null && portfolio.team_count !== undefined) {
+        setText(query("[data-dashboard-team-count]", dashboardRoot), String(Math.max(0, Number(portfolio.team_count) || 0)));
+      }
+      if (portfolio.cost_center) {
+        setText(query("[data-dashboard-cost-center]", dashboardRoot), trimString(portfolio.cost_center, ""));
+      }
+
+      var systemsRoot = query("[data-dashboard-systems]", dashboardRoot);
+      var doc = getDocument();
+      if (systemsRoot && doc) {
+        clearChildren(systemsRoot);
+        (Array.isArray(dashboard.systems) ? dashboard.systems : []).forEach(function renderSystem(systemValue) {
+          var system = isObject(systemValue) ? systemValue : {};
+          var status = trimString(system.status, "neutral").toLowerCase();
+          if (["ready", "pending", "attention", "error", "neutral"].indexOf(status) === -1) { status = "neutral"; }
+          var article = doc.createElement("article");
+          article.className = "vp-project-system vp-project-system--" + status;
+          var dot = doc.createElement("span");
+          dot.className = "vp-project-system__dot";
+          dot.setAttribute("aria-hidden", "true");
+          var content = doc.createElement("div");
+          var label = doc.createElement("strong");
+          label.textContent = trimString(system.label, "");
+          var detail = doc.createElement("small");
+          detail.textContent = trimString(system.detail, "");
+          content.appendChild(label);
+          content.appendChild(detail);
+          article.appendChild(dot);
+          article.appendChild(content);
+          systemsRoot.appendChild(article);
+        });
+      }
+
+      var insightsRoot = query("[data-dashboard-insights]", dashboardRoot);
+      if (insightsRoot && doc) {
+        clearChildren(insightsRoot);
+        (Array.isArray(dashboard.insights) ? dashboard.insights : []).forEach(function renderInsight(insightValue) {
+          var insight = isObject(insightValue) ? insightValue : {};
+          var tone = trimString(insight.tone, "info").toLowerCase();
+          if (["info", "warning", "danger", "success"].indexOf(tone) === -1) { tone = "info"; }
+          var article = doc.createElement("article");
+          article.className = "vp-project-insight vp-project-insight--" + tone;
+          var title = doc.createElement("strong");
+          title.textContent = trimString(insight.title, "");
+          var textNode = doc.createElement("span");
+          textNode.textContent = trimString(insight.text, "");
+          article.appendChild(title);
+          article.appendChild(textNode);
+          insightsRoot.appendChild(article);
+        });
+      }
+
+      setDashboardDerivedPending(false);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async function refreshDashboardFromServer() {
+    try {
+      if (!state.canViewSettings || !query("[data-project-dashboard]")) { return false; }
+      var contextPath = normalizeSameOriginPath(
+        state.config && state.config.paths && state.config.paths.context,
+        "",
+        "/ui/project"
+      );
+      if (!contextPath) { return false; }
+      var response = await requestJson(contextPath, { method: "GET", allowedPrefix: "/ui/project" });
+      var projectView = isObject(response.project_view) ? response.project_view : isObject(response.project) ? response.project : {};
+      var dashboard = isObject(response.project_dashboard)
+        ? response.project_dashboard
+        : isObject(projectView.dashboard)
+          ? projectView.dashboard
+          : {};
+      return applyDashboardView(dashboard);
+    } catch (error) {
+      setDashboardDerivedPending(true);
+      return false;
     }
   }
 
@@ -2219,12 +2599,10 @@
       var visibility = normalizeVisibility(getValue(refs.visibility), "private");
       var addressText = getValue(refs.addressText);
       var name = getValue(refs.name);
-
-      return {
+      var payload = {
         name: name,
         title: name,
         description: getValue(refs.description),
-        cost_center: getValue(refs.costCenter),
         address_text: addressText,
         address_mapbox_id: getValue(refs.addressMapboxId),
         address: {
@@ -2232,8 +2610,74 @@
         },
         visibility: visibility
       };
+
+      // Management fields are sent only after an explicit change. This keeps
+      // ordinary autosaves from replacing existing settings with empty values.
+      if (state.costCenterDirty && canManageProjectSettings() && refs.costCenter) {
+        payload.cost_center = getValue(refs.costCenter);
+      }
+      if (state.dashboardDirty && canManageProjectSettings()) {
+        payload.settings = {
+          dashboard: {
+            budget_total: getValue(refs.budgetTotal),
+            cost_actual: getValue(refs.costActual),
+            target_date: getValue(refs.targetDate),
+            completion_percent: getValue(refs.completionPercent),
+            planned_hours: getValue(refs.plannedHours),
+            logged_hours: getValue(refs.loggedHours),
+            gross_floor_area_m2: getValue(refs.grossFloorAreaM2)
+          }
+        };
+      }
+
+      return payload;
     } catch (error) {
       return {};
+    }
+  }
+
+  function validateOptionalDashboardNumber(errors, element, field, label, minimum, maximum) {
+    try {
+      if (!element) { return; }
+      var raw = getValue(element).replace(",", ".");
+      if (!raw) { return; }
+      var value = Number(raw);
+      var invalidInput = !!(element.validity && element.validity.badInput);
+      if (invalidInput || !Number.isFinite(value) || value < minimum || value > maximum) {
+        errors.push({
+          field: field,
+          element: element,
+          message: label + " muss zwischen " + String(minimum) + " und " + String(maximum) + " liegen."
+        });
+      }
+    } catch (error) {
+      errors.push({ field: field, element: element, message: label + " ist ungültig." });
+    }
+  }
+
+  function validateOptionalDashboardDate(errors, element) {
+    try {
+      if (!element) { return; }
+      var raw = getValue(element);
+      if (!raw) { return; }
+      var match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+      var valid = false;
+      if (match) {
+        var year = Number(match[1]);
+        var month = Number(match[2]);
+        var day = Number(match[3]);
+        var date = new Date(Date.UTC(year, month - 1, day));
+        valid = date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+      }
+      if (!valid) {
+        errors.push({
+          field: "target_date",
+          element: element,
+          message: "Zieldatum muss ein gültiges Datum sein."
+        });
+      }
+    } catch (error) {
+      errors.push({ field: "target_date", element: element, message: "Zieldatum ist ungültig." });
     }
   }
 
@@ -2265,6 +2709,16 @@
           element: state.refs.visibility,
           message: "Bitte wähle eine gültige Sichtbarkeit."
         });
+      }
+
+      if (isObject(payload.settings) && isObject(payload.settings.dashboard)) {
+        validateOptionalDashboardNumber(errors, state.refs.budgetTotal, "budget_total", "Gesamtbudget", 0, 1000000000000);
+        validateOptionalDashboardNumber(errors, state.refs.costActual, "cost_actual", "Ist-Kosten", 0, 1000000000000);
+        validateOptionalDashboardNumber(errors, state.refs.plannedHours, "planned_hours", "Geplante Stunden", 0, 100000000);
+        validateOptionalDashboardNumber(errors, state.refs.loggedHours, "logged_hours", "Gebuchte Stunden", 0, 100000000);
+        validateOptionalDashboardNumber(errors, state.refs.completionPercent, "completion_percent", "Fortschritt", 0, 100);
+        validateOptionalDashboardNumber(errors, state.refs.grossFloorAreaM2, "gross_floor_area_m2", "Bruttogrundfläche", 0, 1000000000);
+        validateOptionalDashboardDate(errors, state.refs.targetDate);
       }
 
       errors.forEach(function mark(error) {
@@ -2299,6 +2753,13 @@
       var refs = state.refs || {};
       var p = sanitizeProjectForBrowser(isObject(project) ? project : {});
       var address = isObject(p.address) ? p.address : {};
+      var projectSettings = isObject(p.settings) ? p.settings : {};
+      var dashboardView = isObject(p.dashboard) ? p.dashboard : {};
+      var dashboardSettings = isObject(dashboardView.settings)
+        ? dashboardView.settings
+        : isObject(projectSettings.dashboard)
+          ? projectSettings.dashboard
+          : dashboardView;
       var publicId = pickString([p.public_id, p.publicId, p.project_public_id, p.projectPublicId], "");
       var isNew = toBooleanSafe(p.is_new !== undefined ? p.is_new : p.isNew, false) || !trimString(publicId, "");
 
@@ -2309,13 +2770,41 @@
       setValue(refs.name, p.name || p.display_name || p.displayName || "");
       setValue(refs.description, p.description || "");
       setValue(refs.costCenter, p.cost_center || p.costCenter || "");
+      setValue(refs.budgetTotal, dashboardSettings.budget_total);
+      setValue(refs.costActual, dashboardSettings.cost_actual);
+      setValue(refs.targetDate, dashboardSettings.target_date);
+      setValue(refs.completionPercent, dashboardSettings.completion_percent);
+      setValue(refs.plannedHours, dashboardSettings.planned_hours);
+      setValue(refs.loggedHours, dashboardSettings.logged_hours);
+      setValue(refs.grossFloorAreaM2, dashboardSettings.gross_floor_area_m2);
       setValue(refs.addressText, p.address_text || p.addressText || address.text || "");
       setValue(refs.addressMapboxId, "");
       setVisibility(p.visibility || state.config.projectVisibility || "private", { silent: true });
 
       state.currentProject = safeClone(p);
       state.isNew = isNew;
-      state.originalPayload = collectPayload();
+      state.dashboardDirty = false;
+      state.costCenterDirty = false;
+      var originalPayload = collectPayload();
+      if (state.canManageSettings) {
+        if (refs.costCenter) {
+          originalPayload.cost_center = getValue(refs.costCenter);
+        }
+        if (refs.budgetTotal || refs.costActual || refs.targetDate || refs.completionPercent) {
+          originalPayload.settings = {
+            dashboard: {
+              budget_total: getValue(refs.budgetTotal),
+              cost_actual: getValue(refs.costActual),
+              target_date: getValue(refs.targetDate),
+              completion_percent: getValue(refs.completionPercent),
+              planned_hours: getValue(refs.plannedHours),
+              logged_hours: getValue(refs.loggedHours),
+              gross_floor_area_m2: getValue(refs.grossFloorAreaM2)
+            }
+          };
+        }
+      }
+      state.originalPayload = originalPayload;
       applyLifecycleState(p, {});
       setConfigured(toBooleanSafe(p.is_configured !== undefined ? p.is_configured : p.isConfigured, false), p.setup_status || p.setupStatus || "draft");
 
@@ -2328,6 +2817,7 @@
         refs.form.setAttribute("data-project-form-can-edit", canWriteProject() ? "true" : "false");
       }
       updateAddressCounter();
+      syncDashboardPreview();
       setDirty(false);
     } catch (error) {}
   }
@@ -2509,8 +2999,9 @@
     try {
       var opts = isObject(options) ? options : {};
       var method = trimString(opts.method, "GET").toUpperCase();
+      var allowedGetPrefix = opts.allowedPrefix === "/ui/project" ? "/ui/project" : "/v1/projects";
       var target = method === "GET"
-        ? normalizeSameOriginPath(url, "", "/v1/projects")
+        ? normalizeSameOriginPath(url, "", allowedGetPrefix)
         : normalizeMutationUrl(url, "");
 
       if (!target) {
@@ -2654,6 +3145,7 @@
       }
 
       updateAddressCounter();
+      setDashboardDerivedPending(true);
       setDirty(true);
       setRootState("saved", false);
       setAlert("", "");
@@ -2703,6 +3195,8 @@
       config.isNew = !!state.isNew;
       config.canEdit = !!state.canEdit;
       config.canManage = !!state.canManage;
+      config.canViewSettings = !!state.canViewSettings;
+      config.canManageSettings = !!state.canManageSettings;
       config.canMutate = !!state.canMutate;
       config.readOnly = !!state.readOnly;
       config.publicViewer = !!state.publicViewer;
@@ -2786,6 +3280,8 @@
         accessMode: state.accessMode,
         projectRole: state.projectRole,
         visibility: normalizeVisibility(project.visibility || getValue(state.refs.visibility), "private"),
+        workspace: "project",
+        workspaceMode: "project",
         chunkReady: state.chunkReady,
         chunkProvisioningStatus: state.chunkProvisioningStatus,
         chunkAccessSyncStatus: state.chunkAccessSyncStatus,
@@ -2818,7 +3314,7 @@
     }
   }
 
-  function redirectAfterCreate(detail) {
+  function finishCreateNavigation(detail) {
     try {
       var project = detail && detail.project ? detail.project : state.currentProject;
       var url = normalizeSafeRedirectUrl(detail && detail.redirectUrl, project);
@@ -2826,19 +3322,20 @@
         return false;
       }
 
-      setTimeout(function runRedirect() {
-        try {
-          if (window.parent && window.parent !== window) {
-            window.parent.location.assign(url);
-          } else {
-            window.location.assign(url);
-          }
-        } catch (error) {
-          try {
-            window.location.assign(url);
-          } catch (_) {}
-        }
-      }, 250);
+      // The App shell consumes the already emitted project events and swaps only
+      // its workspace iframe. Keep this frame's history canonical without a
+      // parent/top-level navigation or a full-page reload.
+      var win = getWindow();
+      if (win.history && typeof win.history.replaceState === "function") {
+        win.history.replaceState(
+          {
+            vectoplanProjectId: getProjectPublicId(project),
+            vectoplanWorkspace: "project"
+          },
+          "",
+          url
+        );
+      }
       return true;
     } catch (error) {
       return false;
@@ -2927,6 +3424,9 @@
       }
 
       var detail = updateAfterSave(response, wasNew);
+      if (!wasNew) {
+        await refreshDashboardFromServer();
+      }
       var outcome = saveOutcome(response, wasNew);
       if (outcome.warning || !isAutoSave) {
         setAlert(outcome.warning ? "warning" : "success", outcome.message);
@@ -2934,7 +3434,7 @@
         setAlert("", "");
       }
       if (wasNew && state.projectPersisted) {
-        redirectAfterCreate(detail);
+        finishCreateNavigation(detail);
       }
       return true;
     } catch (error) {
@@ -2943,12 +3443,15 @@
 
       if (isPersistedProjectResponse(errorPayload, normalized.status)) {
         var persistedDetail = updateAfterSave(errorPayload, wasNew);
+        if (!wasNew) {
+          await refreshDashboardFromServer();
+        }
         var persistedOutcome = saveOutcome(errorPayload, wasNew);
         state.lastError = normalized;
         setRootState("error", false);
         setAlert("warning", persistedOutcome.message || "Projekt wurde gespeichert; die externe Bereitstellung benötigt eine Reparatur.");
         if (wasNew && state.projectPersisted) {
-          redirectAfterCreate(persistedDetail);
+          finishCreateNavigation(persistedDetail);
         }
         return true;
       }
@@ -2991,6 +3494,7 @@
           description: state.originalPayload.description,
           cost_center: state.originalPayload.cost_center,
           costCenter: state.originalPayload.cost_center,
+          settings: isObject(state.originalPayload.settings) ? state.originalPayload.settings : {},
           address_text: state.originalPayload.address_text,
           addressText: state.originalPayload.address_text,
           address: {
@@ -3009,6 +3513,9 @@
       clearValidation();
       setAlert("", "");
       setDirty(false);
+      if (!state.isNew) {
+        void refreshDashboardFromServer();
+      }
       return true;
     } catch (error) {
       return false;
@@ -3114,7 +3621,7 @@
       addListener(refs.form, "submit", onSubmit);
       addListener(refs.reset, "click", onResetClick);
 
-      [refs.name, refs.description, refs.costCenter, refs.addressText].forEach(function wireInput(element) {
+      [refs.name, refs.description, refs.addressText].forEach(function wireInput(element) {
         addListener(element, "input", function onInput() {
           if (!canWriteProject()) { return; }
           removeFieldError(element);
@@ -3123,6 +3630,44 @@
         addListener(element, "change", function onChange() {
           if (!canWriteProject()) { return; }
           removeFieldError(element);
+          markDirtyFromInput();
+        });
+      });
+
+      addListener(refs.costCenter, "input", function onCostCenterInput() {
+        if (!canManageProjectSettings()) { return; }
+        state.costCenterDirty = true;
+        removeFieldError(refs.costCenter);
+        markDirtyFromInput();
+      });
+      addListener(refs.costCenter, "change", function onCostCenterChange() {
+        if (!canManageProjectSettings()) { return; }
+        state.costCenterDirty = true;
+        removeFieldError(refs.costCenter);
+        markDirtyFromInput();
+      });
+
+      [
+        refs.budgetTotal,
+        refs.costActual,
+        refs.targetDate,
+        refs.completionPercent,
+        refs.plannedHours,
+        refs.loggedHours,
+        refs.grossFloorAreaM2
+      ].forEach(function wireDashboardInput(element) {
+        addListener(element, "input", function onDashboardInput() {
+          if (!canManageProjectSettings()) { return; }
+          state.dashboardDirty = true;
+          removeFieldError(element);
+          syncDashboardPreview();
+          markDirtyFromInput();
+        });
+        addListener(element, "change", function onDashboardChange() {
+          if (!canManageProjectSettings()) { return; }
+          state.dashboardDirty = true;
+          removeFieldError(element);
+          syncDashboardPreview();
           markDirtyFromInput();
         });
       });
@@ -3176,11 +3721,39 @@
       var readonly = !!isReadonly;
       var disabled = readonly || !canWriteProject();
 
-      [refs.name, refs.description, refs.costCenter, refs.addressText].forEach(function syncControl(control) {
+      [
+        refs.name,
+        refs.description,
+        refs.addressText
+      ].forEach(function syncProjectControl(control) {
         try {
           if (!control) { return; }
           control.disabled = disabled;
           if (disabled) {
+            control.setAttribute("aria-readonly", "true");
+            control.setAttribute("data-readonly", "true");
+          } else {
+            control.removeAttribute("aria-readonly");
+            control.removeAttribute("data-readonly");
+          }
+        } catch (error) {}
+      });
+
+      var settingsDisabled = disabled || !state.canManageSettings;
+      [
+        refs.costCenter,
+        refs.budgetTotal,
+        refs.costActual,
+        refs.targetDate,
+        refs.completionPercent,
+        refs.plannedHours,
+        refs.loggedHours,
+        refs.grossFloorAreaM2
+      ].forEach(function syncSettingsControl(control) {
+        try {
+          if (!control) { return; }
+          control.disabled = settingsDisabled;
+          if (settingsDisabled) {
             control.setAttribute("aria-readonly", "true");
             control.setAttribute("data-readonly", "true");
           } else {
@@ -3324,6 +3897,8 @@
       var roleCanManage = state.isNew ? state.projectRole === "owner" : !!ROLE_CAN_MANAGE[state.projectRole];
       state.canEdit = toBooleanSafe(state.config.canEdit, false) && roleCanEdit && !state.readOnly && !state.publicViewer && !state.authUnavailable && !state.userBlocked && !state.accessBlocked && !identityMismatch && (state.persistent || state.demoMode);
       state.canManage = toBooleanSafe(state.config.canManage, false) && roleCanManage && !state.publicViewer && !state.readOnly && !state.demoMode && !state.authUnavailable && !state.userBlocked && !state.accessBlocked && !identityMismatch;
+      state.canViewSettings = toBooleanSafe(state.config.canViewSettings, false) && state.persistent && !state.publicViewer && !state.demoMode && !state.authUnavailable && !state.userBlocked && !state.accessBlocked && !identityMismatch;
+      state.canManageSettings = toBooleanSafe(state.config.canManageSettings, false) && state.canViewSettings && state.canEdit && !state.readOnly;
       state.canMutate = toBooleanSafe(state.config.canMutate, state.canEdit) && state.canEdit;
       state.currentProject = sanitizeProjectForBrowser(state.config.project || {});
       applyLifecycleState(state.currentProject, state.config);
@@ -3331,6 +3906,8 @@
       state.readOnly = true;
       state.canEdit = false;
       state.canManage = false;
+      state.canViewSettings = false;
+      state.canManageSettings = false;
       state.canMutate = false;
       state.identityConsistent = false;
     }
@@ -3370,6 +3947,8 @@
         isNew: state.isNew,
         canEdit: state.canEdit,
         canManage: state.canManage,
+        canViewSettings: state.canViewSettings,
+        canManageSettings: state.canManageSettings,
         canMutate: state.canMutate,
         demoMode: state.demoMode,
         publicViewer: state.publicViewer,
@@ -3428,6 +4007,8 @@
         isNew: state.isNew,
         canEdit: state.canEdit,
         canManage: state.canManage,
+        canViewSettings: state.canViewSettings,
+        canManageSettings: state.canManageSettings,
         canMutate: state.canMutate,
         canWrite: canWriteProject(),
         disabledReason: disabledReason(),
@@ -3456,6 +4037,8 @@
         requestId: state.requestId,
         lastResponseStatus: state.lastResponseStatus,
         isDirty: state.isDirty,
+        dashboardDirty: state.dashboardDirty,
+        costCenterDirty: state.costCenterDirty,
         isSaving: state.isSaving,
         isLoading: state.isLoading,
         lastSavedAt: state.lastSavedAt,
@@ -3508,7 +4091,11 @@
       lifecycleStateFrom: lifecycleStateFrom,
       isPersistedProjectResponse: isPersistedProjectResponse,
       normalizeProjectRole: normalizeProjectRole,
-      isTrustedMessageEvent: isTrustedMessageEvent
+      isTrustedMessageEvent: isTrustedMessageEvent,
+      isBerlinDefaultFallback: isBerlinDefaultFallback,
+      normalizeGeocoderSuggestion: normalizeGeocoderSuggestion,
+      geocoderSuggestionValue: geocoderSuggestionValue,
+      geocoderSuggestionDisplayLabel: geocoderSuggestionDisplayLabel
     }
   };
 

@@ -144,6 +144,7 @@ try:
         get_or_create_embed_policy,
         get_project_result,
         get_project_service_status,
+        list_filecloud_projects_result,
         list_project_memberships,
         list_project_service_links,
         list_project_versions,
@@ -166,6 +167,7 @@ except Exception:  # pragma: no cover
     ensure_project_chunk_link_result = None  # type: ignore
     get_or_create_embed_policy = None  # type: ignore
     get_project_result = None  # type: ignore
+    list_filecloud_projects_result = None  # type: ignore
     list_project_memberships = None  # type: ignore
     list_project_service_links = None  # type: ignore
     list_project_versions = None  # type: ignore
@@ -1967,6 +1969,7 @@ def projects_status():
             },
             "routes": {
                 "list": "/v1/projects",
+                "filecloud_catalog": "/v1/projects/filecloud-catalog",
                 "create": "/v1/projects",
                 "detail": "/v1/projects/<project_id>",
                 "sidebar": "/v1/projects/sidebar",
@@ -2047,6 +2050,35 @@ def projects_list():
 
     except Exception as exc:
         return _exception_response("projects_list failed", exc, code="projects_list_failed")
+
+
+@bp.get("/v1/projects/filecloud-catalog")
+def projects_filecloud_catalog():
+    """Return only the member metadata Filecloud needs for its WebDAV root."""
+    try:
+        service_error = _service_unavailable_if_missing(
+            list_filecloud_projects_result,
+            "project_service",
+        )
+        if service_error is not None:
+            return service_error
+
+        persistent_error = _require_persistent_context()
+        if persistent_error is not None:
+            return persistent_error
+
+        result = list_filecloud_projects_result(
+            user_id=_current_user_id_optional(),
+            limit=_request_int("limit", 500),
+            offset=_request_int("offset", 0),
+        )
+        return _result_response(result)
+    except Exception as exc:
+        return _exception_response(
+            "projects_filecloud_catalog failed",
+            exc,
+            code="filecloud_projects_load_failed",
+        )
 
 
 @bp.get("/v1/projects/sidebar")
@@ -2150,12 +2182,22 @@ def geocoding_suggest():
             extra={"retryable": bool(getattr(exc, "retryable", False))},
         )
 
+    fallback_used = any(
+        isinstance(item, Mapping)
+        and bool(
+            item.get("is_fallback")
+            or item.get("source") == "default_berlin"
+            or item.get("provider") == "fallback/default_berlin"
+        )
+        for item in items
+    )
     return _json_response(
         {
             "ok": True,
             "items": items,
-            "provider": "mapbox",
-            "attribution": "Mapbox",
+            "provider": "default_berlin" if fallback_used else "mapbox",
+            "attribution": None if fallback_used else "Mapbox",
+            "fallback_used": fallback_used,
             "status": geocoding_status() if callable(geocoding_status) else {},
         },
         200,

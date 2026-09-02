@@ -60,6 +60,11 @@ except Exception:  # pragma: no cover
     current_app = None  # type: ignore
     request = None  # type: ignore
 
+try:
+    from services.project_dashboard_service import build_project_dashboard_view
+except Exception:  # pragma: no cover
+    build_project_dashboard_view = None  # type: ignore
+
 
 # ─────────────────────────────────────────────────────────────
 # Constants
@@ -111,6 +116,7 @@ RESERVED_EXTRA_CONTEXT_KEYS = frozenset(
         "workspace",
         "request_info",
         "project_workspace_context",
+        "project_dashboard",
     }
 )
 
@@ -2326,6 +2332,21 @@ def _build_access_view(
             and not user_blocked
             and not access_blocked
         )
+        show_project_dashboard = bool(
+            can_view_settings
+            and persistent
+            and not is_new
+            and not demo_mode
+            and not public_viewer
+            and not auth_unavailable
+            and not user_blocked
+            and not access_blocked
+        )
+        can_edit_project_dashboard = bool(
+            show_project_dashboard
+            and can_manage_settings
+            and form_can_edit
+        )
         show_management_locked = bool(
             not is_new
             and not show_management_sections
@@ -2439,6 +2460,10 @@ def _build_access_view(
                 "formCanEdit": form_can_edit,
                 "show_management_sections": show_management_sections,
                 "showManagementSections": show_management_sections,
+                "show_project_dashboard": show_project_dashboard,
+                "showProjectDashboard": show_project_dashboard,
+                "can_edit_project_dashboard": can_edit_project_dashboard,
+                "canEditProjectDashboard": can_edit_project_dashboard,
                 "show_management_locked": show_management_locked,
                 "showManagementLocked": show_management_locked,
             }
@@ -3169,7 +3194,20 @@ def build_project_workspace_context_result(
 
         project_public_id = _safe_str(project_view.get("public_id"), "new" if resolved_is_new else "", 240)
         show_management_sections = _safe_bool(access_view.get("show_management_sections"), False)
+        show_project_dashboard = _safe_bool(access_view.get("show_project_dashboard"), False)
         paths = _build_paths(project_public_id, resolved_is_new, show_management_sections)
+        project_dashboard: Dict[str, Any] = {}
+        if show_project_dashboard and not resolved_is_new and callable(build_project_dashboard_view):
+            try:
+                project_dashboard = _safe_dict(
+                    build_project_dashboard_view(
+                        project_view,
+                        chunk=chunk_view,
+                        publication=publication_view,
+                    )
+                )
+            except Exception:
+                warnings.append("project_dashboard_build_failed")
 
         if normalized_workspace == WORKSPACE_EDITOR3D and not _safe_bool(workspace_access_view.get("allowed"), False):
             warnings.append(_safe_str(workspace_access_view.get("reason"), "editor3d_not_ready", 240))
@@ -3220,6 +3258,10 @@ def build_project_workspace_context_result(
                 "canTransfer": _safe_bool(access_view.get("can_transfer"), False),
                 "can_embed": _safe_bool(access_view.get("can_embed"), False),
                 "canEmbed": _safe_bool(access_view.get("can_embed"), False),
+                "can_view_settings": _safe_bool(access_view.get("can_view_settings"), False),
+                "canViewSettings": _safe_bool(access_view.get("can_view_settings"), False),
+                "can_manage_settings": _safe_bool(access_view.get("can_manage_settings"), False),
+                "canManageSettings": _safe_bool(access_view.get("can_manage_settings"), False),
                 "can_view_team": _safe_bool(access_view.get("can_view_team"), False),
                 "canViewTeam": _safe_bool(access_view.get("can_view_team"), False),
                 "can_manage_team": _safe_bool(access_view.get("can_manage_team"), False),
@@ -3236,6 +3278,10 @@ def build_project_workspace_context_result(
                 "formCanEdit": _safe_bool(access_view.get("form_can_edit"), False),
                 "show_management_sections": show_management_sections,
                 "showManagementSections": show_management_sections,
+                "show_project_dashboard": show_project_dashboard,
+                "showProjectDashboard": show_project_dashboard,
+                "can_edit_project_dashboard": _safe_bool(access_view.get("can_edit_project_dashboard"), False),
+                "canEditProjectDashboard": _safe_bool(access_view.get("can_edit_project_dashboard"), False),
                 "show_management_locked": _safe_bool(access_view.get("show_management_locked"), False),
                 "showManagementLocked": _safe_bool(access_view.get("show_management_locked"), False),
                 "workspace_ready": _safe_bool(workspace_access_view.get("workspace_ready"), False),
@@ -3275,6 +3321,8 @@ def build_project_workspace_context_result(
         project_view["demoMode"] = ui_flags_view["demoMode"]
         project_view["access_mode"] = ui_flags_view["access_mode"]
         project_view["accessMode"] = ui_flags_view["accessMode"]
+        if project_dashboard:
+            project_view["dashboard"] = project_dashboard
 
         workspace_runtime = {
             "workspace": normalized_workspace,
@@ -3315,6 +3363,7 @@ def build_project_workspace_context_result(
             "is_new": resolved_is_new,
             "workspace": normalized_workspace,
             "paths": paths,
+            "project_dashboard": project_dashboard,
             "request_info": request_info,
             "project_workspace_context": {
                 "ok": True,
@@ -3663,6 +3712,7 @@ def build_project_workspace_fallback_context(
             "is_new": True,
             "workspace": WORKSPACE_PROJECT,
             "paths": _build_paths("new", True, False),
+            "project_dashboard": {},
             "request_info": {},
             "project_workspace_context": {
                 "ok": False,
@@ -3707,6 +3757,7 @@ def build_project_workspace_fallback_context(
             "is_new": True,
             "workspace": WORKSPACE_PROJECT,
             "paths": {},
+            "project_dashboard": {},
             "request_info": {},
             "project_workspace_context": {
                 "ok": False,

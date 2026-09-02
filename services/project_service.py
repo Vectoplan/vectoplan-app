@@ -55,6 +55,11 @@ import unicodedata
 import uuid
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set
 
+from services.project_dashboard_service import (
+    ProjectDashboardValidationError,
+    normalize_project_dashboard_patch,
+)
+
 
 try:
     from flask import current_app, has_app_context
@@ -1699,7 +1704,10 @@ def _mapbox_geocoding_enabled() -> bool:
     try:
         if callable(mapbox_geocoding_status):
             status = _safe_dict(mapbox_geocoding_status())
-            return bool(status.get("enabled") and status.get("configured"))
+            return bool(
+                (status.get("enabled") and status.get("configured"))
+                or status.get("fallback_available")
+            )
 
         return _config_bool("VECTOPLAN_APP_MAPBOX_GEOCODING_ENABLED", False)
     except Exception:
@@ -1806,7 +1814,16 @@ def _enrich_project_payload_with_mapbox(
         "",
         255,
     )
-    if selected_mapbox_id and resolved_mapbox_id != selected_mapbox_id:
+    is_fallback_result = bool(
+        result.get("is_fallback")
+        or _safe_str(result.get("provider"), "", 80) == "fallback/default_berlin"
+        or _safe_str(result.get("source"), "", 80) == "default_berlin"
+    )
+    if (
+        selected_mapbox_id
+        and resolved_mapbox_id != selected_mapbox_id
+        and not is_fallback_result
+    ):
         raise ProjectGeocodingError(
             "project_address_selection_mismatch",
             "Die ausgew\u00e4hlte Adresse konnte nicht eindeutig best\u00e4tigt werden.",
@@ -3012,16 +3029,26 @@ def serialize_project(
             except Exception:
                 pass
 
+        try:
+            serialization_permissions = get_project_permission_result(
+                project,
+                user_id=user_id,
+                allow_public_view=True,
+            )
+            private_settings_allowed = bool(serialization_permissions.can_view_settings)
+        except Exception:
+            private_settings_allowed = False
+
         if hasattr(project, "to_dict"):
             try:
                 payload = project.to_dict(
-                    include_private=True,
+                    include_private=private_settings_allowed,
                     include_paths=True,
                     include_refs=True,
                     include_address=True,
                 )
             except TypeError:
-                payload = project.to_dict(include_private=True)
+                payload = project.to_dict(include_private=private_settings_allowed)
         else:
             payload = {
                 "id": getattr(project, "id", None),
@@ -3061,8 +3088,20 @@ def serialize_project(
         payload["is_unlisted"] = False if is_demo else visibility == PROJECT_VISIBILITY_UNLISTED
         payload["isUnlisted"] = False if is_demo else visibility == PROJECT_VISIBILITY_UNLISTED
 
-        payload["cost_center"] = _project_cost_center(project)
-        payload["costCenter"] = payload["cost_center"]
+        if private_settings_allowed:
+            payload["settings"] = _safe_dict(getattr(project, "settings", None))
+            payload["cost_center"] = _project_cost_center(project)
+            payload["costCenter"] = payload["cost_center"]
+        else:
+            for private_key in (
+                "settings",
+                "dashboard",
+                "project_dashboard",
+                "projectDashboard",
+                "cost_center",
+                "costCenter",
+            ):
+                payload.pop(private_key, None)
 
         payload["is_demo"] = is_demo
         payload["isDemo"] = is_demo
@@ -3249,6 +3288,71 @@ def serialize_project_list(
     return result
 
 
+def serialize_filecloud_project(
+    project: Any,
+    *,
+    user_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Return the deliberately narrow metadata contract used by Filecloud.
+
+    Cost center is member-visible here even though it remains part of the
+    private project settings in the generic project API. No other setting is
+    copied into this projection.
+    """
+    try:
+        if project is None or _project_is_demo(project):
+            return {}
+        if permissions_get_project_permission_result is None:
+            return {}
+
+        access = permissions_get_project_permission_result(
+            project,
+            user_id=user_id,
+            allow_public_view=False,
+        )
+        role = _safe_str(getattr(access, "role", None), "", 40).lower()
+        if not (
+            role in {ROLE_OWNER, ROLE_ADMIN, ROLE_EDITOR, ROLE_VIEWER}
+            and _safe_bool(getattr(access, "authenticated", False), False)
+            and _safe_bool(getattr(access, "persistent", False), False)
+            and _safe_bool(getattr(access, "is_member", False), False)
+            and not _safe_bool(getattr(access, "is_public_viewer", False), False)
+            and not _safe_bool(getattr(access, "is_unlisted_viewer", False), False)
+            and not _safe_bool(getattr(access, "demo_mode", False), False)
+            and not _safe_bool(getattr(access, "blocked", False), False)
+            and _safe_bool(getattr(access, "can_view", False), False)
+        ):
+            return {}
+
+        public_id = _project_public_id(project)
+        if not public_id:
+            return {}
+
+        city = _safe_str(getattr(project, "city", None), "", 120)
+        address_text = get_project_address_text(project, allow_structured_fallback=True)
+        can_edit = _safe_bool(getattr(access, "can_edit", False), False)
+        can_manage = _safe_bool(getattr(access, "can_manage", False), False)
+        return {
+            "public_id": public_id,
+            "name": _safe_str(getattr(project, "name", None), public_id, 160),
+            "cost_center": _project_cost_center(project),
+            "city": city,
+            "address": {
+                "text": address_text,
+                "city": city or None,
+            },
+            "permissions": {
+                "role": role,
+                "can_view": True,
+                "can_edit": can_edit,
+                "can_manage": can_manage,
+                "read_only": bool(role == ROLE_VIEWER or not can_edit),
+            },
+        }
+    except Exception:
+        return {}
+
+
 # ─────────────────────────────────────────────────────────────
 # Project list / query
 # ─────────────────────────────────────────────────────────────
@@ -3260,6 +3364,7 @@ def list_projects_for_user(
     include_unlisted: bool = False,
     include_deleted: bool = False,
     include_demo: bool = False,
+    include_account_projects: bool = True,
     search: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
@@ -3304,7 +3409,7 @@ def list_projects_for_user(
         if auth_user_id and hasattr(Project, "auth_owner_user_id"):
             conditions.append(Project.auth_owner_user_id == auth_user_id)
 
-        if account_id and hasattr(Project, "auth_account_id"):
+        if include_account_projects and account_id and hasattr(Project, "auth_account_id"):
             conditions.append(Project.auth_account_id == account_id)
 
         if membership_project_ids:
@@ -3393,6 +3498,44 @@ def list_project_sidebar_items(
 # Project creation / update payload
 # ─────────────────────────────────────────────────────────────
 
+
+def _merge_project_settings(existing: Any, incoming: Any) -> Dict[str, Any]:
+    """Recursively merge browser-managed settings without dropping siblings."""
+    merged = _safe_dict(existing)
+    for key, value in _safe_dict(incoming).items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _merge_project_settings(merged.get(key), value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _normalize_project_settings_patch(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ProjectDashboardValidationError(
+            "project_settings_mapping_required",
+            "settings muss ein Objekt sein.",
+            field="settings",
+        )
+
+    normalized = dict(value)
+    dashboard_keys = [
+        key
+        for key in ("dashboard", "project_dashboard", "projectDashboard")
+        if key in normalized
+    ]
+    if len(dashboard_keys) > 1:
+        raise ProjectDashboardValidationError(
+            "project_dashboard_field_duplicate",
+            "Die Steuerungsdaten dürfen nur einmal übermittelt werden.",
+        )
+    if dashboard_keys:
+        dashboard_key = dashboard_keys[0]
+        dashboard_patch = normalize_project_dashboard_patch(normalized.pop(dashboard_key))
+        normalized["dashboard"] = dashboard_patch
+    return normalized
+
+
 def _normalize_project_payload(
     data: Optional[Mapping[str, Any]],
     *,
@@ -3400,13 +3543,19 @@ def _normalize_project_payload(
     existing_project: Any = None,
 ) -> Dict[str, Any]:
     source = _safe_dict(data)
+    settings_supplied = "settings" in source
+    normalized_settings_patch = (
+        _normalize_project_settings_patch(source.get("settings"))
+        if settings_supplied
+        else {}
+    )
     present: Set[str] = set()
 
     try:
         payload: Dict[str, Any] = {
             "__present": present,
             "metadata": _safe_dict(source.get("metadata") or source.get("meta")),
-            "settings": _safe_dict(source.get("settings")),
+            "settings": {},
             "service_refs": {},
             "artifact_refs": {},
         }
@@ -3426,9 +3575,17 @@ def _normalize_project_payload(
             payload["description"] = description or None
             present.add("description")
 
+        if settings_supplied:
+            payload["settings"] = _merge_project_settings(
+                getattr(existing_project, "settings", None) if for_update else {},
+                normalized_settings_patch,
+            )
+            present.add("settings")
+
         if not for_update or _payload_has(source, "cost_center", "costCenter"):
-            existing_settings = _safe_dict(getattr(existing_project, "settings", None))
-            existing_settings.update(_safe_dict(source.get("settings")))
+            existing_settings = _safe_dict(payload.get("settings"))
+            if "settings" not in present:
+                existing_settings = _safe_dict(getattr(existing_project, "settings", None))
             cost_center = _safe_str(
                 source.get("cost_center")
                 if source.get("cost_center") is not None
@@ -3784,6 +3941,15 @@ def _ensure_or_update_demo_project(
             permission=PERMISSION_EDIT,
         )
 
+    demo_request = _safe_dict(data)
+    if "settings" in demo_request or _payload_has(demo_request, "cost_center", "costCenter"):
+        raise PermissionDenied(
+            "Projekteinstellungen sind im Demo-Modus nicht änderbar.",
+            code="project_settings_permission_denied",
+            status_code=403,
+            permission="manage_settings",
+        )
+
     if ensure_demo_project_for_context is None:
         raise PermissionDenied(
             "Demo-Projekt-Service ist nicht verfügbar.",
@@ -3857,12 +4023,16 @@ def create_project(
     user_id: Optional[int] = None,
     commit: bool = True,
     provision_chunk: Optional[bool] = None,
+    defer_external_provisioning: bool = False,
 ) -> Any:
     """Create the App project first, then provision Chunk in a second transaction.
 
     This ordering deliberately avoids pretending that the App and Chunk databases
     share one transaction. A Chunk failure never deletes the already-created App
-    project; instead the project retains a retryable provisioning state.
+    project; instead the project retains a retryable provisioning state. API
+    creation may defer external provisioning so the durable App project can be
+    returned immediately; Editor/CAD access and the existing retry routes then
+    complete the missing service links.
     """
     uid = require_persistent_actor(user_id)
     context = get_actor_context(uid)
@@ -4017,7 +4187,22 @@ def create_project(
         _db_rollback_safely()
         raise
 
-    if should_provision and commit:
+    if should_provision and commit and defer_external_provisioning:
+        try:
+            setattr(
+                project,
+                "_last_chunk_operation_result",
+                ProjectOperationResult(
+                    ok=True,
+                    payload={"ok": True, "deferred": True},
+                    status_code=202,
+                    code="chunk_provisioning_deferred",
+                ),
+            )
+        except Exception:
+            pass
+
+    if should_provision and commit and not defer_external_provisioning:
         try:
             chunk_result = ensure_project_chunk_link(
                 project,
@@ -4060,7 +4245,16 @@ def create_project(
                 _db_rollback_safely()
 
     if commit:
-        core_result = _ensure_project_core_link_best_effort(project, actor_user_id=uid)
+        core_result = (
+            {
+                "ok": True,
+                "status": "pending",
+                "deferred": True,
+                "code": "core_provisioning_deferred",
+            }
+            if defer_external_provisioning and _core_provisioning_enabled()
+            else _ensure_project_core_link_best_effort(project, actor_user_id=uid)
+        )
         try:
             setattr(project, "_last_core_operation_result", core_result)
         except Exception:
@@ -4097,6 +4291,22 @@ def update_project(
         uid = require_persistent_actor(user_id)
         auth_user_id = require_actor_auth_user_id(uid)
         require_project_permission(project, PERMISSION_EDIT, uid, allow_public_view=False)
+
+    request_data = _safe_dict(data)
+    settings_requested = bool(
+        "settings" in request_data
+        or _payload_has(request_data, "cost_center", "costCenter")
+    )
+    if settings_requested:
+        if _project_is_demo(project) or uid is None:
+            raise PermissionDenied(
+                "Projekteinstellungen sind im Demo-Modus nicht änderbar.",
+                permission="manage_settings",
+                project_id=_project_public_id(project),
+                status_code=403,
+                code="project_settings_permission_denied",
+            )
+        require_project_permission(project, "manage_settings", uid, allow_public_view=False)
 
     before = serialize_project(project, user_id=uid, include_permissions=False)
     payload = _normalize_project_payload(data, for_update=True, existing_project=project)
@@ -5031,6 +5241,19 @@ def _geocoding_error_result(exc: ProjectGeocodingError) -> ProjectOperationResul
     )
 
 
+def _dashboard_validation_error_result(exc: ProjectDashboardValidationError) -> ProjectOperationResult:
+    return ProjectOperationResult(
+        ok=False,
+        status_code=422,
+        code=getattr(exc, "code", "project_dashboard_invalid"),
+        error=getattr(exc, "message", str(exc)),
+        payload={
+            "ok": False,
+            "field": getattr(exc, "field", "settings.dashboard"),
+        },
+    )
+
+
 def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[int] = None) -> ProjectOperationResult:
     try:
         context = get_actor_context(user_id)
@@ -5074,7 +5297,12 @@ def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[i
                 code="demo_project_ready",
             )
 
-        project = create_project(data, user_id=user_id, commit=True)
+        project = create_project(
+            data,
+            user_id=user_id,
+            commit=True,
+            defer_external_provisioning=True,
+        )
         chunk = _project_chunk_refs(project)
         last_result = getattr(project, "_last_chunk_operation_result", None)
         last_result_payload = last_result.to_dict() if hasattr(last_result, "to_dict") else {}
@@ -5119,7 +5347,10 @@ def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[i
             last_core_result.get("ok")
             and last_core_result.get("status") in {"ready", "disabled"}
         ) or core_ref.get("status") == "ready"
-        if not core_ready:
+        if not core_ready and _safe_str(last_core_result.get("status"), "", 40) == "pending":
+            if code == "project_created":
+                code = "project_created_services_pending"
+        elif not core_ready:
             code = "project_created_core_repair_required"
             if _core_provisioning_required():
                 response_ok = False
@@ -5146,6 +5377,10 @@ def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[i
             "redirect_url": project_public_url(project),
             "chunk": chunk,
             "core": last_core_result or core_ref or {"ok": core_ready, "status": "ready" if core_ready else "pending"},
+            "external_provisioning_deferred": bool(
+                _safe_dict(last_result_payload).get("deferred")
+                or last_core_result.get("deferred")
+            ),
         }
         if last_result_payload:
             payload["chunk_operation"] = last_result_payload
@@ -5159,6 +5394,8 @@ def create_project_result(data: Optional[Dict[str, Any]], *, user_id: Optional[i
             error=error,
         )
 
+    except ProjectDashboardValidationError as exc:
+        return _dashboard_validation_error_result(exc)
     except ProjectGeocodingError as exc:
         return _geocoding_error_result(exc)
     except PermissionDenied as exc:
@@ -5214,6 +5451,8 @@ def update_project_result(
             code="project_updated",
         )
 
+    except ProjectDashboardValidationError as exc:
+        return _dashboard_validation_error_result(exc)
     except ProjectGeocodingError as exc:
         return _geocoding_error_result(exc)
 
@@ -5390,6 +5629,94 @@ def get_project_result(
             ok=False,
             status_code=500,
             code="project_load_failed",
+            error=str(exc),
+        )
+
+
+def list_filecloud_projects_result(
+    *,
+    user_id: Optional[int] = None,
+    limit: int = 500,
+    offset: int = 0,
+) -> ProjectOperationResult:
+    """List only persistent projects owned by or explicitly shared with a user."""
+    try:
+        context = get_actor_context(user_id)
+        persistent = _safe_bool(context.get("persistent"), False)
+        authenticated = _safe_bool(
+            context.get("authenticated") or context.get("is_authenticated"),
+            False,
+        )
+        if (
+            _safe_bool(context.get("blocked"), False)
+            or _safe_bool(context.get("demo_mode") or context.get("is_demo"), False)
+            or not persistent
+            or not authenticated
+        ):
+            return ProjectOperationResult(
+                ok=False,
+                payload={"ok": False, "items": [], "projects": [], "total": 0},
+                status_code=403,
+                code="filecloud_persistent_member_required",
+                error="Filecloud ist nur für persistente Projektmitglieder verfügbar.",
+            )
+
+        uid = get_actor_user_id_optional(user_id)
+        if not uid:
+            return ProjectOperationResult(
+                ok=False,
+                payload={"ok": False, "items": [], "projects": [], "total": 0},
+                status_code=403,
+                code="filecloud_persistent_member_required",
+                error="Filecloud ist nur für persistente Projektmitglieder verfügbar.",
+            )
+
+        limit_value = _query_limit(limit, 500, 500)
+        offset_value = max(_safe_int(offset, 0), 0)
+        projects = list_projects_for_user(
+            user_id=uid,
+            include_public=False,
+            include_unlisted=False,
+            include_deleted=False,
+            include_demo=False,
+            include_account_projects=False,
+            limit=limit_value,
+            offset=offset_value,
+        )
+        items = [
+            item
+            for item in (
+                serialize_filecloud_project(project, user_id=uid)
+                for project in projects
+            )
+            if item
+        ]
+        next_offset = (
+            offset_value + len(projects)
+            if len(projects) == limit_value
+            else None
+        )
+        return ProjectOperationResult(
+            ok=True,
+            payload={
+                "ok": True,
+                "items": items,
+                "projects": items,
+                "total": len(items),
+                "limit": limit_value,
+                "offset": offset_value,
+                "next_offset": next_offset,
+            },
+            status_code=200,
+            code="filecloud_projects_loaded",
+        )
+    except Exception as exc:
+        _log_exception("list_filecloud_projects_result failed", exc)
+        return ProjectOperationResult(
+            ok=False,
+            payload={"ok": False, "items": [], "projects": [], "total": 0},
+            status_code=500,
+            code="filecloud_projects_load_failed",
             error=str(exc),
         )
 
@@ -5778,6 +6105,7 @@ __all__ = [
     "list_project_service_links",
     "list_project_sidebar_items",
     "list_project_versions",
+    "list_filecloud_projects_result",
     "list_projects_for_user",
     "list_projects_result",
     "normalize_role",
@@ -5797,6 +6125,7 @@ __all__ = [
     "sync_project_chunk_access_result",
     "revoke_project_member",
     "serialize_project",
+    "serialize_filecloud_project",
     "serialize_project_list",
     "serialize_project_permissions",
     "serialize_project_sidebar_item",

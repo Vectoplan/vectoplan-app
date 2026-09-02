@@ -1473,6 +1473,12 @@ function handleProjectSaved(detail = {}, eventType = "vectoplan:project:saved") 
     } catch (_) {}
 
     relayProjectNavigation(detail, eventType);
+    if (eventType === "vectoplan:project:created") {
+      void setWorkspaceMode("project", {
+        persist: false,
+        reason: eventType,
+      });
+    }
     showStatus("");
   } catch (error) {
     try {
