@@ -29,6 +29,7 @@
   - ui_flags
   - chunk / chunk_view / chunk_access_sync
   - workspace_runtime
+  - project_dashboard
   - paths / routes
   - is_new
 
@@ -47,6 +48,9 @@
 
 {% set _project_raw = project_view|default(project|default(current_project|default({}, true), true), true) %}
 {% set _project = _project_raw if _project_raw is mapping else {} %}
+
+{% set _project_dashboard_raw = project_dashboard|default(_project.get('dashboard', {}), true) %}
+{% set _project_dashboard = _project_dashboard_raw if _project_dashboard_raw is mapping else {} %}
 
 {% set _current_user_raw = current_user_view|default(current_user|default({}, true), true) %}
 {% set _current_user = _current_user_raw if _current_user_raw is mapping else {} %}
@@ -192,6 +196,9 @@
 {% set _can_view_settings_raw = _ui_flags.get('can_view_settings', _ui_flags.get('canViewSettings', _access.get('can_view_settings', _access.get('canViewSettings', _permissions.get('view_settings', _can_manage))))) %}
 {% set _can_view_settings = true if _can_view_settings_raw in _truthy_values else false %}
 
+{% set _can_manage_settings_raw = _ui_flags.get('can_manage_settings', _ui_flags.get('canManageSettings', _access.get('can_manage_settings', _access.get('canManageSettings', _permissions.get('manage_settings', _can_manage))))) %}
+{% set _can_manage_settings = true if _can_manage_settings_raw in _truthy_values else false %}
+
 {% set _can_manage_team_raw = _ui_flags.get('can_manage_team', _ui_flags.get('canManageTeam', _access.get('can_manage_team', _access.get('canManageTeam', _permissions.get('manage_team', _can_manage))))) %}
 {% set _can_manage_team = true if _can_manage_team_raw in _truthy_values else false %}
 
@@ -216,6 +223,7 @@
   {% if _project_role not in ['owner', 'admin'] %}
     {% set _can_manage = false %}
     {% set _can_view_settings = false %}
+    {% set _can_manage_settings = false %}
     {% set _can_manage_team = false %}
     {% set _can_publish = false %}
     {% set _can_delete = false %}
@@ -230,6 +238,7 @@
   {% set _can_delete = false %}
   {% set _can_transfer = false %}
   {% set _can_view_settings = false %}
+  {% set _can_manage_settings = false %}
   {% set _can_manage_team = false %}
   {% set _can_publish = false %}
   {% set _can_command = false %}
@@ -244,6 +253,7 @@
   {% set _can_delete = false %}
   {% set _can_transfer = false %}
   {% set _can_view_settings = false %}
+  {% set _can_manage_settings = false %}
   {% set _can_manage_team = false %}
   {% set _can_publish = false %}
   {% set _can_command = false %}
@@ -256,6 +266,7 @@
   {% set _can_delete = false %}
   {% set _can_transfer = false %}
   {% set _can_view_settings = false %}
+  {% set _can_manage_settings = false %}
   {% set _can_manage_team = false %}
   {% set _can_publish = false %}
   {% set _can_command = false %}
@@ -276,6 +287,8 @@
 
 {% set _form_can_edit = true if _can_edit and not _read_only and (_persistent or _demo_mode) and not _public_viewer and not _auth_unavailable and not _user_blocked and not _access_blocked and not _identity_blocked else false %}
 {% set _show_management_sections = true if _can_manage and _persistent and not _is_new and not _demo_mode and not _public_viewer and not _read_only and not _auth_unavailable and not _user_blocked and not _access_blocked and not _identity_blocked else false %}
+{% set _show_project_dashboard = true if _can_view_settings and _persistent and not _is_new and not _demo_mode and not _public_viewer and not _auth_unavailable and not _user_blocked and not _access_blocked and not _identity_blocked else false %}
+{% set _dashboard_can_manage = true if _show_project_dashboard and _can_manage_settings and _form_can_edit else false %}
 {% set _show_management_locked = true if not _is_new and not _show_management_sections and not _public_viewer and not _demo_mode else false %}
 {% set _viewer_landing = true if not _is_new and (_public_viewer or _project_role == 'viewer') else false %}
 
@@ -366,6 +379,7 @@
   'delete': _can_delete,
   'transfer': _can_transfer,
   'view_settings': _can_view_settings,
+  'manage_settings': _can_manage_settings,
   'manage_team': _can_manage_team,
   'publish': _can_publish,
   'command': _can_command,
@@ -400,6 +414,8 @@
   'canTransfer': _can_transfer,
   'can_view_settings': _can_view_settings,
   'canViewSettings': _can_view_settings,
+  'can_manage_settings': _can_manage_settings,
+  'canManageSettings': _can_manage_settings,
   'can_manage_team': _can_manage_team,
   'canManageTeam': _can_manage_team,
   'can_publish': _can_publish,
@@ -481,6 +497,8 @@
   'display_name': _project_display_name,
   'displayName': _project_display_name,
   'description': _project_description,
+  'cost_center': _project_cost_center,
+  'costCenter': _project_cost_center,
   'address_text': _address_text,
   'addressText': _address_text,
   'address': {'text': _address_text},
@@ -503,7 +521,8 @@
   'accessMode': _access_mode,
   'access': _browser_access,
   'publication': _browser_publication,
-  'chunk': _browser_chunk
+  'chunk': _browser_chunk,
+  'dashboard': {'settings': _project_dashboard.get('settings', {})} if _dashboard_can_manage else {}
 } %}
 
 {% set _browser_user = {
@@ -601,7 +620,7 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
 
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ _project_public_id|default('new', true)|e }}-mobile-shell-20260818-1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/project_workspace.css') }}?v={{ _project_public_id|default('new', true)|e }}-project-cockpit-20260901-2">
 
   <script>
     (function () {
@@ -661,6 +680,7 @@
           canEdit: {{ _form_can_edit|tojson }},
           canManage: {{ _can_manage|tojson }},
           canViewSettings: {{ _can_view_settings|tojson }},
+          canManageSettings: {{ _can_manage_settings|tojson }},
           canManageTeam: {{ _can_manage_team|tojson }},
           canPublish: {{ _can_publish|tojson }},
           canCommand: {{ _can_command|tojson }},
@@ -777,6 +797,8 @@
     data-project-can-view="{{ 'true' if _can_view else 'false' }}"
     data-project-can-edit="{{ 'true' if _form_can_edit else 'false' }}"
     data-project-can-manage="{{ 'true' if _can_manage else 'false' }}"
+    data-project-can-view-settings="{{ 'true' if _can_view_settings else 'false' }}"
+    data-project-can-manage-settings="{{ 'true' if _can_manage_settings else 'false' }}"
     data-project-can-command="{{ 'true' if _can_command else 'false' }}"
     data-project-can-materialize="{{ 'true' if _can_materialize else 'false' }}"
     data-project-demo-mode="{{ 'true' if _demo_mode else 'false' }}"
@@ -1018,6 +1040,9 @@
         </header>
       </section>
     {% else %}
+      {% if _show_project_dashboard %}
+        {% include "viewer/partials/project_dashboard.html" %}
+      {% endif %}
       <form
         id="projectForm"
         class="vp-project-form"
@@ -1040,6 +1065,18 @@
         <input type="hidden" id="projectPublicId" name="public_id" value="{{ _project_public_id|e }}">
         <input type="hidden" id="projectIsNew" name="is_new" value="{{ 'true' if _is_new else 'false' }}">
         <input type="hidden" id="projectAccessMode" name="access_mode" value="{{ _access_mode|e }}">
+
+        {% if _show_management_sections %}
+          <details class="vp-project-settings" data-project-settings-disclosure>
+            <summary class="vp-project-settings__summary">
+              <span>
+                <strong>Projekteinstellungen</strong>
+                <small>Basisdaten, Steuerungswerte, Standort, Sichtbarkeit, Veröffentlichung und Team</small>
+              </span>
+              <span class="vp-project-settings__chevron" aria-hidden="true"></span>
+            </summary>
+            <div class="vp-project-settings__content">
+        {% endif %}
 
         <section class="vp-project-card" aria-labelledby="projectBasicsTitle">
           <header class="vp-project-card__header">
@@ -1086,7 +1123,7 @@
                data-i18n-placeholder="server.app.viewer.project.textarea_placeholder.kurze_beschreibung_nutzung_ziel_oder_b.50ff4ff3">{{ _project_description|e }}</textarea>
             </div>
 
-            <div class="vp-project-field vp-project-field--wide">
+            {% if _dashboard_can_manage %}<div class="vp-project-field vp-project-field--wide">
               <label class="vp-project-label" for="projectCostCenter" data-i18n="vectoplan.server.app.viewer.project.label.kostenstelle.6e729454">Kostenstelle</label>
               <input
                 id="projectCostCenter"
@@ -1097,12 +1134,16 @@
                 maxlength="80"
                 placeholder="Wird automatisch erzeugt"
                 data-project-cost-center
-                {% if not _form_can_edit %}disabled{% endif %}
+                {% if not _dashboard_can_manage %}disabled{% endif %}
                data-i18n-placeholder="server.app.viewer.project.input_placeholder.wird_automatisch_erzeugt.774e0055">
               <p class="vp-project-help" data-i18n="vectoplan.server.app.viewer.project.p.wird_automatisch_erzeugt_kann_aber_jed.49477d50">Wird automatisch erzeugt, kann aber jederzeit geändert werden. Verknüpft Buchhaltungsbelege eindeutig mit Projekt und Bauleiter-Freigabe.</p>
-            </div>
+            </div>{% endif %}
           </div>
         </section>
+
+        {% if _dashboard_can_manage %}
+          {% include "viewer/partials/project_dashboard_settings.html" %}
+        {% endif %}
 
         {% include "viewer/partials/project_address.html" %}
         {% include "viewer/partials/project_visibility.html" %}
@@ -1121,6 +1162,11 @@
               </div>
             </header>
           </section>
+        {% endif %}
+
+        {% if _show_management_sections %}
+            </div>
+          </details>
         {% endif %}
 
         {% if _is_new and _form_can_edit %}
@@ -1157,7 +1203,7 @@
   </main>
 
   {% if not _viewer_landing %}
-  <script src="{{ url_for('static', filename='js/project/project_form.js') }}?v={{ _project_public_id|default('new', true)|e }}-autosave-20260730"></script>
+  <script src="{{ url_for('static', filename='js/project/project_form.js') }}?v={{ _project_public_id|default('new', true)|e }}-project-cockpit-20260901-2"></script>
   {% endif %}
 
   {% if _show_management_sections %}

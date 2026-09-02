@@ -1,0 +1,101 @@
+{% set _dashboard = _project_dashboard|default({}, true) %}
+{% set _financial = _dashboard.get('financial', {}) %}
+{% set _schedule = _dashboard.get('schedule', {}) %}
+{% set _workload = _dashboard.get('workload', {}) %}
+{% set _portfolio = _dashboard.get('portfolio', {}) %}
+{% set _cost_ratio = _financial.get('cost_ratio_percent') %}
+{% set _cost_ratio_meter = 0 if _cost_ratio is none else _cost_ratio %}
+{% set _readiness = _dashboard.get('readiness_percent') %}
+{% set _readiness_meter = 0 if _readiness is none else _readiness %}
+
+<section class="vp-project-dashboard" aria-labelledby="projectDashboardTitle" data-project-dashboard data-dashboard-currency-symbol="{{ _financial.get('currency_symbol', '€')|e }}">
+  <header class="vp-project-dashboard__header">
+    <div>
+      <p class="vp-project-dashboard__eyebrow">Projektsteuerung</p>
+      <h2 id="projectDashboardTitle">Projekt-Cockpit</h2>
+      <p>Kosten, Termine und technische Einsatzbereitschaft auf einen Blick – ohne geschätzte Fantasiewerte.</p>
+      <div class="vp-project-dashboard__facts" aria-label="Projektkennzahlen">
+        <span data-dashboard-gfa-fact {% if _portfolio.get('gross_floor_area_m2') is none %}hidden{% endif %}><strong data-dashboard-gfa>{{ _portfolio.get('gross_floor_area_display', '—')|e }}</strong> m² BGF</span>
+        {% if _portfolio.get('team_count') is not none %}<span data-dashboard-team-fact><strong data-dashboard-team-count>{{ _portfolio.get('team_count') }}</strong> Teammitglieder</span>{% endif %}
+        {% if _portfolio.get('cost_center') %}<span data-dashboard-cost-center-fact>Kostenstelle <strong data-dashboard-cost-center>{{ _portfolio.get('cost_center')|e }}</strong></span>{% endif %}
+        <span><strong data-dashboard-published-count>{{ _portfolio.get('published_workspace_count', 0) }}</strong> Freigaben</span>
+      </div>
+    </div>
+    <nav class="vp-project-dashboard__actions" aria-label="Projekt öffnen">
+      {% if _map_path %}
+        <a class="vp-project-dashboard__action" href="{{ _map_path|e }}">Karte</a>
+      {% endif %}
+      {% if _editor3d_path %}
+        <a class="vp-project-dashboard__action vp-project-dashboard__action--primary" href="{{ _editor3d_path|e }}">3D-Editor öffnen</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  <div class="vp-project-dashboard__metrics">
+    <article class="vp-project-metric vp-project-metric--money">
+      <span class="vp-project-metric__label">Projektbudget</span>
+      <strong data-dashboard-budget-total>{{ _financial.get('budget_display', '—')|e }}</strong>
+      <span data-dashboard-cost-summary>Ist: {{ _financial.get('cost_display', '—')|e }} · Rest: {{ _financial.get('remaining_display', '—')|e }}</span>
+      <div class="vp-project-meter" data-dashboard-budget-meter aria-label="{{ _cost_ratio_meter|e }} Prozent des Budgets verbraucht" {% if _cost_ratio is none %}hidden{% endif %}>
+        <i style="--vp-meter-value: {{ [100, _cost_ratio_meter]|min }}%"></i>
+      </div>
+    </article>
+
+    <article class="vp-project-metric vp-project-metric--progress">
+      <span class="vp-project-metric__label">Projektfortschritt</span>
+      <strong data-dashboard-progress>{% if _dashboard.get('delivery_progress_percent') is not none %}{{ _dashboard.get('delivery_progress_percent') }} %{% else %}—{% endif %}</strong>
+      <span data-dashboard-readiness-summary>Technisch bereit: {{ _readiness_meter }} %</span>
+      <div class="vp-project-meter" data-dashboard-readiness-meter aria-label="{{ _readiness_meter }} Prozent technisch bereit">
+        <i style="--vp-meter-value: {{ _readiness_meter }}%"></i>
+      </div>
+    </article>
+
+    <article class="vp-project-metric vp-project-metric--schedule">
+      <span class="vp-project-metric__label">Zieltermin</span>
+      <strong data-dashboard-target-date>{{ _schedule.get('target_display', '—')|e }}</strong>
+      <span data-dashboard-target-remaining>{{ _schedule.get('remaining_display', 'Noch nicht geplant')|e }}</span>
+    </article>
+
+    <article class="vp-project-metric vp-project-metric--workload">
+      <span class="vp-project-metric__label">Arbeitszeit</span>
+      <strong data-dashboard-logged-hours>{{ _workload.get('logged_display', '—')|e }} h</strong>
+      <span data-dashboard-planned-hours>von {{ _workload.get('planned_display', '—')|e }} h geplant</span>
+    </article>
+  </div>
+
+  <p class="vp-project-dashboard__refresh-note" data-dashboard-derived-pending hidden>Systemstatus und nächste Schritte werden nach dem Speichern serverseitig aktualisiert.</p>
+
+  <div class="vp-project-dashboard__lower" data-dashboard-derived>
+    <section class="vp-project-dashboard__systems" aria-labelledby="projectSystemsTitle">
+      <div class="vp-project-dashboard__section-title">
+        <h3 id="projectSystemsTitle">Systemstatus</h3>
+        <span><strong data-dashboard-published-count>{{ _portfolio.get('published_workspace_count', 0) }}</strong> Freigaben</span>
+      </div>
+      <div class="vp-project-system-grid" data-dashboard-systems>
+        {% for system in _dashboard.get('systems', []) %}
+          <article class="vp-project-system vp-project-system--{{ system.get('status', 'neutral')|e }}">
+            <span class="vp-project-system__dot" aria-hidden="true"></span>
+            <div>
+              <strong>{{ system.get('label', '')|e }}</strong>
+              <small>{{ system.get('detail', '')|e }}</small>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <aside class="vp-project-dashboard__insights" aria-labelledby="projectInsightsTitle">
+      <div class="vp-project-dashboard__section-title">
+        <h3 id="projectInsightsTitle">Nächste Schritte</h3>
+      </div>
+      <div data-dashboard-insights>
+      {% for insight in _dashboard.get('insights', []) %}
+        <article class="vp-project-insight vp-project-insight--{{ insight.get('tone', 'info')|e }}">
+          <strong>{{ insight.get('title', '')|e }}</strong>
+          <span>{{ insight.get('text', '')|e }}</span>
+        </article>
+      {% endfor %}
+      </div>
+    </aside>
+  </div>
+</section>

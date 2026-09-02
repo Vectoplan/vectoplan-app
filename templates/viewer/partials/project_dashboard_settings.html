@@ -1,0 +1,39 @@
+{% set _dashboard_settings = _project_dashboard.get('settings', {}) if _project_dashboard is mapping else {} %}
+<section class="vp-project-card vp-project-card--dashboard-settings" aria-labelledby="projectPlanningTitle">
+  <header class="vp-project-card__header">
+    <div>
+      <h2 id="projectPlanningTitle" class="vp-project-card__title">Steuerungsdaten</h2>
+      <p class="vp-project-card__text">Diese realen Plan- und Ist-Werte speisen das Projekt-Cockpit. Leere Felder bleiben dort bewusst leer.</p>
+    </div>
+  </header>
+  <div class="vp-project-grid vp-project-grid--dashboard">
+    <div class="vp-project-field">
+      <label class="vp-project-label" for="projectBudgetTotal">Budget gesamt (€)</label>
+      <input id="projectBudgetTotal" class="vp-project-input" name="budget_total" type="number" min="0" max="1000000000000" step="0.01" inputmode="decimal" value="{{ _dashboard_settings.get('budget_total', '') if _dashboard_settings.get('budget_total') is not none else '' }}" data-project-dashboard-field {% if not _dashboard_can_manage %}disabled{% endif %}>
+    </div>
+    <div class="vp-project-field">
+      <label class="vp-project-label" for="projectCostActual">Kosten Ist (€)</label>
+      <input id="projectCostActual" class="vp-project-input" name="cost_actual" type="number" min="0" max="1000000000000" step="0.01" inputmode="decimal" value="{{ _dashboard_settings.get('cost_actual', '') if _dashboard_settings.get('cost_actual') is not none else '' }}" data-project-dashboard-field {% if not _dashboard_can_manage %}disabled{% endif %}>
+    </div>
+    <div class="vp-project-field">
+      <label class="vp-project-label" for="projectTargetDate">Zieltermin</label>
+      <input id="projectTargetDate" class="vp-project-input" name="target_date" type="date" value="{{ _dashboard_settings.get('target_date', '')|e }}" data-project-dashboard-field {% if not _dashboard_can_manage %}disabled{% endif %}>
+    </div>
+    <div class="vp-project-field">
+      <label class="vp-project-label" for="projectCompletionPercent">Projektfortschritt (%)</label>
+      <input id="projectCompletionPercent" class="vp-project-input" name="completion_percent" type="number" min="0" max="100" step="1" inputmode="numeric" value="{{ _dashboard_settings.get('completion_percent', '') if _dashboard_settings.get('completion_percent') is not none else '' }}" data-project-dashboard-field {% if not _dashboard_can_manage %}disabled{% endif %}>
+    </div>
+    <div class="vp-project-field">
+      <label class="vp-project-label" for="projectPlannedHours">Stunden geplant</label>
+      <input id="projectPlannedHours" class="vp-project-input" name="planned_hours" type="number" min="0" max="100000000" step="0.25" inputmode="decimal" value="{{ _dashboard_settings.get('planned_hours', '') if _dashboard_settings.get('planned_hours') is not none else '' }}" data-project-dashboard-field {% if not _dashboard_can_manage %}disabled{% endif %}>
+    </div>
+    <div class="vp-project-field">
+      <label class="vp-project-label" for="projectLoggedHours">Stunden Ist</label>
+      <input id="projectLoggedHours" class="vp-project-input" name="logged_hours" type="number" min="0" max="100000000" step="0.25" inputmode="decimal" value="{{ _dashboard_settings.get('logged_hours', '') if _dashboard_settings.get('logged_hours') is not none else '' }}" data-project-dashboard-field {% if not _dashboard_can_manage %}disabled{% endif %}>
+    </div>
+    <div class="vp-project-field">
+      <label class="vp-project-label" for="projectGrossFloorArea">Bruttogrundfläche (m²)</label>
+      <input id="projectGrossFloorArea" class="vp-project-input" name="gross_floor_area_m2" type="number" min="0" max="1000000000" step="0.01" inputmode="decimal" value="{{ _dashboard_settings.get('gross_floor_area_m2', '') if _dashboard_settings.get('gross_floor_area_m2') is not none else '' }}" data-project-dashboard-field {% if not _dashboard_can_manage %}disabled{% endif %}>
+    </div>
+  </div>
+</section>
