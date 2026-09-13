@@ -3062,7 +3062,7 @@ function wireParcelSelectionBridge() {
         return null;
       }
       const mode = String(state.mode || "boundary") === "setback" ? "setback" : "boundary";
-      const guides = (Array.isArray(state.guides) ? state.guides : []).slice(0, 64).map((value) => {
+      const guides = (Array.isArray(state.guides) ? state.guides : []).slice(0, 256).map((value) => {
         const guide = value && typeof value === "object" ? value : {};
         const start = guide.startLonLat || guide.start_lon_lat;
         const end = guide.endLonLat || guide.end_lon_lat;
@@ -3074,15 +3074,18 @@ function wireParcelSelectionBridge() {
           parcelId,
           startLonLat: coordinates.slice(0, 2),
           endLonLat: coordinates.slice(2, 4),
-          depthMeters: Math.max(1, Math.min(6, Math.round(Number(guide.depthMeters || guide.depth_meters) || 3))),
+          depthMeters: Math.max(parcelId.startsWith("building:") ? 1 : 0, Math.min(512,
+            Math.round(Number.isFinite(Number(guide.depthMeters ?? guide.depth_meters))
+              ? Number(guide.depthMeters ?? guide.depth_meters) : 3))),
         };
       }).filter(Boolean);
       return {
         schemaVersion: "vectoplan-parcel-grid-state.v1",
         mode,
         setbackMeters: Math.max(0, Math.min(20, Number(state.setbackMeters ?? state.setback_meters) || 0)),
-        influenceMeters: Math.max(1, Math.min(6, Math.round(Number(state.influenceMeters ?? state.influence_meters) || 3))),
+        influenceMeters: Math.max(1, Math.min(512, Math.round(Number(state.influenceMeters ?? state.influence_meters) || 3))),
         activeParcelId: String(state.activeParcelId || state.active_parcel_id || "").trim() || null,
+        activeGuideKey: String(state.activeGuideKey || state.active_guide_key || "").trim() || null,
         guides,
       };
     };

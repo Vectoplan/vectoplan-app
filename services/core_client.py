@@ -121,6 +121,10 @@ def ensure_core_project_for_app_project(project: Any) -> dict[str, Any]:
             "source": "vectoplan-app",
             "appProjectStatus": _text(getattr(project, "status", None)),
             "provisioningContract": "app-core-project/0.1",
+            "projectCoordinate": {
+                "longitude": getattr(project, "longitude", None),
+                "latitude": getattr(project, "latitude", None),
+            } if getattr(project, "longitude", None) is not None and getattr(project, "latitude", None) is not None else None,
         },
     }
     encoded_id = urllib.parse.quote(app_project_id, safe="")
